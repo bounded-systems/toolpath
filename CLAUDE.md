@@ -17,6 +17,7 @@ crates/
   toolpath-github/              # derive from GitHub pull requests (REST API)
   toolpath-claude/              # derive from Claude conversation logs
   toolpath-dot/                 # Graphviz DOT rendering
+  toolpath-md/                  # Markdown rendering for LLM consumption
   toolpath-cli/                 # unified CLI (binary: path)
 schema/toolpath.schema.json     # JSON Schema for the format
 examples/*.json                 # 12 example documents (step, path, graph)
@@ -33,7 +34,8 @@ toolpath-cli (binary: path)
  ├── toolpath-git     → toolpath
  ├── toolpath-github  → toolpath
  ├── toolpath-claude  → toolpath, toolpath-convo
- └── toolpath-dot     → toolpath
+ ├── toolpath-dot     → toolpath
+ └── toolpath-md      → toolpath
 ```
 
 No cross-dependencies between satellite crates except `toolpath-claude → toolpath-convo`.
@@ -57,6 +59,7 @@ cargo run -p toolpath-cli -- derive git --repo . --branch main --pretty
 cargo run -p toolpath-cli -- derive github --repo owner/repo --pr 42 --pretty
 cargo run -p toolpath-cli -- derive claude --project /path/to/project
 cargo run -p toolpath-cli -- render dot --input doc.json
+cargo run -p toolpath-cli -- render md --input doc.json --detail full
 cargo run -p toolpath-cli -- query dead-ends --input doc.json
 cargo run -p toolpath-cli -- query ancestors --input doc.json --step-id step-003
 cargo run -p toolpath-cli -- query filter --input doc.json --actor "agent:"
@@ -85,7 +88,7 @@ Tests live alongside the code (`#[cfg(test)] mod tests`), plus `toolpath-cli` ha
 - `toolpath-github`: 28 unit + 2 doc tests (mapping, DAG construction, fixtures)
 - `toolpath-claude`: 216 unit + 5 doc tests (path resolution, conversation reading, query, chaining, watcher, derive)
 - `toolpath-dot`: 30 unit + 2 doc tests (render, visual conventions, escaping)
-- `toolpath-cli`: 120 unit + 8 integration tests (all commands, track sessions, merge, validate, roundtrip)
+- `toolpath-cli`: 126 unit + 24 integration tests (all commands, track sessions, merge, validate, roundtrip, render-md snapshots)
 
 Validate example documents: `for f in examples/*.json; do cargo run -p toolpath-cli -- validate --input "$f"; done`
 
