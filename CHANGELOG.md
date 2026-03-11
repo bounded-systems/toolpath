@@ -2,6 +2,16 @@
 
 All notable changes to the Toolpath workspace are documented here.
 
+## 0.3.0 — toolpath-cli
+
+### toolpath-cli 0.3.0
+
+- Add `render md` subcommand for Markdown output (`path render md --input doc.json [--detail full] [--front-matter]`)
+- Add `derive github` and `list github` subcommands for GitHub PR provenance
+- Update `toolpath-claude` dependency from 0.1.x to 0.6.x (session chaining, enriched conversation data)
+- Add `toolpath-md` and `toolpath-github` as new dependencies
+- Add insta snapshot integration tests for all 12 example documents
+
 ## 0.2.0 — toolpath-github + toolpath-md
 
 ### toolpath-github 0.2.0
