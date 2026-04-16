@@ -28,21 +28,15 @@ One additive schema change is required: an optional `graph_ref` field on
 
 The canonical Toolpath format serializes a `Path` as a single JSON document.
 Producers must buffer the entire path before emitting a valid document. This
-is a poor fit for two recurring use cases:
+is a poor fit for live agent traces: a single writer (e.g., Claude Code)
+records steps as it works, and a consumer tails the file to display
+progress. With the canonical format the writer must either defer writing
+until the session completes, or repeatedly rewrite a growing JSON blob —
+neither of which supports a readable tailed file.
 
-1. **Live agent traces.** A single writer (e.g., Claude Code) records steps
-   as it works, and a consumer tails the file to display progress. With the
-   canonical format the writer must either defer writing until the session
-   completes, or repeatedly rewrite a growing JSON blob — neither of which
-   supports a readable tailed file.
-
-2. **Multi-writer append logs.** Heterogeneous producers — CI, IDE,
-   formatter, git hook — all record changes to the same path. Each producer
-   emits one or more complete steps; no single producer has global knowledge
-   of the path. Producers cannot coordinate to write a single JSON document.
-
-Both cases want an append-only, line-oriented file where each line is a
-self-describing unit that incrementally constructs a `Path` document.
+The streaming format provides an append-only, line-oriented file where
+each line is a self-describing unit that incrementally constructs a `Path`
+document.
 
 ### Goals
 
@@ -156,13 +150,8 @@ policy. Implementations typically sit somewhere on this spectrum:
 | Policy | Tradeoff |
 | ------ | -------- |
 | No sync (OS-buffered) | Fastest. Unflushed lines lost on crash. Appropriate for ephemeral traces. |
-| `fsync` per line | Strongest durability. Highest overhead. Appropriate for multi-writer append logs where each line represents a committed fact. |
-| `fsync` per batch / on close | Compromise. Suits single-writer agent traces that emit many steps in close succession. |
-
-POSIX append semantics guarantee atomic concatenation only for writes
-less than or equal to `PIPE_BUF` (commonly 4096 bytes) when multiple
-writers share a file. Larger lines require external locking or a
-single-writer discipline.
+| `fsync` per line | Strongest durability. Highest overhead. |
+| `fsync` per batch / on close | Compromise. Suits agent traces that emit many steps in close succession. |
 
 ## Line Kinds
 
@@ -475,9 +464,7 @@ intent becomes known at t=0, the diff at t=20s. This was rejected for v1:
 
 - Atomic steps preserve append-only semantics — no line is ever
   conditional on a later line's arrival.
-- Multi-writer append logs (use case B) naturally emit complete steps;
-  there is no partial-step use case there.
-- Live agent traces (use case A) can emit a step as soon as the agent
+- Live agent traces can emit a step as soon as the agent
   knows both the artifact and the change. The "progress before diff is
   ready" case is addressed by emitting a coarser step on arrival and a
   finer step once the diff stabilizes, or by emitting progress updates
@@ -505,9 +492,9 @@ A single file could in principle carry an entire graph — `GraphOpen`,
 then interleaved `PathOpen` / `Step` / `PathClose` blocks scoped by a
 `path` field on every line. That design was rejected because:
 
-- The primary use cases (live agent trace, multi-writer log) have one
-  writer per path. Multiplexing multiple paths into one file adds
-  coordination complexity that none of the use cases need.
+- The primary use case (live agent trace) has one writer per path.
+  Multiplexing multiple paths into one file adds coordination
+  complexity that the use case doesn't need.
 - Graphs already have a composition mechanism (`$ref`). A graph that
   references streaming path files is simpler than a graph-scoped stream
   and composes with the existing model.
