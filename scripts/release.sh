@@ -11,13 +11,16 @@ set -euo pipefail
 # Dependency order:
 #   1. toolpath           (no workspace deps)
 #      toolpath-convo     (no workspace deps)
-#   2. toolpath-git       (depends on toolpath)
-#      toolpath-github    (depends on toolpath)
-#      toolpath-dot       (depends on toolpath)
-#      toolpath-claude    (depends on toolpath, toolpath-convo)
+#   2a. toolpath-git      (depends on toolpath)
+#       toolpath-github   (depends on toolpath)
+#       toolpath-dot      (depends on toolpath)
+#       toolpath-md       (depends on toolpath)
+#       toolpath-claude   (depends on toolpath, toolpath-convo)
+#       toolpath-derive   (depends on toolpath, toolpath-convo)
+#   2b. toolpath-pi       (depends on toolpath, toolpath-convo, toolpath-derive)
 #   3. toolpath-cli       (depends on all of the above)
 
-ALL_CRATES=(toolpath toolpath-convo toolpath-git toolpath-github toolpath-dot toolpath-md toolpath-claude toolpath-cli)
+ALL_CRATES=(toolpath toolpath-convo toolpath-git toolpath-github toolpath-dot toolpath-md toolpath-claude toolpath-derive toolpath-pi toolpath-cli)
 
 DRY_RUN=""
 AUTO_YES=""
@@ -197,17 +200,24 @@ for crate in toolpath toolpath-convo; do
     fi
 done
 
-# Tier 2: satellite crates (depend on tier 1, no cross-deps)
-for crate in toolpath-git toolpath-github toolpath-dot toolpath-md toolpath-claude; do
+# Tier 2a: satellite crates (depend on tier 1 only)
+for crate in toolpath-git toolpath-github toolpath-dot toolpath-md toolpath-claude toolpath-derive; do
     publish "$crate"
 done
 
-# Wait for tier 2 publishes to land before publishing the CLI
-for crate in toolpath-git toolpath-github toolpath-dot toolpath-md toolpath-claude; do
+# Wait for tier 2a to land before publishing tier 2b (toolpath-pi depends on toolpath-derive)
+for crate in toolpath-git toolpath-github toolpath-dot toolpath-md toolpath-claude toolpath-derive; do
     if should_publish "$crate"; then
         wait_for_index "$crate" "$(crate_version "$crate")"
     fi
 done
+
+# Tier 2b: depends on tier 2a (toolpath-derive)
+publish toolpath-pi
+
+if should_publish toolpath-pi; then
+    wait_for_index toolpath-pi "$(crate_version toolpath-pi)"
+fi
 
 # Tier 3: CLI binary (depends on everything above)
 publish toolpath-cli

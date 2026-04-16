@@ -13,9 +13,11 @@ Cargo.toml                      # workspace root (edition 2024, resolver 2)
 crates/
   toolpath/                     # core types, builders, serde, query API
   toolpath-convo/               # provider-agnostic conversation types and traits
+  toolpath-derive/              # shared ConversationView -> toolpath::Path derivation
   toolpath-git/                 # derive from git repos (git2)
   toolpath-github/              # derive from GitHub pull requests (REST API)
   toolpath-claude/              # derive from Claude conversation logs
+  toolpath-pi/                  # derive from Pi (pi.dev) agent session logs
   toolpath-dot/                 # Graphviz DOT rendering
   toolpath-md/                  # Markdown rendering for LLM consumption
   toolpath-cli/                 # unified CLI (binary: path)
@@ -31,14 +33,16 @@ FAQ.md                          # design rationale, FAQ, and open questions
 toolpath-cli (binary: path)
  ├── toolpath           (core types)
  ├── toolpath-convo     (conversation abstraction)
+ ├── toolpath-derive  → toolpath, toolpath-convo
  ├── toolpath-git     → toolpath
  ├── toolpath-github  → toolpath
  ├── toolpath-claude  → toolpath, toolpath-convo
+ ├── toolpath-pi      → toolpath, toolpath-convo, toolpath-derive
  ├── toolpath-dot     → toolpath
  └── toolpath-md      → toolpath
 ```
 
-No cross-dependencies between satellite crates except `toolpath-claude → toolpath-convo`.
+Cross-dependencies between satellite crates: `toolpath-claude → toolpath-convo`, `toolpath-derive → toolpath-convo`, `toolpath-pi → toolpath-convo, toolpath-derive`.
 
 ## Build and test
 
@@ -58,6 +62,7 @@ The binary is called `path` (package: `toolpath-cli`):
 cargo run -p toolpath-cli -- derive git --repo . --branch main --pretty
 cargo run -p toolpath-cli -- derive github --repo owner/repo --pr 42 --pretty
 cargo run -p toolpath-cli -- derive claude --project /path/to/project
+cargo run -p toolpath-cli -- derive pi --project /path/to/project
 cargo run -p toolpath-cli -- render dot --input doc.json
 cargo run -p toolpath-cli -- render md --input doc.json --detail full
 cargo run -p toolpath-cli -- query dead-ends --input doc.json
@@ -66,6 +71,8 @@ cargo run -p toolpath-cli -- query filter --input doc.json --actor "agent:"
 cargo run -p toolpath-cli -- merge doc1.json doc2.json --title "Combined"
 cargo run -p toolpath-cli -- list git --repo .
 cargo run -p toolpath-cli -- list github --repo owner/repo
+cargo run -p toolpath-cli -- list pi
+cargo run -p toolpath-cli -- list pi --project /path/to/project
 cargo run -p toolpath-cli -- track init --file src/main.rs --actor "human:alex"
 cargo run -p toolpath-cli -- validate --input doc.json
 ```
@@ -87,6 +94,8 @@ Tests live alongside the code (`#[cfg(test)] mod tests`), plus `toolpath-cli` ha
 - `toolpath-git`: 33 unit + 3 doc tests (derive, branch detection, diffstat)
 - `toolpath-github`: 28 unit + 2 doc tests (mapping, DAG construction, fixtures)
 - `toolpath-claude`: 216 unit + 5 doc tests (path resolution, conversation reading, query, chaining, watcher, derive)
+- `toolpath-derive`: 30 unit + 1 doc tests (ConversationView -> Path mapping)
+- `toolpath-pi`: ~88 unit tests (types, paths, error, reader, io, provider)
 - `toolpath-dot`: 30 unit + 2 doc tests (render, visual conventions, escaping)
 - `toolpath-cli`: 126 unit + 24 integration tests (all commands, track sessions, merge, validate, roundtrip, render-md snapshots)
 
@@ -119,7 +128,7 @@ When changing a crate's public API (new types, new trait impls, new public metho
 
 **Release script** (`scripts/release.sh`) publishes in dependency order:
 - Tier 1: `toolpath`, `toolpath-convo` (no workspace deps)
-- Tier 2: `toolpath-git`, `toolpath-github`, `toolpath-dot`, `toolpath-claude` (depend on tier 1)
+- Tier 2: `toolpath-git`, `toolpath-github`, `toolpath-dot`, `toolpath-md`, `toolpath-claude`, `toolpath-derive` (depend on tier 1); then `toolpath-pi` (depends on `toolpath-derive`)
 - Tier 3: `toolpath-cli` (depends on everything)
 
 Build the site after changes: `cd site && pnpm run build` (should produce 7 pages).
@@ -132,3 +141,5 @@ Build the site after changes: `cd site && pnpm run build` (should produce 7 page
 - Claude conversation data lives in `~/.claude/projects/` as JSONL files; `toolpath-claude` reads these directly
 - `toolpath-claude` follows session chains by default — Claude Code rotates JSONL files on context overflow; `read_conversation` merges segments, `list_conversations` returns chain heads. `read_segment`/`list_segments` for single-file access. `ChainIndex` makes this incremental.
 - Provider-specific extras convention: `Turn.extra` and `WatcherEvent::Progress.data` use provider-namespaced keys (e.g. `extra["claude"]`). `toolpath-claude` populates `Turn.extra["claude"]` from `ConversationEntry.extra` and `Progress.data["claude"]` from the full entry payload. This lets trait-only consumers access provider metadata (like `subtype` for state inference) without importing provider types.
+- Shared derivation: `toolpath-derive` provides a provider-agnostic `ConversationView → Path` mapping; new conversation providers should build on it rather than re-implementing the mapping.
+- Pi provider: `toolpath-pi` reads Pi session JSONL from `~/.pi/agent/sessions/`. Sessions use a tree (id/parentId) in a single file, and may link to a parent file via `parentSession` in the header. The tree is preserved as a DAG in the derived `Path`.

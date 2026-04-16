@@ -1829,6 +1829,7 @@ dependencies = [
  "toolpath-git",
  "toolpath-github",
  "toolpath-md",
+ "toolpath-pi",
 ]
 
 [[package]]
@@ -1839,6 +1840,17 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror",
+]
+
+[[package]]
+name = "toolpath-derive"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "serde",
+ "serde_json",
+ "toolpath",
+ "toolpath-convo",
 ]
 
 [[package]]
@@ -1877,6 +1889,21 @@ version = "0.2.0"
 dependencies = [
  "serde_json",
  "toolpath",
+]
+
+[[package]]
+name = "toolpath-pi"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "toolpath",
+ "toolpath-convo",
+ "toolpath-derive",
 ]
 
 [[package]]

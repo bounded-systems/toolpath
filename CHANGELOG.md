@@ -2,6 +2,22 @@
 
 All notable changes to the Toolpath workspace are documented here.
 
+## 0.1.0 — toolpath-derive / 0.1.0 — toolpath-pi
+
+### toolpath-derive 0.1.0
+
+- New crate: shared derivation layer converting `toolpath-convo::ConversationView` into `toolpath::v1::Path`
+- Provider-agnostic mapping intended to be consumed by every conversation provider; the Claude provider will migrate to it in a follow-up
+- Depends on `toolpath` and `toolpath-convo` only
+
+### toolpath-pi 0.1.0
+
+- New crate: read Pi (pi.dev) coding-agent session JSONL logs, implement `ConversationProvider`, and derive Toolpath `Path` documents via `toolpath-derive`
+- Reads from `~/.pi/agent/sessions/` by default; base directory is configurable
+- Preserves Pi's in-file conversation tree (id/parentId) as a DAG in the derived `Path`
+- Follows `parentSession` links across session files (bounded depth)
+- CLI subcommands planned: `path derive pi` and `path list pi` (wiring may be merged separately)
+
 ## 0.3.0 — toolpath-cli
 
 ### toolpath-cli 0.3.0

@@ -16,6 +16,14 @@
     "role": "Defines Turn, Role, ConversationView, and the ConversationProvider/ConversationWatcher traits. Provider crates (like toolpath-claude) implement the traits; consumer apps code against them."
   },
   {
+    "name": "toolpath-derive",
+    "version": "0.1.0",
+    "description": "Shared derivation: convert a ConversationView into a Toolpath Path document",
+    "docs": "https://docs.rs/toolpath-derive",
+    "crate": "https://crates.io/crates/toolpath-derive",
+    "role": "Provider-agnostic mapping from `toolpath-convo::ConversationView` to `toolpath::v1::Path`. Conversation providers (Pi, and eventually Claude) build on this instead of re-implementing the mapping."
+  },
+  {
     "name": "toolpath-git",
     "version": "0.1.3",
     "description": "Derive from git repository history",
@@ -38,6 +46,14 @@
     "docs": "https://docs.rs/toolpath-claude",
     "crate": "https://crates.io/crates/toolpath-claude",
     "role": "Reads Claude Code conversation data from ~/.claude/projects/ and maps messages, tool calls, and abandoned approaches to Toolpath documents."
+  },
+  {
+    "name": "toolpath-pi",
+    "version": "0.1.0",
+    "description": "Derive Toolpath provenance documents from Pi (pi.dev) agent session logs",
+    "docs": "https://docs.rs/toolpath-pi",
+    "crate": "https://crates.io/crates/toolpath-pi",
+    "role": "Reads Pi (pi.dev) coding-agent session JSONL from `~/.pi/agent/sessions/`, implements `ConversationProvider`, and derives Toolpath `Path` documents via `toolpath-derive`. Preserves Pi's in-file conversation tree (id/parentId) as a DAG and follows `parentSession` links across files."
   },
   {
     "name": "toolpath-dot",

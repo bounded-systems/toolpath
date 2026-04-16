@@ -64,6 +64,24 @@ pub enum DeriveSource {
         #[arg(long)]
         all: bool,
     },
+    /// Derive from Pi (pi.dev) coding-agent session logs
+    Pi {
+        /// Project path (cwd the session ran in)
+        #[arg(short, long)]
+        project: String,
+
+        /// Specific session ID (default: most recent)
+        #[arg(short, long)]
+        session: Option<String>,
+
+        /// Process all sessions in the project (emits a Graph)
+        #[arg(long)]
+        all: bool,
+
+        /// Override the Pi sessions base directory (default: ~/.pi/agent/sessions)
+        #[arg(long)]
+        base: Option<std::path::PathBuf>,
+    },
 }
 
 pub fn run(source: DeriveSource, pretty: bool) -> Result<()> {
@@ -87,6 +105,12 @@ pub fn run(source: DeriveSource, pretty: bool) -> Result<()> {
             session,
             all,
         } => run_claude(project, session, all, pretty),
+        DeriveSource::Pi {
+            project,
+            session,
+            all,
+            base,
+        } => run_pi(project, session, all, base, pretty),
     }
 }
 
@@ -239,6 +263,64 @@ fn run_claude_with_manager(
         println!("{}", json);
     }
 
+    Ok(())
+}
+
+fn run_pi(
+    project: String,
+    session: Option<String>,
+    all: bool,
+    base: Option<std::path::PathBuf>,
+    pretty: bool,
+) -> Result<()> {
+    let manager = if let Some(path) = base {
+        let resolver = toolpath_pi::PathResolver::new().with_sessions_dir(&path);
+        toolpath_pi::PiConvo::with_resolver(resolver)
+    } else {
+        toolpath_pi::PiConvo::new()
+    };
+    run_pi_with_manager(&manager, project, session, all, pretty)
+}
+
+fn run_pi_with_manager(
+    manager: &toolpath_pi::PiConvo,
+    project: String,
+    session: Option<String>,
+    all: bool,
+    pretty: bool,
+) -> Result<()> {
+    let config = toolpath_pi::DeriveConfig::default();
+
+    let doc: toolpath::v1::Document = if all {
+        let sessions = manager
+            .read_all_sessions(&project)
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
+        if sessions.is_empty() {
+            anyhow::bail!("No Pi sessions found for project: {}", project);
+        }
+        let graph = toolpath_pi::derive::derive_graph(&sessions, None, &config);
+        toolpath::v1::Document::Graph(graph)
+    } else if let Some(sid) = session {
+        let session = manager
+            .read_session(&project, &sid)
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
+        let path = toolpath_pi::derive::derive_path(&session, &config);
+        toolpath::v1::Document::Path(path)
+    } else {
+        let session = manager
+            .most_recent_session(&project)
+            .map_err(|e| anyhow::anyhow!("{}", e))?
+            .ok_or_else(|| anyhow::anyhow!("No Pi sessions found for project: {}", project))?;
+        let path = toolpath_pi::derive::derive_path(&session, &config);
+        toolpath::v1::Document::Path(path)
+    };
+
+    let json = if pretty {
+        doc.to_json_pretty()?
+    } else {
+        doc.to_json()?
+    };
+    println!("{}", json);
     Ok(())
 }
 
@@ -396,6 +478,89 @@ mod tests {
         let result =
             run_claude_with_manager(&manager, "/test/project".to_string(), None, true, false);
         assert!(result.is_ok());
+    }
+
+    fn setup_pi_manager() -> (tempfile::TempDir, toolpath_pi::PiConvo) {
+        let temp = tempfile::tempdir().unwrap();
+        let sessions_dir = temp.path().join(".pi/agent/sessions");
+        let project_dir = sessions_dir.join("--test-project--");
+        std::fs::create_dir_all(&project_dir).unwrap();
+
+        let header = r#"{"type":"session","version":3,"id":"sess-1","timestamp":"2026-04-16T10:00:00Z","cwd":"/test/project"}"#;
+        let msg1 = r#"{"type":"message","id":"m1","timestamp":"2026-04-16T10:00:01Z","message":{"role":"user","content":"Hello","timestamp":1744797601000}}"#;
+        let msg2 = r#"{"type":"message","id":"m2","parentId":"m1","timestamp":"2026-04-16T10:00:02Z","message":{"role":"assistant","content":[{"type":"text","text":"Hi"}],"api":"a","provider":"anthropic","model":"claude-x","usage":{"input":1,"output":1,"cacheRead":0,"cacheWrite":0,"totalTokens":2,"cost":{"input":0.0,"output":0.0,"cacheRead":0.0,"cacheWrite":0.0,"total":0.0}},"stopReason":"stop","timestamp":1744797602000}}"#;
+        std::fs::write(
+            project_dir.join("2026-04-16_sess-1.jsonl"),
+            [header, msg1, msg2].join("\n"),
+        )
+        .unwrap();
+
+        let resolver = toolpath_pi::PathResolver::new().with_sessions_dir(&sessions_dir);
+        let manager = toolpath_pi::PiConvo::with_resolver(resolver);
+        (temp, manager)
+    }
+
+    #[test]
+    fn test_run_pi_session() {
+        let (_temp, manager) = setup_pi_manager();
+        let result = run_pi_with_manager(
+            &manager,
+            "/test/project".to_string(),
+            Some("sess-1".to_string()),
+            false,
+            false,
+        );
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_run_pi_session_pretty() {
+        let (_temp, manager) = setup_pi_manager();
+        let result = run_pi_with_manager(
+            &manager,
+            "/test/project".to_string(),
+            Some("sess-1".to_string()),
+            false,
+            true,
+        );
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_run_pi_most_recent() {
+        let (_temp, manager) = setup_pi_manager();
+        let result =
+            run_pi_with_manager(&manager, "/test/project".to_string(), None, false, false);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_run_pi_all() {
+        let (_temp, manager) = setup_pi_manager();
+        let result =
+            run_pi_with_manager(&manager, "/test/project".to_string(), None, true, false);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_run_pi_no_sessions() {
+        let temp = tempfile::tempdir().unwrap();
+        let sessions_dir = temp.path().join(".pi/agent/sessions");
+        let project_dir = sessions_dir.join("--empty-project--");
+        std::fs::create_dir_all(&project_dir).unwrap();
+
+        let resolver = toolpath_pi::PathResolver::new().with_sessions_dir(&sessions_dir);
+        let manager = toolpath_pi::PiConvo::with_resolver(resolver);
+
+        let result =
+            run_pi_with_manager(&manager, "/empty/project".to_string(), None, false, false);
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("No Pi sessions found")
+        );
     }
 
     #[test]
