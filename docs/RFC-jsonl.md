@@ -14,11 +14,11 @@ instruction that contributes to the final document — so that writers can appen
 one complete step at a time rather than buffering the entire path before
 serializing.
 
-Any canonical JSON `Path` can be streamed to JSONL and sealed back to an
-identical document (`seal(stream(P)) == P`). The reverse is lossy — sealing
-collapses intermediate metadata — but the sealed form is stable:
-`seal(stream(seal(L))) == seal(L)`. Signatures computed over canonical JSON
-remain valid after any number of `seal → stream → seal` cycles.
+Any canonical JSON `Path` can be written as JSONL and read back to an
+identical document. The reverse direction is lossy — reading collapses
+intermediate metadata updates — but the canonical form is stable across
+conversion cycles. Signatures computed over canonical JSON remain valid
+after any number of JSON → JSONL → JSON conversions.
 
 One additive schema change is required: an optional `graph_ref` field on
 `PathIdentity` so a streamed path can name the graph it belongs to up front.
@@ -44,11 +44,11 @@ document.
 1. **Append-only writes.** Writers emit complete lines; no line ever needs
    to be rewritten or removed.
 2. **Peer format with canonical JSON.** JSON → JSONL → JSON is lossless;
-   the sealed form is stable across cycles.
+   the canonical form is stable across conversion cycles.
 3. **Complete expressive power.** Every field reachable in canonical JSON is
    reachable through the line set.
 4. **Signature preservation.** Signatures computed over canonical JSON
-   survive any number of `stream → file → seal` cycles.
+   survive any number of JSON → JSONL → JSON conversion cycles.
 5. **Strict, unambiguous parsing.** Malformed input is a fatal error. No
    recovery heuristics.
 
@@ -85,8 +85,8 @@ document type and the serialization format:
 
 Both extensions identify `Path` documents. The suffix (`.json` vs `.jsonl`)
 distinguishes the serialization strategy. Tools that accept `.path.jsonl`
-input seal it internally to produce the same in-memory representation as
-reading a `.path.json` file.
+input read it into the same in-memory representation as a `.path.json`
+file.
 
 `Step` and `Graph` documents retain their existing conventions (`.json`
 extension, `{"Step": ...}` / `{"Graph": ...}` envelope). Only `Path` has a
@@ -94,9 +94,9 @@ streaming peer format.
 
 Graph `$ref` entries MUST point to sealed `.path.json` files, not to
 `.path.jsonl` streams. A `$ref` is a promise that the target is a complete,
-valid document; a streaming file may be incomplete, unsealed, or mid-write.
-Tools that consume `.path.jsonl` files should seal them before incorporating
-them into a graph.
+valid document; a streaming file may be incomplete or mid-write.
+Tools that consume `.path.jsonl` files should convert them to
+`.path.json` before incorporating them into a graph.
 
 ## File Structure
 
@@ -138,7 +138,7 @@ Readers MUST treat the following as fatal errors:
 - Unknown variant at the top level of a line.
 - Unknown `version` value in `PathOpen`.
 - `Signature` targeting a step that has not yet appeared.
-- Ambiguous head at EOF when no `Head` line was emitted (see *Sealing*).
+- Ambiguous head at EOF when no `Head` line was emitted (see *Reading JSONL*).
 
 Forward compatibility is handled by bumping the format version in
 `PathOpen`, not by tolerating unknown line kinds. Older readers reject
@@ -290,9 +290,10 @@ being appended to. Readers MUST tolerate its absence.
 {"PathClose": {}}
 ```
 
-## Sealing Algorithm (JSONL → JSON)
+## Reading JSONL
 
-Produces a canonical `{"Path": {...}}` document from a JSONL stream.
+How a reader produces a canonical `{"Path": {...}}` document from a
+`.path.jsonl` file.
 
 ```
 state:
@@ -340,10 +341,10 @@ on EOF:
 The single-tip DAG rule applies only when `head` is unspecified. Paths with
 intentional dead ends SHOULD emit an explicit `Head` line.
 
-## Streaming Algorithm (JSON → JSONL)
+## Writing JSONL
 
-Produces a deterministic line sequence from a canonical `Path`. Used for
-round-trip testing and for re-streaming stored documents.
+How a writer produces a `.path.jsonl` file from a canonical `Path`.
+Used for converting stored documents and for round-trip testing.
 
 ```
 emit PathOpen {
@@ -373,25 +374,25 @@ emit PathClose {}
 
 ## Round-Trip Guarantees
 
-Sealing is a lossy operation on JSONL: `PathMeta` last-write-wins
-semantics collapse intermediate metadata states, and line ordering is
-not preserved. This means JSONL → JSON → JSONL does not reproduce the
-original line sequence. However, the *sealed* form is stable:
+Reading JSONL is a lossy operation: `PathMeta` last-write-wins semantics
+collapse intermediate metadata states, and line ordering is not preserved.
+This means JSONL → JSON → JSONL does not reproduce the original line
+sequence. However, the canonical JSON form is stable:
 
-- **JSON → JSONL → JSON:** `seal(stream(P)) == P` for any canonical
-  `Path` `P`. The streaming algorithm emits every field, and sealing
-  reconstructs the original document.
-- **JSONL → JSON → JSONL → JSON:** `seal(stream(seal(L))) == seal(L)`
-  for any valid JSONL stream `L`. Sealing collapses metadata and
-  resolves head; re-streaming and re-sealing produces the same
+- **JSON → JSONL → JSON:** `read(write(P)) == P` for any canonical
+  `Path` `P`. Writing emits every field, and reading reconstructs the
+  original document.
+- **JSONL → JSON → JSONL → JSON:** `read(write(read(L))) == read(L)`
+  for any valid JSONL stream `L`. Reading collapses metadata and
+  resolves head; converting back and reading again produces the same
   canonical document.
 
 The format does **not** guarantee:
 
-- **JSONL round-trip:** `stream(seal(L))` may differ from `L` in line
+- **JSONL round-trip:** `write(read(L))` may differ from `L` in line
   count, line ordering, and metadata line content (intermediate
-  `PathMeta` and `ActorDef` overwrites are collapsed by sealing).
-- **Canonical JSONL:** Two different JSONL streams may seal to the same
+  `PathMeta` and `ActorDef` overwrites are collapsed when read).
+- **Canonical JSONL:** Two different JSONL files may read to the same
   JSON document. There is no unique JSONL representation.
 
 Every canonical JSON field has a corresponding line kind:
@@ -410,14 +411,15 @@ Every canonical JSON field has a corresponding line kind:
 
 Canonicalization is unchanged. Signatures are computed over the canonical
 JSON form per JCS (RFC 8785), as defined in the base RFC. Because
-`seal(stream(seal(L))) == seal(L)`, a signature computed on a sealed JSON
-document remains valid after any number of `seal → stream → seal` cycles.
+`read(write(read(L))) == read(L)`, a signature computed on a canonical
+JSON document remains valid after any number of JSON → JSONL → JSON
+conversion cycles.
 
 Late-arriving signatures — for example, a reviewer approval added after
 the steps are recorded — arrive as `Signature` lines appended to the file.
-The signed payload is still the canonical JSON form: the reviewer seals
-the current file, computes the signature over the sealed JSON per the
-base RFC, and emits a `Signature` line.
+The signed payload is still the canonical JSON form: the reviewer reads
+the current JSONL file into canonical JSON, computes the signature per
+the base RFC, and emits a `Signature` line.
 
 ## Schema Change
 
@@ -457,7 +459,7 @@ A minimal streaming session recording a two-step path:
 {"PathClose":{}}
 ```
 
-Sealing this stream produces a canonical `{"Path": {...}}` document with:
+Reading this JSONL file produces a canonical `{"Path": {...}}` document with:
 
 - `path.id = "pr-42"`, `path.base = {...}`, `path.head = "step-002"`
 - `steps = [step-001, step-002]`
@@ -465,8 +467,8 @@ Sealing this stream produces a canonical `{"Path": {...}}` document with:
 - `path.meta.actors = {"agent:claude-code": {...}}`
 - `path.meta.signatures = [<author signature>]`
 
-Streaming that canonical document back produces an equivalent line
-sequence (modulo the normalized `stream` ordering).
+Writing that canonical document back to JSONL produces an equivalent
+line sequence (modulo the normalized write ordering).
 
 ## Design Rationale
 
@@ -497,8 +499,8 @@ rejected because:
   unrecognized line means silently losing provenance.
 - Forward compatibility is handled more transparently by a version bump
   in `PathOpen`: an older reader fails fast with a clear message rather
-  than producing a subtly incorrect sealed document.
-- Stable sealing requires that readers see every line.
+  than producing a subtly incorrect document.
+- Correct reading requires that readers see every line.
 
 ### Why one path per file?
 
@@ -542,26 +544,26 @@ complete new array.
   `graph_ref` on `PathIdentity` — is additive and optional.
 - **Existing signatures** remain valid. Canonicalization is unchanged.
 - **Tooling** that operates on canonical JSON (validate, render, query)
-  can accept `.path.jsonl` input by sealing internally before
-  operating.
+  can accept `.path.jsonl` input by reading it into canonical form
+  before operating.
 
 ## Open Questions
 
-### Should `stream` canonicalize line bodies with JCS?
+### Should writers canonicalize line bodies with JCS?
 
-A stronger "normalized stream" guarantee would canonicalize each line
-body per JCS, so that `stream(P)` is byte-identical across
-implementations. This would allow signing a stream directly rather than
-signing the sealed JSON. Current answer: not in v1. The canonical signing
-path (seal → JCS → sign) is sufficient and avoids introducing a second
-canonicalization rule.
+A stronger "normalized write" guarantee would canonicalize each line
+body per JCS, so that writing a given `Path` produces byte-identical
+JSONL across implementations. This would allow signing a JSONL file
+directly rather than signing the canonical JSON. Current answer: not in
+v1. The canonical signing path (read → JCS → sign) is sufficient and
+avoids introducing a second canonicalization rule.
 
-### Should `seal` warn or error on a truncated file?
+### Should readers warn or error on a truncated file?
 
 A file missing `PathClose` and ending mid-line (the last line is not
 newline-terminated) is ambiguous: still being written, or crashed
-mid-write? Current answer: `seal` treats an unterminated final line as a
-fatal error and treats EOF-without-`PathClose` as informational. Readers
+mid-write? Current answer: readers treat an unterminated final line as a
+fatal error and treat EOF-without-`PathClose` as informational. Readers
 tailing a live file use heuristics (file still open, recent mtime) to
 distinguish the cases.
 
