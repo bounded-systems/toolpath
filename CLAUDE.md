@@ -48,7 +48,7 @@ cargo test --workspace
 cargo clippy --workspace -- -D warnings
 ```
 
-Requires Rust 1.85+ (edition 2024). Currently on rustc 1.93.0.
+Requires Rust 1.85+ (edition 2024). Pinned to 1.94.0 via `rust-toolchain.toml`.
 
 ## CLI usage
 
