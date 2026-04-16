@@ -135,14 +135,24 @@ Readers MUST treat the following as fatal errors:
 
 - First line is not a valid `PathOpen`.
 - Malformed JSON on any line.
-- Unknown variant at the top level of a line.
-- Unknown `version` value in `PathOpen`.
 - `Signature` targeting a step that has not yet appeared.
 - Ambiguous head at EOF when no `Head` line was emitted (see *Reading JSONL*).
 
-Forward compatibility is handled by bumping the format version in
-`PathOpen`, not by tolerating unknown line kinds. Older readers reject
-newer files deterministically.
+Readers SHOULD warn on, but MUST skip, the following:
+
+- Unknown variant at the top level of a line.
+- Unknown `version` value in `PathOpen`.
+
+Unknown lines are preserved in memory when possible (implementations
+MAY store them as opaque JSON) so that a JSON → JSONL → JSON round-trip
+through a newer-format file does not silently discard data. However,
+readers are not required to interpret unknown lines, and unknown lines
+do not affect the canonical `Path` produced by reading.
+
+This approach favors forward compatibility: a file written by a newer
+producer remains readable by an older consumer, which gets a correct
+(if incomplete) view of the path. Version bumps in `PathOpen` signal
+structural changes that older readers cannot safely ignore.
 
 ### Durability
 
@@ -489,18 +499,23 @@ intent becomes known at t=0, the diff at t=20s. This was rejected for v1:
 The mechanism can be added in a future revision via new line kinds,
 guarded by a version bump.
 
-### Why strict parsing?
+### Why skip unknown variants instead of rejecting them?
 
-Skip-on-error parsing is tempting for a streaming format — readers could
-ignore unknown variants from future versions and keep going. It was
-rejected because:
+An earlier draft treated unknown variants as fatal errors, reasoning that
+silently skipping a line means silently losing provenance. This was
+reversed because:
 
-- Toolpath documents are provenance records. Silently skipping an
-  unrecognized line means silently losing provenance.
-- Forward compatibility is handled more transparently by a version bump
-  in `PathOpen`: an older reader fails fast with a clear message rather
-  than producing a subtly incorrect document.
-- Correct reading requires that readers see every line.
+- Forward compatibility matters more in practice. A file written by a
+  newer producer should be readable by an older consumer — the older
+  reader gets a correct (if incomplete) view of the path rather than
+  refusing to read the file at all.
+- Provenance is not lost — the unknown lines are still in the file.
+  A reader that understands them will interpret them correctly. An
+  older reader that skips them produces the same result it would have
+  produced before the new line kind existed.
+- Version bumps in `PathOpen` remain available for structural changes
+  that older readers truly cannot handle (e.g., changes to `Step`
+  semantics or ordering constraints).
 
 ### Why one path per file?
 
