@@ -14,10 +14,11 @@ instruction that contributes to the final document — so that writers can appen
 one complete step at a time rather than buffering the entire path before
 serializing.
 
-The JSONL format and the canonical JSON format round-trip losslessly in both
-directions. Every field reachable in the canonical JSON is reachable through
-the JSONL line set, and signatures computed over canonical JSON remain valid
-across any number of `stream ↔ seal` cycles.
+Any canonical JSON `Path` can be streamed to JSONL and sealed back to an
+identical document (`seal(stream(P)) == P`). The reverse is lossy — sealing
+collapses intermediate metadata — but the sealed form is stable:
+`seal(stream(seal(L))) == seal(L)`. Signatures computed over canonical JSON
+remain valid after any number of `seal → stream → seal` cycles.
 
 One additive schema change is required: an optional `graph_ref` field on
 `PathIdentity` so a streamed path can name the graph it belongs to up front.
@@ -42,7 +43,8 @@ document.
 
 1. **Append-only writes.** Writers emit complete lines; no line ever needs
    to be rewritten or removed.
-2. **Peer format with canonical JSON.** Bidirectional, lossless round-trip.
+2. **Peer format with canonical JSON.** JSON → JSONL → JSON is lossless;
+   the sealed form is stable across cycles.
 3. **Complete expressive power.** Every field reachable in canonical JSON is
    reachable through the line set.
 4. **Signature preservation.** Signatures computed over canonical JSON
@@ -371,16 +373,28 @@ emit PathClose {}
 
 ## Round-Trip Guarantees
 
-- **Seal after stream:** `seal(stream(P)) == P` field-for-field for any
-  canonical `Path` `P`.
-- **Stream after seal:** `stream(seal(L))` may differ from `L` in line
-  ordering — `stream` emits a normalized order — but sealed documents are
-  equal: `seal(stream(seal(L))) == seal(L)`.
-- **Idempotent normalization:** `stream(seal(stream(P))) == stream(P)`
-  line-for-line.
+Sealing is a lossy operation on JSONL: `PathMeta` last-write-wins
+semantics collapse intermediate metadata states, and line ordering is
+not preserved. This means JSONL → JSON → JSONL does not reproduce the
+original line sequence. However, the *sealed* form is stable:
 
-Round-trip is lossless because every canonical JSON field has a
-corresponding line kind:
+- **JSON → JSONL → JSON:** `seal(stream(P)) == P` for any canonical
+  `Path` `P`. The streaming algorithm emits every field, and sealing
+  reconstructs the original document.
+- **JSONL → JSON → JSONL → JSON:** `seal(stream(seal(L))) == seal(L)`
+  for any valid JSONL stream `L`. Sealing collapses metadata and
+  resolves head; re-streaming and re-sealing produces the same
+  canonical document.
+
+The format does **not** guarantee:
+
+- **JSONL round-trip:** `stream(seal(L))` may differ from `L` in line
+  count, line ordering, and metadata line content (intermediate
+  `PathMeta` and `ActorDef` overwrites are collapsed by sealing).
+- **Canonical JSONL:** Two different JSONL streams may seal to the same
+  JSON document. There is no unique JSONL representation.
+
+Every canonical JSON field has a corresponding line kind:
 
 | Canonical field | Line kind |
 | --------------- | --------- |
@@ -395,9 +409,9 @@ corresponding line kind:
 ## Signatures
 
 Canonicalization is unchanged. Signatures are computed over the canonical
-JSON form per JCS (RFC 8785), as defined in the base RFC. Because the
-JSONL format is lossless, a signature computed on a sealed JSON document
-remains valid across any number of `stream ↔ seal` cycles.
+JSON form per JCS (RFC 8785), as defined in the base RFC. Because
+`seal(stream(seal(L))) == seal(L)`, a signature computed on a sealed JSON
+document remains valid after any number of `seal → stream → seal` cycles.
 
 Late-arriving signatures — for example, a reviewer approval added after
 the steps are recorded — arrive as `Signature` lines appended to the file.
@@ -484,7 +498,7 @@ rejected because:
 - Forward compatibility is handled more transparently by a version bump
   in `PathOpen`: an older reader fails fast with a clear message rather
   than producing a subtly incorrect sealed document.
-- Round-trip losslessness requires that readers see every line.
+- Stable sealing requires that readers see every line.
 
 ### Why one path per file?
 
