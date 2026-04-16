@@ -95,15 +95,16 @@ pub fn derive_path(conversation: &Conversation, config: &DeriveConfig) -> Path {
             Some(MessageContent::Parts(parts)) => {
                 for part in parts {
                     match part {
-                        ContentPart::Text { text } => {
-                            if !text.trim().is_empty() {
-                                text_parts.push(text.clone());
-                            }
+                        ContentPart::Text { text }
+                            if !text.trim().is_empty() =>
+                        {
+                            text_parts.push(text.clone());
                         }
-                        ContentPart::Thinking { thinking, .. } => {
-                            if config.include_thinking && !thinking.trim().is_empty() {
-                                text_parts.push(format!("[thinking] {}", thinking));
-                            }
+                        ContentPart::Thinking { thinking, .. }
+                            if config.include_thinking
+                                && !thinking.trim().is_empty() =>
+                        {
+                            text_parts.push(format!("[thinking] {}", thinking));
                         }
                         ContentPart::ToolUse { name, input, .. } => {
                             tool_uses.push(name.clone());
@@ -127,12 +128,10 @@ pub fn derive_path(conversation: &Conversation, config: &DeriveConfig) -> Path {
                     }
                 }
             }
-            Some(MessageContent::Text(text)) => {
-                if !text.trim().is_empty() {
-                    text_parts.push(text.clone());
-                }
+            Some(MessageContent::Text(text)) if !text.trim().is_empty() => {
+                text_parts.push(text.clone());
             }
-            None => {}
+            _ => {}
         }
 
         // Skip entries with no conversation content and no file changes

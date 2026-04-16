@@ -58,7 +58,7 @@ impl ConvoIO {
             }
         }
 
-        metadata.sort_by(|a, b| b.last_activity.cmp(&a.last_activity));
+        metadata.sort_by_key(|m| std::cmp::Reverse(m.last_activity));
         Ok(metadata)
     }
 

@@ -240,7 +240,7 @@ impl ClaudeConvo {
             }
         }
 
-        metadata.sort_by(|a, b| b.last_activity.cmp(&a.last_activity));
+        metadata.sort_by_key(|m| std::cmp::Reverse(m.last_activity));
         Ok(metadata)
     }
 
@@ -316,7 +316,7 @@ impl ClaudeConvo {
             }
         }
 
-        conversations.sort_by(|a, b| b.last_activity.cmp(&a.last_activity));
+        conversations.sort_by_key(|c| std::cmp::Reverse(c.last_activity));
         Ok(conversations)
     }
 
