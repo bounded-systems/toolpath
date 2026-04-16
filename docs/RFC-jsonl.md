@@ -77,13 +77,38 @@ JSON blob and do not benefit from streaming. `Graph` documents are a
 container of path references; a streaming graph is a graph that references
 streaming path files.
 
+## File Extensions
+
+Toolpath `Path` documents use a two-part extension that encodes both the
+document type and the serialization format:
+
+| Extension | Format | Description |
+| --------- | ------ | ----------- |
+| `.path.json` | Canonical JSON | A complete `Path` document as a single `{"Path": {...}}` JSON blob. This is the "whole" format — the entire path is buffered and serialized at once. |
+| `.path.jsonl` | Streaming JSONL | A `Path` document expressed as a sequence of self-describing JSON lines, one per line. This is the streaming format defined by this RFC. |
+
+Both extensions identify `Path` documents. The suffix (`.json` vs `.jsonl`)
+distinguishes the serialization strategy. Tools that accept `.path.jsonl`
+input seal it internally to produce the same in-memory representation as
+reading a `.path.json` file.
+
+`Step` and `Graph` documents retain their existing conventions (`.json`
+extension, `{"Step": ...}` / `{"Graph": ...}` envelope). Only `Path` has a
+streaming peer format.
+
+Graph `$ref` entries MUST point to sealed `.path.json` files, not to
+`.path.jsonl` streams. A `$ref` is a promise that the target is a complete,
+valid document; a streaming file may be incomplete, unsealed, or mid-write.
+Tools that consume `.path.jsonl` files should seal them before incorporating
+them into a graph.
+
 ## File Structure
 
-### Extension and Encoding
+### Encoding
 
 | Property | Value |
 | -------- | ----- |
-| Extension | `.toolpath.jsonl` |
+| Extension | `.path.jsonl` |
 | Encoding | UTF-8 |
 | Line terminator | LF (`\n`) |
 | Line format | One JSON object per line |
@@ -516,7 +541,7 @@ complete new array.
   `graph_ref` on `PathIdentity` — is additive and optional.
 - **Existing signatures** remain valid. Canonicalization is unchanged.
 - **Tooling** that operates on canonical JSON (validate, render, query)
-  can accept `.toolpath.jsonl` input by sealing internally before
+  can accept `.path.jsonl` input by sealing internally before
   operating.
 
 ## Open Questions

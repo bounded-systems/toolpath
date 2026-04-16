@@ -103,6 +103,23 @@ the inner fields.
 PascalCase variant names visually distinguish the type tag from the lowercase
 structural fields inside (`step`, `path`, `graph`).
 
+### File Extensions
+
+Toolpath documents use a two-part extension encoding the document type and
+serialization format:
+
+| Extension | Document type | Description |
+| --------- | ------------- | ----------- |
+| `.path.json` | Path (canonical) | A complete `{"Path": {...}}` JSON document. |
+| `.path.jsonl` | Path (streaming) | A line-oriented JSONL stream that seals to a `Path`. See the [JSONL Streaming RFC](docs/RFC-jsonl.md). |
+
+`Step` and `Graph` documents use plain `.json` files with the appropriate
+`{"Step": ...}` or `{"Graph": ...}` envelope. Only `Path` has a streaming
+peer format.
+
+Graph `$ref` entries MUST point to sealed `.path.json` files, not to
+`.path.jsonl` streams.
+
 ### ID Uniqueness
 
 IDs must be unique within their containing scope:
