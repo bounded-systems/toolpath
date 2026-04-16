@@ -1,7 +1,7 @@
 # RFC: JSONL Streaming Format for Toolpath
 
 **Status:** Draft
-**Authors:** with Alex Kesling <alex@empathic.dev>
+**Authors:** Eliot Hedeman <eliot.d.hedeman@gmail.com>, Alex Kesling <alex@empathic.dev>
 **Created:** 2026-04-14
 **Extends:** [RFC: Toolpath - A Format for Artifact Transformation Provenance](../RFC.md)
 
