@@ -64,6 +64,24 @@ pub enum DeriveSource {
         #[arg(long)]
         all: bool,
     },
+    /// Derive from Gemini CLI conversation logs
+    Gemini {
+        /// Project path (e.g., /Users/alex/myproject)
+        #[arg(short, long)]
+        project: String,
+
+        /// Specific session UUID (the directory name under chats/)
+        #[arg(short, long)]
+        session: Option<String>,
+
+        /// Process all sessions in the project
+        #[arg(long)]
+        all: bool,
+
+        /// Include thinking blocks in conversation.append text
+        #[arg(long)]
+        include_thinking: bool,
+    },
     /// Derive from Pi (pi.dev) coding-agent session logs
     Pi {
         /// Project path (cwd the session ran in)
@@ -105,6 +123,12 @@ pub fn run(source: DeriveSource, pretty: bool) -> Result<()> {
             session,
             all,
         } => run_claude(project, session, all, pretty),
+        DeriveSource::Gemini {
+            project,
+            session,
+            all,
+            include_thinking,
+        } => run_gemini(project, session, all, include_thinking, pretty),
         DeriveSource::Pi {
             project,
             session,
@@ -220,6 +244,60 @@ fn run_github(
 fn run_claude(project: String, session: Option<String>, all: bool, pretty: bool) -> Result<()> {
     let manager = toolpath_claude::ClaudeConvo::new();
     run_claude_with_manager(&manager, project, session, all, pretty)
+}
+
+fn run_gemini(
+    project: String,
+    session: Option<String>,
+    all: bool,
+    include_thinking: bool,
+    pretty: bool,
+) -> Result<()> {
+    let manager = toolpath_gemini::GeminiConvo::new();
+    run_gemini_with_manager(&manager, project, session, all, include_thinking, pretty)
+}
+
+fn run_gemini_with_manager(
+    manager: &toolpath_gemini::GeminiConvo,
+    project: String,
+    session: Option<String>,
+    all: bool,
+    include_thinking: bool,
+    pretty: bool,
+) -> Result<()> {
+    let config = toolpath_gemini::derive::DeriveConfig {
+        project_path: Some(project.clone()),
+        include_thinking,
+    };
+
+    let docs: Vec<toolpath::v1::Path> = if let Some(session_uuid) = session {
+        let convo = manager
+            .read_conversation(&project, &session_uuid)
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
+        vec![toolpath_gemini::derive::derive_path(&convo, &config)]
+    } else if all {
+        let convos = manager
+            .read_all_conversations(&project)
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
+        toolpath_gemini::derive::derive_project(&convos, &config)
+    } else {
+        let convo = manager
+            .most_recent_conversation(&project)
+            .map_err(|e| anyhow::anyhow!("{}", e))?
+            .ok_or_else(|| anyhow::anyhow!("No conversations found for project: {}", project))?;
+        vec![toolpath_gemini::derive::derive_path(&convo, &config)]
+    };
+
+    for path in &docs {
+        let doc = toolpath::v1::Document::Path(path.clone());
+        let json = if pretty {
+            doc.to_json_pretty()?
+        } else {
+            doc.to_json()?
+        };
+        println!("{}", json);
+    }
+    Ok(())
 }
 
 fn run_claude_with_manager(
@@ -580,5 +658,96 @@ mod tests {
                 .to_string()
                 .contains("No conversations found")
         );
+    }
+
+    fn setup_gemini_manager() -> (tempfile::TempDir, toolpath_gemini::GeminiConvo) {
+        let temp = tempfile::tempdir().unwrap();
+        let gemini = temp.path().join(".gemini");
+        let session_dir = gemini.join("tmp/myrepo/chats/session-uuid");
+        std::fs::create_dir_all(&session_dir).unwrap();
+        std::fs::write(
+            gemini.join("projects.json"),
+            r#"{"projects":{"/abs/myrepo":"myrepo"}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            session_dir.join("main.json"),
+            r#"{"sessionId":"s","projectHash":"","startTime":"2026-04-17T10:00:00Z","lastUpdated":"2026-04-17T10:10:00Z","directories":["/abs/myrepo"],"messages":[
+  {"id":"u1","timestamp":"2026-04-17T10:00:00Z","type":"user","content":[{"text":"Hello"}]},
+  {"id":"a1","timestamp":"2026-04-17T10:00:01Z","type":"gemini","content":"Hi","model":"gemini-3-flash-preview"}
+]}"#,
+        )
+        .unwrap();
+        let resolver = toolpath_gemini::PathResolver::new().with_gemini_dir(&gemini);
+        (temp, toolpath_gemini::GeminiConvo::with_resolver(resolver))
+    }
+
+    #[test]
+    fn test_run_gemini_session() {
+        let (_t, mgr) = setup_gemini_manager();
+        let result = run_gemini_with_manager(
+            &mgr,
+            "/abs/myrepo".to_string(),
+            Some("session-uuid".to_string()),
+            false,
+            false,
+            false,
+        );
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_run_gemini_most_recent() {
+        let (_t, mgr) = setup_gemini_manager();
+        let result =
+            run_gemini_with_manager(&mgr, "/abs/myrepo".to_string(), None, false, false, true);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_run_gemini_all() {
+        let (_t, mgr) = setup_gemini_manager();
+        let result =
+            run_gemini_with_manager(&mgr, "/abs/myrepo".to_string(), None, true, false, false);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_run_gemini_no_conversations() {
+        let temp = tempfile::tempdir().unwrap();
+        let gemini = temp.path().join(".gemini");
+        std::fs::create_dir_all(gemini.join("tmp/empty")).unwrap();
+        let resolver = toolpath_gemini::PathResolver::new().with_gemini_dir(&gemini);
+        let mgr = toolpath_gemini::GeminiConvo::with_resolver(resolver);
+
+        let result = run_gemini_with_manager(
+            &mgr,
+            "/no/such/project".to_string(),
+            None,
+            false,
+            false,
+            false,
+        );
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("No conversations found")
+        );
+    }
+
+    #[test]
+    fn test_run_gemini_include_thinking() {
+        let (_t, mgr) = setup_gemini_manager();
+        let result = run_gemini_with_manager(
+            &mgr,
+            "/abs/myrepo".to_string(),
+            Some("session-uuid".to_string()),
+            false,
+            true,
+            false,
+        );
+        assert!(result.is_ok());
     }
 }

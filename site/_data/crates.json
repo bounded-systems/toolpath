@@ -40,6 +40,14 @@
     "role": "Reads Claude Code conversation data from ~/.claude/projects/ and maps messages, tool calls, and abandoned approaches to Toolpath documents."
   },
   {
+    "name": "toolpath-gemini",
+    "version": "0.1.0",
+    "description": "Derive from Gemini CLI conversation logs",
+    "docs": "https://docs.rs/toolpath-gemini",
+    "crate": "https://crates.io/crates/toolpath-gemini",
+    "role": "Reads Gemini CLI conversation data from ~/.gemini/tmp/ and maps messages, tool calls, and sub-agent delegations to Toolpath documents. Sub-agent chat files are folded into the parent conversation as populated DelegatedWork."
+  },
+  {
     "name": "toolpath-pi",
     "version": "0.1.0",
     "description": "Derive Toolpath provenance documents from Pi (pi.dev) agent session logs",

@@ -28,6 +28,12 @@ pub enum ListSource {
         #[arg(short, long)]
         project: Option<String>,
     },
+    /// List Gemini CLI projects or sessions
+    Gemini {
+        /// Project path — if omitted, lists all projects
+        #[arg(short, long)]
+        project: Option<String>,
+    },
     /// List Pi (pi.dev) projects or sessions
     Pi {
         /// Project path — if omitted, lists all projects
@@ -45,6 +51,7 @@ pub fn run(source: ListSource, json: bool) -> Result<()> {
         ListSource::Git { repo, remote } => run_git(repo, remote, json),
         ListSource::Github { repo } => run_github(repo, json),
         ListSource::Claude { project } => run_claude(project, json),
+        ListSource::Gemini { project } => run_gemini(project, json),
         ListSource::Pi { project, base } => run_pi(project, base, json),
     }
 }
@@ -247,6 +254,98 @@ fn list_claude_sessions(
                     .map(|t| t.format("%Y-%m-%d %H:%M").to_string())
                     .unwrap_or_else(|| "unknown".to_string());
                 println!("  {} {:>4} msgs  {}", &m.session_id, m.message_count, date);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn run_gemini(project: Option<String>, json: bool) -> Result<()> {
+    let manager = toolpath_gemini::GeminiConvo::new();
+
+    match project {
+        None => list_gemini_projects(&manager, json),
+        Some(project_path) => list_gemini_sessions(&manager, &project_path, json),
+    }
+}
+
+fn list_gemini_projects(manager: &toolpath_gemini::GeminiConvo, json: bool) -> Result<()> {
+    let projects = manager
+        .list_projects()
+        .map_err(|e| anyhow::anyhow!("{}", e))?;
+
+    if json {
+        let items: Vec<serde_json::Value> = projects
+            .iter()
+            .map(|p| serde_json::json!({ "path": p }))
+            .collect();
+        let output = serde_json::json!({
+            "source": "gemini",
+            "projects": items,
+        });
+        println!("{}", serde_json::to_string_pretty(&output)?);
+    } else {
+        println!("Gemini projects:");
+        println!();
+        if projects.is_empty() {
+            println!("  (none)");
+        } else {
+            for p in &projects {
+                println!("  {}", p);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn list_gemini_sessions(
+    manager: &toolpath_gemini::GeminiConvo,
+    project_path: &str,
+    json: bool,
+) -> Result<()> {
+    let metadata = manager
+        .list_conversation_metadata(project_path)
+        .map_err(|e| anyhow::anyhow!("{}", e))?;
+
+    if json {
+        let items: Vec<serde_json::Value> = metadata
+            .iter()
+            .map(|m| {
+                serde_json::json!({
+                    "session_uuid": m.session_uuid,
+                    "messages": m.message_count,
+                    "sub_agents": m.sub_agent_count,
+                    "started_at": m.started_at.map(|t| t.to_rfc3339()),
+                    "last_activity": m.last_activity.map(|t| t.to_rfc3339()),
+                })
+            })
+            .collect();
+        let output = serde_json::json!({
+            "source": "gemini",
+            "project": project_path,
+            "sessions": items,
+        });
+        println!("{}", serde_json::to_string_pretty(&output)?);
+    } else {
+        println!("Gemini sessions for {}:", project_path);
+        println!();
+        if metadata.is_empty() {
+            println!("  (none)");
+        } else {
+            for m in &metadata {
+                let date = m
+                    .last_activity
+                    .map(|t| t.format("%Y-%m-%d %H:%M").to_string())
+                    .unwrap_or_else(|| "unknown".to_string());
+                let sub = if m.sub_agent_count > 0 {
+                    format!(" +{} sub", m.sub_agent_count)
+                } else {
+                    String::new()
+                };
+                println!(
+                    "  {} {:>4} msgs{}  {}",
+                    &m.session_uuid, m.message_count, sub, date
+                );
             }
         }
     }
@@ -574,5 +673,65 @@ mod tests {
         // A project that doesn't have a directory should error via PiError.
         let result = list_pi_sessions(&manager, "/does/not/exist", false);
         assert!(result.is_err());
+    }
+
+    fn setup_gemini_manager() -> (tempfile::TempDir, toolpath_gemini::GeminiConvo) {
+        let temp = tempfile::tempdir().unwrap();
+        let gemini = temp.path().join(".gemini");
+        let session_dir = gemini.join("tmp/myrepo/chats/session-uuid");
+        std::fs::create_dir_all(&session_dir).unwrap();
+        std::fs::write(
+            gemini.join("projects.json"),
+            r#"{"projects":{"/abs/myrepo":"myrepo"}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            session_dir.join("main.json"),
+            r#"{"sessionId":"s","projectHash":"","startTime":"2026-04-17T10:00:00Z","lastUpdated":"2026-04-17T10:10:00Z","directories":["/abs/myrepo"],"messages":[
+  {"id":"u1","timestamp":"2026-04-17T10:00:00Z","type":"user","content":[{"text":"Hello"}]}
+]}"#,
+        )
+        .unwrap();
+        let resolver = toolpath_gemini::PathResolver::new().with_gemini_dir(&gemini);
+        (temp, toolpath_gemini::GeminiConvo::with_resolver(resolver))
+    }
+
+    #[test]
+    fn test_list_gemini_projects_human() {
+        let (_t, mgr) = setup_gemini_manager();
+        let result = list_gemini_projects(&mgr, false);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_list_gemini_projects_json() {
+        let (_t, mgr) = setup_gemini_manager();
+        let result = list_gemini_projects(&mgr, true);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_list_gemini_sessions_human() {
+        let (_t, mgr) = setup_gemini_manager();
+        let result = list_gemini_sessions(&mgr, "/abs/myrepo", false);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_list_gemini_sessions_json() {
+        let (_t, mgr) = setup_gemini_manager();
+        let result = list_gemini_sessions(&mgr, "/abs/myrepo", true);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_list_gemini_sessions_empty() {
+        let temp = tempfile::tempdir().unwrap();
+        let gemini = temp.path().join(".gemini");
+        std::fs::create_dir_all(gemini.join("tmp/empty")).unwrap();
+        let resolver = toolpath_gemini::PathResolver::new().with_gemini_dir(&gemini);
+        let mgr = toolpath_gemini::GeminiConvo::with_resolver(resolver);
+        let result = list_gemini_sessions(&mgr, "/nowhere", false);
+        assert!(result.is_ok());
     }
 }
