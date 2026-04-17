@@ -1829,16 +1829,18 @@ dependencies = [
  "toolpath-git",
  "toolpath-github",
  "toolpath-md",
+ "toolpath-pi",
 ]
 
 [[package]]
 name = "toolpath-convo"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "chrono",
  "serde",
  "serde_json",
  "thiserror",
+ "toolpath",
 ]
 
 [[package]]
@@ -1877,6 +1879,20 @@ version = "0.2.0"
 dependencies = [
  "serde_json",
  "toolpath",
+]
+
+[[package]]
+name = "toolpath-pi"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "toolpath",
+ "toolpath-convo",
 ]
 
 [[package]]

@@ -15,6 +15,16 @@ All notable changes to the Toolpath workspace are documented here.
 - Refactor `track` to persist sessions as `.path.jsonl` streams. The session file is still a single file per session, now in JSONL format, with tracking bookkeeping stored in `path.meta.extra["track"]` (stripped on export/close). Strict append-only writes are a future optimization.
 - Rename example path documents to the two-part extension: `examples/path-*.json` → `examples/path-*.path.json`, with new `examples/path-*.path.jsonl` siblings.
 
+## [Unreleased]
+
+### Changed
+
+- `toolpath-convo` 0.6.0: adds `derive_path(view, config) -> Path` and `DeriveConfig` (moved in from the unreleased `toolpath-derive` crate). `toolpath-convo` now depends on `toolpath`.
+
+### Added
+
+- `toolpath-pi` 0.1.0: new crate — reads Pi (pi.dev) coding-agent session JSONL logs, implements `ConversationProvider`, and derives Toolpath `Path` documents via `toolpath-convo`'s shared derivation (`toolpath_convo::derive_path`). Reads from `~/.pi/agent/sessions/` by default; base directory is configurable. Preserves Pi's in-file conversation tree (id/parentId) as a DAG in the derived `Path`, and follows `parentSession` links across session files (bounded depth). CLI subcommands planned: `path derive pi` and `path list pi` (wiring may be merged separately).
+
 ## 0.3.0 — toolpath-cli
 
 ### toolpath-cli 0.3.0
