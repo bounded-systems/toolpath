@@ -261,7 +261,7 @@ fn derive_git_validate_roundtrip() {
 
 #[test]
 fn render_dot_from_stdin() {
-    let input = std::fs::read_to_string(examples_dir().join("path-01-pr.json")).unwrap();
+    let input = std::fs::read_to_string(examples_dir().join("path-01-pr.path.json")).unwrap();
 
     cmd()
         .arg("render")
@@ -280,7 +280,7 @@ fn query_dead_ends() {
         .arg("query")
         .arg("dead-ends")
         .arg("--input")
-        .arg(examples_dir().join("path-01-pr.json"))
+        .arg(examples_dir().join("path-01-pr.path.json"))
         .assert()
         .success()
         .stdout(predicate::str::contains("step-002a"));
@@ -292,7 +292,7 @@ fn query_ancestors() {
         .arg("query")
         .arg("ancestors")
         .arg("--input")
-        .arg(examples_dir().join("path-01-pr.json"))
+        .arg(examples_dir().join("path-01-pr.path.json"))
         .arg("--step-id")
         .arg("step-004")
         .assert()
@@ -307,8 +307,75 @@ fn query_ancestors() {
 fn merge_produces_graph() {
     cmd()
         .arg("merge")
-        .arg(examples_dir().join("path-01-pr.json"))
-        .arg(examples_dir().join("path-02-local-session.json"))
+        .arg(examples_dir().join("path-01-pr.path.json"))
+        .arg(examples_dir().join("path-02-local-session.path.json"))
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"Graph\""));
+}
+
+// ── .path.jsonl input ────────────────────────────────────────────────
+
+#[test]
+fn validate_accepts_path_jsonl() {
+    cmd()
+        .arg("validate")
+        .arg("--input")
+        .arg(examples_dir().join("path-02-local-session.path.jsonl"))
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Valid: Path"));
+}
+
+#[test]
+fn validate_rejects_truncated_jsonl() {
+    let mut f = tempfile::Builder::new()
+        .suffix(".path.jsonl")
+        .tempfile()
+        .unwrap();
+    // No PathOpen, just garbage.
+    use std::io::Write;
+    writeln!(f, r#"{{"Step":"garbage"}}"#).unwrap();
+    f.flush().unwrap();
+
+    cmd()
+        .arg("validate")
+        .arg("--input")
+        .arg(f.path())
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("Invalid"));
+}
+
+#[test]
+fn render_md_accepts_path_jsonl() {
+    cmd()
+        .arg("render")
+        .arg("md")
+        .arg("--input")
+        .arg(examples_dir().join("path-03-signed-pr.path.jsonl"))
+        .assert()
+        .success()
+        .stdout(predicate::str::is_empty().not());
+}
+
+#[test]
+fn query_dead_ends_accepts_path_jsonl() {
+    cmd()
+        .arg("query")
+        .arg("dead-ends")
+        .arg("--input")
+        .arg(examples_dir().join("path-04-exploration.path.jsonl"))
+        .assert()
+        .success();
+}
+
+#[test]
+fn merge_accepts_path_jsonl() {
+    cmd()
+        .arg("merge")
+        .arg(examples_dir().join("path-01-pr.path.jsonl"))
+        .arg(examples_dir().join("path-02-local-session.path.jsonl"))
         .assert()
         .success()
         .stdout(predicate::str::contains("\"Graph\""));

@@ -248,6 +248,7 @@ mod native {
                     ref_str: Some(base_commit.id().to_string()),
                 }),
                 head: head_step_id,
+                graph_ref: None,
             },
             steps,
             meta: Some(PathMeta {

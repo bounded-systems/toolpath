@@ -190,17 +190,15 @@ fn session_dir(explicit: Option<&PathBuf>) -> PathBuf {
     explicit.cloned().unwrap_or_else(std::env::temp_dir)
 }
 
-/// Load a session file. The file is a valid `{"Path": {...}}` document with
-/// tracking bookkeeping in `meta.track`. Returns the Path (with track state
-/// removed from meta) and the extracted TrackState.
+/// Load a session file. The file is a `.path.jsonl` stream with the
+/// tracking bookkeeping stored in `meta.extra["track"]`. Returns the Path
+/// (with track state removed from meta) and the extracted TrackState.
 fn load_session(path: &std::path::Path) -> Result<(v1::Path, TrackState)> {
-    let data = std::fs::read_to_string(path)
+    let file = std::fs::File::open(path)
         .with_context(|| format!("failed to read session file: {}", path.display()))?;
-    let doc: v1::Document = serde_json::from_str(&data)
+    let reader = std::io::BufReader::new(file);
+    let mut path_doc = v1::Path::from_jsonl_reader(reader)
         .with_context(|| format!("failed to parse session file: {}", path.display()))?;
-    let v1::Document::Path(mut path_doc) = doc else {
-        anyhow::bail!("session file is not a Path document: {}", path.display());
-    };
     let track_value = path_doc
         .meta
         .as_mut()
@@ -217,8 +215,15 @@ fn load_session(path: &std::path::Path) -> Result<(v1::Path, TrackState)> {
     Ok((path_doc, state))
 }
 
-/// Save a session file. Injects TrackState into `meta.track` and writes as a
-/// valid `{"Path": {...}}` document.
+/// Save a session file atomically. Injects TrackState into
+/// `meta.extra["track"]` and writes the Path as a `.path.jsonl` stream.
+///
+/// Writes are atomic via tempfile + persist. Any tool that reads the
+/// session mid-operation will either see the pre-write version or the
+/// post-write version, never a torn file.
+///
+/// Note: this always does a full rewrite — strict append-only writes are
+/// a future optimization. See `docs/RFC-jsonl.md` §13.
 fn save_session(path: &std::path::Path, doc: &v1::Path, state: &TrackState) -> Result<()> {
     let mut doc = doc.clone();
     let meta = doc.meta.get_or_insert_with(v1::PathMeta::default);
@@ -226,12 +231,15 @@ fn save_session(path: &std::path::Path, doc: &v1::Path, state: &TrackState) -> R
         "track".to_string(),
         serde_json::to_value(state).context("failed to serialize track state")?,
     );
-    let wrapped = v1::Document::Path(doc);
+    let jsonl = doc
+        .to_jsonl_string()
+        .context("failed to serialize session as JSONL")?;
 
     let dir = path.parent().unwrap_or_else(|| std::path::Path::new("."));
     let tmp = tempfile::NamedTempFile::new_in(dir)
         .context("failed to create temp file for atomic write")?;
-    serde_json::to_writer_pretty(&tmp, &wrapped).context("failed to serialize session")?;
+    std::io::Write::write_all(&mut tmp.as_file(), jsonl.as_bytes())
+        .context("failed to write JSONL to temp file")?;
     tmp.persist(path)
         .with_context(|| format!("failed to persist session file: {}", path.display()))?;
     Ok(())
@@ -322,7 +330,7 @@ fn init_session(config: InitConfig) -> Result<PathBuf> {
     };
 
     let dir = session_dir(config.session_dir.as_ref());
-    let session_path = dir.join(format!("{session_id}.json"));
+    let session_path = dir.join(format!("{session_id}.path.jsonl"));
     save_session(&session_path, &path_doc, &state)?;
     Ok(session_path)
 }
@@ -610,7 +618,7 @@ fn run_list(session_dir_opt: Option<PathBuf>, json: bool) -> Result<()> {
         let name = entry.file_name();
         let name_str = name.to_string_lossy();
         if name_str.starts_with("track-")
-            && name_str.ends_with(".json")
+            && name_str.ends_with(".path.jsonl")
             && let Ok((path_doc, state)) = load_session(&entry.path())
         {
             sessions.push(SessionSummary {
@@ -709,7 +717,7 @@ mod tests {
             step_counter: 0,
             created_at: "2026-01-01T00:00:00Z".to_string(),
         };
-        let path = dir.join("track-test-1.json");
+        let path = dir.join("track-test-1.path.jsonl");
         save_session(&path, &path_doc, &state).unwrap();
         path
     }
@@ -845,7 +853,7 @@ mod tests {
             step_counter: 0,
             created_at: "2026-01-01T00:00:00Z".to_string(),
         };
-        let path = dir.path().join("track-base-test.json");
+        let path = dir.path().join("track-base-test.path.jsonl");
         save_session(&path, &path_doc, &state).unwrap();
         let (loaded_doc, _) = load_session(&path).unwrap();
         let base = loaded_doc.path.base.unwrap();
@@ -866,7 +874,7 @@ mod tests {
             step_counter: 0,
             created_at: "2026-01-01T00:00:00Z".to_string(),
         };
-        let path = dir.path().join("track-no-base.json");
+        let path = dir.path().join("track-no-base.path.jsonl");
         save_session(&path, &path_doc, &state).unwrap();
         let (loaded_doc, _) = load_session(&path).unwrap();
         assert!(loaded_doc.path.base.is_none());
@@ -874,20 +882,16 @@ mod tests {
 
     #[test]
     fn test_session_file_is_valid_toolpath_document() {
-        // The session file should be readable by any Toolpath tool
+        // The session file is a `.path.jsonl` stream — any Toolpath tool
+        // with a JSONL reader can consume it.
         let dir = TempDir::new().unwrap();
         let path = make_session(dir.path(), "hello\n");
 
         let data = std::fs::read_to_string(&path).unwrap();
-        let doc = v1::Document::from_json(&data).unwrap();
-        match doc {
-            v1::Document::Path(p) => {
-                assert_eq!(p.path.id, "track-test-1");
-                // meta.track is present (tracking bookkeeping)
-                assert!(p.meta.as_ref().unwrap().extra.contains_key("track"));
-            }
-            _ => panic!("Expected Path"),
-        }
+        let p = v1::Path::from_jsonl_str(&data).unwrap();
+        assert_eq!(p.path.id, "track-test-1");
+        // meta.extra["track"] is present (tracking bookkeeping)
+        assert!(p.meta.as_ref().unwrap().extra.contains_key("track"));
     }
 
     // ── init_session ──────────────────────────────────────────────────────
@@ -1748,7 +1752,7 @@ mod tests {
             created_at: "2026-01-01T00:00:00Z".to_string(),
         };
         save_session(
-            &dir.path().join("track-20260101T000000-111.json"),
+            &dir.path().join("track-20260101T000000-111.path.jsonl"),
             &path_doc_1,
             &state_1,
         )
@@ -1770,7 +1774,7 @@ mod tests {
             created_at: "2026-01-01T00:00:01Z".to_string(),
         };
         save_session(
-            &dir.path().join("track-20260101T000000-222.json"),
+            &dir.path().join("track-20260101T000000-222.path.jsonl"),
             &path_doc_2,
             &state_2,
         )
@@ -1800,7 +1804,7 @@ mod tests {
     #[test]
     fn test_list_ignores_corrupt_sessions() {
         let dir = TempDir::new().unwrap();
-        std::fs::write(dir.path().join("track-corrupt.json"), "not json").unwrap();
+        std::fs::write(dir.path().join("track-corrupt.path.jsonl"), "not json").unwrap();
         // Should not error — corrupt files are silently skipped
         run_list(Some(dir.path().to_path_buf()), false).unwrap();
     }
@@ -1828,21 +1832,16 @@ mod tests {
             step_counter: 1,
             created_at: "2026-01-01T00:00:00Z".to_string(),
         };
-        let session_path = dir.path().join("track-test-doc.json");
+        let session_path = dir.path().join("track-test-doc.path.jsonl");
         save_session(&session_path, &path_doc, &state).unwrap();
 
-        // Read raw file as Toolpath document — should work
+        // Read raw file as JSONL Path — should work
         let data = std::fs::read_to_string(&session_path).unwrap();
-        let doc = v1::Document::from_json(&data).unwrap();
-        match &doc {
-            v1::Document::Path(p) => {
-                assert_eq!(p.path.id, "track-test-doc");
-                assert_eq!(p.path.head, "step-001");
-                assert_eq!(p.path.base.as_ref().unwrap().uri, "github:org/repo");
-                assert_eq!(p.steps.len(), 1);
-            }
-            _ => panic!("Expected Path"),
-        }
+        let p = v1::Path::from_jsonl_str(&data).unwrap();
+        assert_eq!(p.path.id, "track-test-doc");
+        assert_eq!(p.path.head, "step-001");
+        assert_eq!(p.path.base.as_ref().unwrap().uri, "github:org/repo");
+        assert_eq!(p.steps.len(), 1);
 
         // Load and export (track state stripped)
         let (exported, _) = load_session(&session_path).unwrap();
@@ -1873,7 +1872,7 @@ mod tests {
             step_counter: 0,
             created_at: "2026-01-01T00:00:00Z".to_string(),
         };
-        let session_path = dir.path().join("track-no-base.json");
+        let session_path = dir.path().join("track-no-base.path.jsonl");
         save_session(&session_path, &path_doc, &state).unwrap();
 
         let (exported, _) = load_session(&session_path).unwrap();
@@ -2006,20 +2005,15 @@ mod tests {
         .unwrap();
         assert_eq!(r3, StepResult::Created("step-003".to_string()));
 
-        // Verify the session is a valid Toolpath document mid-session
+        // Verify the session is a valid JSONL Path mid-session
         let data = std::fs::read_to_string(&init_path).unwrap();
-        let mid_doc = v1::Document::from_json(&data).unwrap();
-        match &mid_doc {
-            v1::Document::Path(p) => {
-                assert_eq!(p.steps.len(), 3);
-                assert_eq!(p.path.head, "step-003");
-                // Can run queries on the live session
-                let dead = v1::query::dead_ends(&p.steps, &p.path.head);
-                assert_eq!(dead.len(), 1);
-                assert_eq!(dead[0].step.id, "step-002");
-            }
-            _ => panic!("Expected Path"),
-        }
+        let p = v1::Path::from_jsonl_str(&data).unwrap();
+        assert_eq!(p.steps.len(), 3);
+        assert_eq!(p.path.head, "step-003");
+        // Can run queries on the live session
+        let dead = v1::query::dead_ends(&p.steps, &p.path.head);
+        assert_eq!(dead.len(), 1);
+        assert_eq!(dead[0].step.id, "step-002");
 
         // 6. Close with output file
         let output = dir.path().join("result.json");

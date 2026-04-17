@@ -9,19 +9,16 @@ pub fn run(inputs: Vec<String>, title: Option<String>, pretty: bool) -> Result<(
     let mut all_paths = Vec::new();
 
     for input in &inputs {
-        let content = if input == "-" {
+        let doc = if input == "-" {
             use std::io::Read;
             let mut buf = String::new();
             std::io::stdin()
                 .read_to_string(&mut buf)
                 .context("Failed to read from stdin")?;
-            buf
+            Document::from_json(&buf).with_context(|| format!("Failed to parse {:?}", input))?
         } else {
-            std::fs::read_to_string(input).with_context(|| format!("Failed to read {:?}", input))?
+            crate::io::read_document_auto(std::path::Path::new(input))?
         };
-
-        let doc = Document::from_json(&content)
-            .with_context(|| format!("Failed to parse {:?}", input))?;
 
         extract_paths(doc, &mut all_paths);
     }
@@ -55,6 +52,7 @@ fn extract_paths(doc: Document, paths: &mut Vec<PathOrRef>) {
                     id: format!("path-{}", step_id),
                     base: None,
                     head: step_id,
+                    graph_ref: None,
                 },
                 steps: vec![s],
                 meta: None,
@@ -95,6 +93,7 @@ mod tests {
                 id: id.to_string(),
                 base: Some(Base::vcs("github:org/repo", "abc123")),
                 head,
+                graph_ref: None,
             },
             steps,
             meta: Some(PathMeta {

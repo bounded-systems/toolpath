@@ -6,6 +6,7 @@ mod cmd_query;
 mod cmd_render;
 mod cmd_track;
 mod cmd_validate;
+mod io;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};

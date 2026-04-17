@@ -1366,7 +1366,7 @@
         .then(function () {
           shell.term.write(copperBold("path") + " " + pencil("$") + " ");
           shell.autoType(
-            "path query dead-ends --input path-01-pr.json --pretty",
+            "path query dead-ends --input path-01-pr.path.json --pretty",
             function () {
               shell.prompt();
             },

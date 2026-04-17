@@ -2,6 +2,19 @@
 
 All notable changes to the Toolpath workspace are documented here.
 
+## 0.2.0 — toolpath + 0.4.0 — toolpath-cli
+
+### toolpath 0.2.0
+
+- Add JSONL streaming format for `Path` documents (new `v1::jsonl` module) per [docs/RFC-jsonl.md](docs/RFC-jsonl.md). Read with `Path::from_jsonl_reader` / `Path::from_jsonl_str`, write with `Path::to_jsonl_writer` / `Path::to_jsonl_string`. Line kinds: `PathOpen`, `Step`, `ActorDef`, `Signature`, `PathMeta`, `Head`, `PathClose`.
+- Add `PathIdentity.graph_ref: Option<String>` — an optional `$ref`-style URL naming the graph a path belongs to. Additive and backwards-compatible; serialization omits the field when `None`, so existing documents and signatures remain byte-stable.
+
+### toolpath-cli 0.4.0
+
+- Accept `.path.jsonl` files wherever `--input` takes a canonical JSON path: `validate`, `render dot`, `render md`, `query *`, and `merge`. Extension-based routing via a new `io::read_document_auto` helper; stdin paths remain JSON-only in this release.
+- Refactor `track` to persist sessions as `.path.jsonl` streams. The session file is still a single file per session, now in JSONL format, with tracking bookkeeping stored in `path.meta.extra["track"]` (stripped on export/close). Strict append-only writes are a future optimization.
+- Rename example path documents to the two-part extension: `examples/path-*.json` → `examples/path-*.path.json`, with new `examples/path-*.path.jsonl` siblings.
+
 ## 0.3.0 — toolpath-cli
 
 ### toolpath-cli 0.3.0

@@ -1,5 +1,6 @@
 #![doc = include_str!("../README.md")]
 
+mod jsonl;
 mod query;
 mod types;
 
@@ -67,6 +68,7 @@ pub mod v1 {
     //!         id: "path-1".into(),
     //!         base: Some(Base::vcs("github:org/repo", "abc123")),
     //!         head: "s2".into(),
+    //!         graph_ref: None,
     //!     },
     //!     steps: vec![s1, s2],
     //!     meta: None,
@@ -117,6 +119,20 @@ pub mod v1 {
             filter_by_time_range, step_index,
         };
     }
+
+    /// JSONL streaming format for `Path` documents.
+    ///
+    /// See the module-level docs in [`crate::jsonl`] for the on-wire shape.
+    /// Read a file with [`Path::from_jsonl_reader`] /
+    /// [`Path::from_jsonl_str`], write with [`Path::to_jsonl_writer`] /
+    /// [`Path::to_jsonl_string`].
+    pub mod jsonl {
+        pub use crate::jsonl::{
+            ActorDefBody, HeadBody, JsonlError, JsonlLine, PathCloseBody, PathMetaBody,
+            PathMetaPatch, PathOpenBody, PathOpenMeta, SignatureBody, StepBody,
+        };
+    }
+
     pub use crate::types::{
         ActorDefinition, ArtifactChange, Base, Document, Graph, GraphIdentity, GraphMeta, Identity,
         Key, Path, PathIdentity, PathMeta, PathOrRef, PathRef, Ref, Signature, Step, StepIdentity,

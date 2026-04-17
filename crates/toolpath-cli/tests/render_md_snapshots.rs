@@ -42,13 +42,13 @@ snapshot_test!(render_md_step_06_signed, "step-06-signed.json");
 snapshot_test!(render_md_step_07_merge, "step-07-merge.json");
 
 // Paths (4)
-snapshot_test!(render_md_path_01_pr, "path-01-pr.json");
+snapshot_test!(render_md_path_01_pr, "path-01-pr.path.json");
 snapshot_test!(
     render_md_path_02_local_session,
-    "path-02-local-session.json"
+    "path-02-local-session.path.json"
 );
-snapshot_test!(render_md_path_03_signed_pr, "path-03-signed-pr.json");
-snapshot_test!(render_md_path_04_exploration, "path-04-exploration.json");
+snapshot_test!(render_md_path_03_signed_pr, "path-03-signed-pr.path.json");
+snapshot_test!(render_md_path_04_exploration, "path-04-exploration.path.json");
 
 // Graphs (1)
 snapshot_test!(render_md_graph_01_release, "graph-01-release.json");

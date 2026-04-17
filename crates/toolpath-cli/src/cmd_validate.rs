@@ -1,22 +1,32 @@
-use anyhow::{Context, Result};
+use anyhow::Result;
 use std::path::PathBuf;
 use toolpath::v1::Document;
 
+use crate::io::read_document_auto;
+
 pub fn run(input: PathBuf) -> Result<()> {
-    let content =
-        std::fs::read_to_string(&input).with_context(|| format!("Failed to read {:?}", input))?;
-    validate_content(&content)
+    match read_document_auto(&input) {
+        Ok(doc) => {
+            println!("Valid: {}", describe(&doc));
+            Ok(())
+        }
+        Err(e) => Err(anyhow::anyhow!("Invalid: {}", e)),
+    }
 }
 
+fn describe(doc: &Document) -> String {
+    match doc {
+        Document::Graph(g) => format!("Graph (id: {})", g.graph.id),
+        Document::Path(p) => format!("Path (id: {}, {} steps)", p.path.id, p.steps.len()),
+        Document::Step(s) => format!("Step (id: {})", s.step.id),
+    }
+}
+
+#[cfg(test)]
 fn validate_content(content: &str) -> Result<()> {
     match Document::from_json(content) {
         Ok(doc) => {
-            let kind = match &doc {
-                Document::Graph(g) => format!("Graph (id: {})", g.graph.id),
-                Document::Path(p) => format!("Path (id: {}, {} steps)", p.path.id, p.steps.len()),
-                Document::Step(s) => format!("Step (id: {})", s.step.id),
-            };
-            println!("Valid: {}", kind);
+            println!("Valid: {}", describe(&doc));
             Ok(())
         }
         Err(e) => Err(anyhow::anyhow!("Invalid: {}", e)),

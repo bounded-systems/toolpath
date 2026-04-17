@@ -1,6 +1,6 @@
 ---
 source: crates/toolpath-cli/tests/render_md_snapshots.rs
-expression: "render_md(\"path-03-signed-pr.json\")"
+expression: "render_md(\"path-03-signed-pr.path.json\")"
 ---
 # Add email validation
 

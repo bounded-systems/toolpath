@@ -78,18 +78,16 @@ fn run_dot(
     show_timestamps: bool,
     highlight_dead_ends: bool,
 ) -> Result<()> {
-    let content = if let Some(path) = &input {
-        std::fs::read_to_string(path).with_context(|| format!("Failed to read {:?}", path))?
+    let doc = if let Some(path) = &input {
+        crate::io::read_document_auto(path)?
     } else {
         use std::io::Read;
         let mut buf = String::new();
         std::io::stdin()
             .read_to_string(&mut buf)
             .context("Failed to read from stdin")?;
-        buf
+        Document::from_json(&buf).context("Failed to parse Toolpath document")?
     };
-
-    let doc = Document::from_json(&content).context("Failed to parse Toolpath document")?;
 
     let options = toolpath_dot::RenderOptions {
         show_files,
@@ -114,18 +112,16 @@ fn run_md(
     detail: &str,
     front_matter: bool,
 ) -> Result<()> {
-    let content = if let Some(path) = &input {
-        std::fs::read_to_string(path).with_context(|| format!("Failed to read {:?}", path))?
+    let doc = if let Some(path) = &input {
+        crate::io::read_document_auto(path)?
     } else {
         use std::io::Read;
         let mut buf = String::new();
         std::io::stdin()
             .read_to_string(&mut buf)
             .context("Failed to read from stdin")?;
-        buf
+        Document::from_json(&buf).context("Failed to parse Toolpath document")?
     };
-
-    let doc = Document::from_json(&content).context("Failed to parse Toolpath document")?;
 
     let detail = match detail {
         "full" => toolpath_md::Detail::Full,
@@ -162,6 +158,7 @@ mod tests {
                 id: "p1".into(),
                 base: None,
                 head: "s1".into(),
+                graph_ref: None,
             },
             steps: vec![s1],
             meta: None,
