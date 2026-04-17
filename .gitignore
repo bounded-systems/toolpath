@@ -1,3 +1,4 @@
 /target
 /local
 site/wasm/
+.claude/worktrees/
