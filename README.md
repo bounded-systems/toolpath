@@ -41,8 +41,7 @@ This installs a binary called `path`.
 ```
 crates/
   toolpath/           Core types, builders, query API
-  toolpath-convo/     Provider-agnostic conversation types and traits
-  toolpath-derive/    Shared derivation: ConversationView -> Toolpath Path
+  toolpath-convo/     Provider-agnostic conversation types, traits, and Toolpath-Path derivation
   toolpath-git/       Derive from git repository history
   toolpath-github/    Derive from GitHub pull requests
   toolpath-claude/    Derive from Claude conversation logs

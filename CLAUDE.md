@@ -12,8 +12,7 @@ Three core objects: **Step** (a single change), **Path** (a sequence of steps, e
 Cargo.toml                      # workspace root (edition 2024, resolver 2)
 crates/
   toolpath/                     # core types, builders, serde, query API
-  toolpath-convo/               # provider-agnostic conversation types and traits
-  toolpath-derive/              # shared ConversationView -> toolpath::Path derivation
+  toolpath-convo/               # provider-agnostic conversation types, traits, and ConversationView -> Path derivation
   toolpath-git/                 # derive from git repos (git2)
   toolpath-github/              # derive from GitHub pull requests (REST API)
   toolpath-claude/              # derive from Claude conversation logs
@@ -32,17 +31,16 @@ FAQ.md                          # design rationale, FAQ, and open questions
 ```
 toolpath-cli (binary: path)
  ├── toolpath           (core types)
- ├── toolpath-convo     (conversation abstraction)
- ├── toolpath-derive  → toolpath, toolpath-convo
+ ├── toolpath-convo   → toolpath (conversation abstraction + shared derivation)
  ├── toolpath-git     → toolpath
  ├── toolpath-github  → toolpath
  ├── toolpath-claude  → toolpath, toolpath-convo
- ├── toolpath-pi      → toolpath, toolpath-convo, toolpath-derive
+ ├── toolpath-pi      → toolpath, toolpath-convo
  ├── toolpath-dot     → toolpath
  └── toolpath-md      → toolpath
 ```
 
-Cross-dependencies between satellite crates: `toolpath-claude → toolpath-convo`, `toolpath-derive → toolpath-convo`, `toolpath-pi → toolpath-convo, toolpath-derive`.
+Cross-dependencies between satellite crates: `toolpath-claude → toolpath-convo`, `toolpath-pi → toolpath-convo`.
 
 ## Build and test
 
@@ -90,11 +88,10 @@ cargo run -p toolpath-cli -- validate --input doc.json
 Tests live alongside the code (`#[cfg(test)] mod tests`), plus `toolpath-cli` has integration tests in `tests/`. Per-crate counts:
 
 - `toolpath`: 32 unit + 9 doc tests (serde roundtrip, builders, query)
-- `toolpath-convo`: 28 unit + 1 doc test (types, enrichment, display)
+- `toolpath-convo`: 58 unit + 1 doc test (types, enrichment, display, ConversationView -> Path derivation)
 - `toolpath-git`: 33 unit + 3 doc tests (derive, branch detection, diffstat)
 - `toolpath-github`: 28 unit + 2 doc tests (mapping, DAG construction, fixtures)
 - `toolpath-claude`: 216 unit + 5 doc tests (path resolution, conversation reading, query, chaining, watcher, derive)
-- `toolpath-derive`: 30 unit + 1 doc tests (ConversationView -> Path mapping)
 - `toolpath-pi`: ~88 unit tests (types, paths, error, reader, io, provider)
 - `toolpath-dot`: 30 unit + 2 doc tests (render, visual conventions, escaping)
 - `toolpath-cli`: 126 unit + 24 integration tests (all commands, track sessions, merge, validate, roundtrip, render-md snapshots)
@@ -127,8 +124,8 @@ When changing a crate's public API (new types, new trait impls, new public metho
 11. **Crate README** — create `crates/<name>/README.md` and wire it into lib.rs via `#![doc = include_str!("../README.md")]`
 
 **Release script** (`scripts/release.sh`) publishes in dependency order:
-- Tier 1: `toolpath`, `toolpath-convo` (no workspace deps)
-- Tier 2: `toolpath-git`, `toolpath-github`, `toolpath-dot`, `toolpath-md`, `toolpath-claude`, `toolpath-derive` (depend on tier 1); then `toolpath-pi` (depends on `toolpath-derive`)
+- Tier 1: `toolpath` (no workspace deps)
+- Tier 2: `toolpath-convo` (depends on `toolpath`); then `toolpath-git`, `toolpath-github`, `toolpath-dot`, `toolpath-md`, `toolpath-claude`, `toolpath-pi`
 - Tier 3: `toolpath-cli` (depends on everything)
 
 Build the site after changes: `cd site && pnpm run build` (should produce 7 pages).
@@ -141,5 +138,5 @@ Build the site after changes: `cd site && pnpm run build` (should produce 7 page
 - Claude conversation data lives in `~/.claude/projects/` as JSONL files; `toolpath-claude` reads these directly
 - `toolpath-claude` follows session chains by default — Claude Code rotates JSONL files on context overflow; `read_conversation` merges segments, `list_conversations` returns chain heads. `read_segment`/`list_segments` for single-file access. `ChainIndex` makes this incremental.
 - Provider-specific extras convention: `Turn.extra` and `WatcherEvent::Progress.data` use provider-namespaced keys (e.g. `extra["claude"]`). `toolpath-claude` populates `Turn.extra["claude"]` from `ConversationEntry.extra` and `Progress.data["claude"]` from the full entry payload. This lets trait-only consumers access provider metadata (like `subtype` for state inference) without importing provider types.
-- Shared derivation: `toolpath-derive` provides a provider-agnostic `ConversationView → Path` mapping; new conversation providers should build on it rather than re-implementing the mapping.
+- Shared derivation: `toolpath-convo` provides a provider-agnostic `ConversationView → Path` mapping via `toolpath_convo::derive_path`. New conversation providers should build on it rather than re-implementing the mapping.
 - Pi provider: `toolpath-pi` reads Pi session JSONL from `~/.pi/agent/sessions/`. Sessions use a tree (id/parentId) in a single file, and may link to a parent file via `parentSession` in the header. The tree is preserved as a DAG in the derived `Path`.

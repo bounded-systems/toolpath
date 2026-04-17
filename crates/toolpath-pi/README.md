@@ -11,7 +11,7 @@ the session header.
 
 This crate implements the [`toolpath_convo::ConversationProvider`] trait
 and a `derive_path` wrapper that produces a [`toolpath::v1::Path`] via
-the shared [`toolpath_derive`] crate.
+the shared derivation in [`toolpath_convo::derive_path`].
 
 ## Quick example
 

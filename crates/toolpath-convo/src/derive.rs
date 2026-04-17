@@ -1,11 +1,9 @@
-//! Shared derivation: `ConversationView` → `toolpath::v1::Path`.
+//! Shared derivation: [`ConversationView`] → [`toolpath::v1::Path`].
 //!
 //! Provider-agnostic mapping used by the Pi, Claude, and future conversation
 //! providers. Takes a [`ConversationView`] and emits a [`Path`] document with
 //! one step per turn and a `conversation.append` structural change carrying
 //! the turn's text, thinking, tool uses, and token usage.
-
-#![doc = include_str!("../README.md")]
 
 use std::collections::HashMap;
 
@@ -13,7 +11,8 @@ use toolpath::v1::{
     ActorDefinition, ArtifactChange, Base, Path, PathIdentity, PathMeta, Step, StepIdentity,
     StructuralChange,
 };
-use toolpath_convo::{ConversationView, Role, ToolCategory, ToolInvocation, Turn};
+
+use crate::{ConversationView, Role, ToolCategory, ToolInvocation, Turn};
 
 /// Configuration for [`derive_path`].
 #[derive(Debug, Clone)]
@@ -298,9 +297,7 @@ fn extract_file_path(tool: &ToolInvocation) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use toolpath_convo::{
-        DelegatedWork, EnvironmentSnapshot, TokenUsage, ToolInvocation, ToolResult,
-    };
+    use crate::{DelegatedWork, EnvironmentSnapshot, TokenUsage, ToolInvocation, ToolResult};
 
     fn base_turn(id: &str, role: Role) -> Turn {
         Turn {
@@ -418,11 +415,18 @@ mod tests {
     #[test]
     fn test_tool_use_filewrite_with_file_path_field() {
         let mut turn = base_turn("t1", Role::Assistant);
-        turn.tool_uses = vec![fw_tool("Write", "tu1", serde_json::json!({"file_path": "src/main.rs"}))];
+        turn.tool_uses = vec![fw_tool(
+            "Write",
+            "tu1",
+            serde_json::json!({"file_path": "src/main.rs"}),
+        )];
         let view = view_with(vec![turn]);
         let path = derive_path(&view, &DeriveConfig::default());
         assert!(path.steps[0].change.contains_key("src/main.rs"));
-        let sc = path.steps[0].change["src/main.rs"].structural.as_ref().unwrap();
+        let sc = path.steps[0].change["src/main.rs"]
+            .structural
+            .as_ref()
+            .unwrap();
         assert_eq!(sc.change_type, "file.write");
         assert_eq!(sc.extra["tool"], serde_json::json!("Write"));
         assert_eq!(sc.extra["tool_id"], serde_json::json!("tu1"));
@@ -461,9 +465,7 @@ mod tests {
         turn.tool_uses = vec![fw_tool("W", "tu1", serde_json::json!({"other": "foo"}))];
         let view = view_with(vec![turn]);
         let path = derive_path(&view, &DeriveConfig::default());
-        // Only the conversation.append artifact — no file change added
         assert_eq!(path.steps[0].change.len(), 1);
-        // But tool is in extras
         let sc = conv_change(&path.steps[0]);
         assert!(sc.extra.contains_key("tool_uses"));
     }
@@ -655,7 +657,10 @@ mod tests {
         let path = derive_path(&view, &DeriveConfig::default());
         let sc = conv_change(&path.steps[0]);
         assert!(sc.extra.contains_key("token_usage"));
-        assert_eq!(sc.extra["token_usage"]["input_tokens"], serde_json::json!(100));
+        assert_eq!(
+            sc.extra["token_usage"]["input_tokens"],
+            serde_json::json!(100)
+        );
     }
 
     #[test]
@@ -671,7 +676,10 @@ mod tests {
         let path = derive_path(&view, &DeriveConfig::default());
         let sc = conv_change(&path.steps[0]);
         assert!(sc.extra.contains_key("delegations"));
-        assert_eq!(sc.extra["delegations"][0]["agent_id"], serde_json::json!("sub-1"));
+        assert_eq!(
+            sc.extra["delegations"][0]["agent_id"],
+            serde_json::json!("sub-1")
+        );
     }
 
     #[test]
@@ -706,7 +714,11 @@ mod tests {
         let mut t2 = base_turn("t2", Role::Assistant);
         t2.parent_id = Some("t1".into());
         t2.model = Some("m".into());
-        t2.tool_uses = vec![fw_tool("Write", "tu1", serde_json::json!({"file_path": "x.rs"}))];
+        t2.tool_uses = vec![fw_tool(
+            "Write",
+            "tu1",
+            serde_json::json!({"file_path": "x.rs"}),
+        )];
 
         let mut view = view_with(vec![t1, t2]);
         view.files_changed = vec!["x.rs".into()];
@@ -720,5 +732,4 @@ mod tests {
         assert_eq!(back.steps[1].step.parents, vec!["step-0001".to_string()]);
         assert!(back.steps[1].change.contains_key("x.rs"));
     }
-
 }

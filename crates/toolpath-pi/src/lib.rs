@@ -13,7 +13,7 @@ pub use error::{PiError, Result};
 pub use paths::PathResolver;
 pub use provider::session_to_view;
 pub use reader::{PiSession, SessionMeta};
-pub use toolpath_derive::DeriveConfig;
+pub use toolpath_convo::DeriveConfig;
 pub use types::{
     AgentMessage, ContentBlock, CostBreakdown, Entry, EntryBase, SessionHeader, Usage,
 };

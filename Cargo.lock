@@ -1834,23 +1834,13 @@ dependencies = [
 
 [[package]]
 name = "toolpath-convo"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "chrono",
  "serde",
  "serde_json",
  "thiserror",
-]
-
-[[package]]
-name = "toolpath-derive"
-version = "0.1.0"
-dependencies = [
- "chrono",
- "serde",
- "serde_json",
  "toolpath",
- "toolpath-convo",
 ]
 
 [[package]]
@@ -1903,7 +1893,6 @@ dependencies = [
  "thiserror",
  "toolpath",
  "toolpath-convo",
- "toolpath-derive",
 ]
 
 [[package]]

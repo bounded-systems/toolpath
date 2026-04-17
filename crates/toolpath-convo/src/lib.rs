@@ -1,5 +1,9 @@
 #![doc = include_str!("../README.md")]
 
+pub mod derive;
+
+pub use derive::{derive_path, DeriveConfig};
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;

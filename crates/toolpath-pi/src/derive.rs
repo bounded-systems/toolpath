@@ -1,22 +1,22 @@
-//! Thin wrapper: PiSession → ConversationView → toolpath_derive.
+//! Thin wrapper: PiSession → ConversationView → toolpath_convo::derive.
 //!
 //! Converts Pi sessions into Toolpath `Path` and `Graph` documents by
-//! delegating to [`toolpath_derive`] once the session has been mapped to a
-//! provider-agnostic [`toolpath_convo::ConversationView`] via
+//! delegating to [`toolpath_convo::derive_path`] once the session has been
+//! mapped to a provider-agnostic [`toolpath_convo::ConversationView`] via
 //! [`crate::provider::session_to_view`].
 
 use crate::PiConvo;
 use crate::provider::session_to_view;
 use crate::reader::PiSession;
 use toolpath::v1::{Document, Graph, GraphIdentity, GraphMeta, Path, PathOrRef};
-use toolpath_derive::DeriveConfig;
+use toolpath_convo::DeriveConfig;
 
 /// Derive a Toolpath [`Path`] from a single Pi session.
 ///
 /// Thin wrapper: converts the session to a provider-agnostic
-/// `ConversationView` and hands off to [`toolpath_derive::derive_path`].
+/// `ConversationView` and hands off to [`toolpath_convo::derive_path`].
 pub fn derive_path(session: &PiSession, config: &DeriveConfig) -> Path {
-    toolpath_derive::derive_path(&session_to_view(session), config)
+    toolpath_convo::derive_path(&session_to_view(session), config)
 }
 
 /// Derive a Toolpath [`Graph`] from multiple Pi sessions.
