@@ -1,6 +1,6 @@
 [package]
 name = "toolpath-cli"
-version = "0.3.0"
+version = "0.3.1"
 edition.workspace = true
 license.workspace = true
 repository = "https://github.com/empathic/toolpath"
@@ -29,6 +29,7 @@ rand = "0.9"
 [target.'cfg(not(target_os = "emscripten"))'.dependencies]
 toolpath-claude = { workspace = true, features = ["watcher"] }
 toolpath-pi = { workspace = true }
+toolpath-convo = { workspace = true }
 toolpath-github = { workspace = true }
 git2 = { workspace = true }
 
@@ -40,3 +41,4 @@ toolpath-pi = { workspace = true }
 assert_cmd = "2"
 predicates = "3"
 insta = { workspace = true }
+toolpath-convo = { workspace = true }
