@@ -28,6 +28,16 @@ pub enum ListSource {
         #[arg(short, long)]
         project: Option<String>,
     },
+    /// List Pi (pi.dev) projects or sessions
+    Pi {
+        /// Project path — if omitted, lists all projects
+        #[arg(short, long)]
+        project: Option<String>,
+
+        /// Override the Pi sessions base directory (default: ~/.pi/agent/sessions)
+        #[arg(long)]
+        base: Option<PathBuf>,
+    },
 }
 
 pub fn run(source: ListSource, json: bool) -> Result<()> {
@@ -35,6 +45,7 @@ pub fn run(source: ListSource, json: bool) -> Result<()> {
         ListSource::Git { repo, remote } => run_git(repo, remote, json),
         ListSource::Github { repo } => run_github(repo, json),
         ListSource::Claude { project } => run_claude(project, json),
+        ListSource::Pi { project, base } => run_pi(project, base, json),
     }
 }
 
@@ -242,6 +253,89 @@ fn list_claude_sessions(
     Ok(())
 }
 
+fn run_pi(project: Option<String>, base: Option<PathBuf>, json: bool) -> Result<()> {
+    let manager = if let Some(path) = base {
+        let resolver = toolpath_pi::PathResolver::new().with_sessions_dir(&path);
+        toolpath_pi::PiConvo::with_resolver(resolver)
+    } else {
+        toolpath_pi::PiConvo::new()
+    };
+
+    match project {
+        None => list_pi_projects(&manager, json),
+        Some(project_path) => list_pi_sessions(&manager, &project_path, json),
+    }
+}
+
+fn list_pi_projects(manager: &toolpath_pi::PiConvo, json: bool) -> Result<()> {
+    let projects = manager
+        .list_projects()
+        .map_err(|e| anyhow::anyhow!("{}", e))?;
+
+    if json {
+        let items: Vec<serde_json::Value> = projects
+            .iter()
+            .map(|p| serde_json::json!({ "path": p }))
+            .collect();
+        let output = serde_json::json!({
+            "source": "pi",
+            "projects": items,
+        });
+        println!("{}", serde_json::to_string_pretty(&output)?);
+    } else if projects.is_empty() {
+        println!(
+            "No Pi projects found. Sessions dir: {:?}",
+            manager.resolver().sessions_dir()
+        );
+    } else {
+        println!("Pi projects:");
+        println!();
+        for p in &projects {
+            println!("  {}", p);
+        }
+    }
+    Ok(())
+}
+
+fn list_pi_sessions(
+    manager: &toolpath_pi::PiConvo,
+    project_path: &str,
+    json: bool,
+) -> Result<()> {
+    let sessions = manager
+        .list_sessions(project_path)
+        .map_err(|e| anyhow::anyhow!("{}", e))?;
+
+    if json {
+        let items: Vec<serde_json::Value> = sessions
+            .iter()
+            .map(|m| {
+                serde_json::json!({
+                    "id": m.id,
+                    "timestamp": m.timestamp,
+                    "entry_count": m.entry_count,
+                    "file_path": m.file_path,
+                })
+            })
+            .collect();
+        let output = serde_json::json!({
+            "source": "pi",
+            "project": project_path,
+            "sessions": items,
+        });
+        println!("{}", serde_json::to_string_pretty(&output)?);
+    } else if sessions.is_empty() {
+        println!("No sessions found for project: {}", project_path);
+    } else {
+        println!("Sessions for {}:", project_path);
+        println!();
+        for m in &sessions {
+            println!("  {}\t{}\t{} entries", m.id, m.timestamp, m.entry_count);
+        }
+    }
+    Ok(())
+}
+
 #[cfg(not(target_os = "emscripten"))]
 fn truncate(s: &str, max: usize) -> String {
     if s.chars().count() <= max {
@@ -415,5 +509,74 @@ mod tests {
         // Test the dispatch to list_claude_projects through run_claude-like path
         let result = list_claude_projects(&manager, false);
         assert!(result.is_ok());
+    }
+
+    fn setup_pi_manager() -> (tempfile::TempDir, toolpath_pi::PiConvo) {
+        let temp = tempfile::tempdir().unwrap();
+        let sessions_dir = temp.path().join(".pi/agent/sessions");
+        let project_dir = sessions_dir.join("--test-project--");
+        std::fs::create_dir_all(&project_dir).unwrap();
+
+        let header = r#"{"type":"session","version":3,"id":"sess-1","timestamp":"2026-04-16T10:00:00Z","cwd":"/test/project"}"#;
+        let msg1 = r#"{"type":"message","id":"m1","timestamp":"2026-04-16T10:00:01Z","message":{"role":"user","content":"Hello","timestamp":1744797601000}}"#;
+        let msg2 = r#"{"type":"message","id":"m2","parentId":"m1","timestamp":"2026-04-16T10:00:02Z","message":{"role":"assistant","content":[{"type":"text","text":"Hi"}],"api":"a","provider":"anthropic","model":"claude-x","usage":{"input":1,"output":1,"cacheRead":0,"cacheWrite":0,"totalTokens":2,"cost":{"input":0.0,"output":0.0,"cacheRead":0.0,"cacheWrite":0.0,"total":0.0}},"stopReason":"stop","timestamp":1744797602000}}"#;
+        std::fs::write(
+            project_dir.join("2026-04-16_sess-1.jsonl"),
+            [header, msg1, msg2].join("\n"),
+        )
+        .unwrap();
+
+        let resolver = toolpath_pi::PathResolver::new().with_sessions_dir(&sessions_dir);
+        let manager = toolpath_pi::PiConvo::with_resolver(resolver);
+        (temp, manager)
+    }
+
+    #[test]
+    fn test_list_pi_projects_populated() {
+        let (_temp, manager) = setup_pi_manager();
+        let result = list_pi_projects(&manager, false);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_list_pi_projects_json() {
+        let (_temp, manager) = setup_pi_manager();
+        let result = list_pi_projects(&manager, true);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_list_pi_projects_empty() {
+        let temp = tempfile::tempdir().unwrap();
+        let sessions_dir = temp.path().join(".pi/agent/sessions");
+        std::fs::create_dir_all(&sessions_dir).unwrap();
+
+        let resolver = toolpath_pi::PathResolver::new().with_sessions_dir(&sessions_dir);
+        let manager = toolpath_pi::PiConvo::with_resolver(resolver);
+
+        let result = list_pi_projects(&manager, false);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_list_pi_sessions() {
+        let (_temp, manager) = setup_pi_manager();
+        let result = list_pi_sessions(&manager, "/test/project", false);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_list_pi_sessions_json() {
+        let (_temp, manager) = setup_pi_manager();
+        let result = list_pi_sessions(&manager, "/test/project", true);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_list_pi_nonexistent_project() {
+        let (_temp, manager) = setup_pi_manager();
+        // A project that doesn't have a directory should error via PiError.
+        let result = list_pi_sessions(&manager, "/does/not/exist", false);
+        assert!(result.is_err());
     }
 }

@@ -10,14 +10,16 @@ set -euo pipefail
 #
 # Dependency order:
 #   1. toolpath           (no workspace deps)
-#      toolpath-convo     (no workspace deps)
-#   2. toolpath-git       (depends on toolpath)
-#      toolpath-github    (depends on toolpath)
-#      toolpath-dot       (depends on toolpath)
-#      toolpath-claude    (depends on toolpath, toolpath-convo)
+#   2a. toolpath-convo    (depends on toolpath)
+#   2b. toolpath-git      (depends on toolpath)
+#       toolpath-github   (depends on toolpath)
+#       toolpath-dot      (depends on toolpath)
+#       toolpath-md       (depends on toolpath)
+#       toolpath-claude   (depends on toolpath, toolpath-convo)
+#       toolpath-pi       (depends on toolpath, toolpath-convo)
 #   3. toolpath-cli       (depends on all of the above)
 
-ALL_CRATES=(toolpath toolpath-convo toolpath-git toolpath-github toolpath-dot toolpath-md toolpath-claude toolpath-cli)
+ALL_CRATES=(toolpath toolpath-convo toolpath-git toolpath-github toolpath-dot toolpath-md toolpath-claude toolpath-pi toolpath-cli)
 
 DRY_RUN=""
 AUTO_YES=""
@@ -187,23 +189,26 @@ publish() {
     echo
 }
 
-# Tier 1: foundation crates (no workspace deps)
-for crate in toolpath toolpath-convo; do
+# Tier 1: foundation crate (no workspace deps)
+publish toolpath
+if should_publish toolpath; then
+    wait_for_index toolpath "$(crate_version toolpath)"
+fi
+
+# Tier 2a: toolpath-convo (depends on toolpath). Published before the other
+# satellite crates so that toolpath-claude and toolpath-pi (which depend on it)
+# see it live on the index.
+publish toolpath-convo
+if should_publish toolpath-convo; then
+    wait_for_index toolpath-convo "$(crate_version toolpath-convo)"
+fi
+
+# Tier 2b: satellite crates (depend on tier 1 and/or toolpath-convo)
+for crate in toolpath-git toolpath-github toolpath-dot toolpath-md toolpath-claude toolpath-pi; do
     publish "$crate"
 done
-for crate in toolpath toolpath-convo; do
-    if should_publish "$crate"; then
-        wait_for_index "$crate" "$(crate_version "$crate")"
-    fi
-done
 
-# Tier 2: satellite crates (depend on tier 1, no cross-deps)
-for crate in toolpath-git toolpath-github toolpath-dot toolpath-md toolpath-claude; do
-    publish "$crate"
-done
-
-# Wait for tier 2 publishes to land before publishing the CLI
-for crate in toolpath-git toolpath-github toolpath-dot toolpath-md toolpath-claude; do
+for crate in toolpath-git toolpath-github toolpath-dot toolpath-md toolpath-claude toolpath-pi; do
     if should_publish "$crate"; then
         wait_for_index "$crate" "$(crate_version "$crate")"
     fi
