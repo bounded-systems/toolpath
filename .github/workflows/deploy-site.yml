@@ -24,11 +24,15 @@ jobs:
           key: cargo-test-${{ hashFiles('Cargo.lock') }}
           restore-keys: cargo-test-
 
+      # toolpath-desktop is a Tauri 2 app that pulls in glib-sys /
+       # webkit2gtk-sys on Linux, which need GTK system libs we don't
+       # install here. The crate targets macOS primarily; its own tests
+       # run on dev machines where Tauri's deps are already present.
       - name: Test
-        run: cargo test --workspace
+        run: cargo test --workspace --exclude toolpath-desktop
 
       - name: Clippy
-        run: cargo clippy --workspace -- -D warnings
+        run: cargo clippy --workspace --exclude toolpath-desktop -- -D warnings
 
   deploy:
     needs: test

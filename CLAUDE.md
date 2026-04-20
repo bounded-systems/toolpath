@@ -20,6 +20,7 @@ crates/
   toolpath-dot/                 # Graphviz DOT rendering
   toolpath-md/                  # Markdown rendering for LLM consumption
   toolpath-cli/                 # unified CLI (binary: path)
+  toolpath-desktop/             # Tauri 2 GUI (binary: toolpath-desktop)
 schema/toolpath.schema.json     # JSON Schema for the format
 examples/*.json                 # 12 example documents (step, path, graph)
 RFC.md                          # full format specification
@@ -38,9 +39,12 @@ toolpath-cli (binary: path)
  ├── toolpath-pi      → toolpath, toolpath-convo
  ├── toolpath-dot     → toolpath
  └── toolpath-md      → toolpath
+
+toolpath-desktop (binary: toolpath-desktop, Tauri 2 app)
+ ├── toolpath, toolpath-claude, toolpath-git, toolpath-github
 ```
 
-Cross-dependencies between satellite crates: `toolpath-claude → toolpath-convo`, `toolpath-pi → toolpath-convo`.
+Cross-dependencies between satellite crates: `toolpath-claude → toolpath-convo`, `toolpath-pi → toolpath-convo`. `toolpath-desktop` is a leaf — nothing depends on it.
 
 ## Build and test
 
@@ -95,12 +99,36 @@ Tests live alongside the code (`#[cfg(test)] mod tests`), plus `toolpath-cli` ha
 - `toolpath-pi`: ~88 unit tests (types, paths, error, reader, io, provider)
 - `toolpath-dot`: 30 unit + 2 doc tests (render, visual conventions, escaping)
 - `toolpath-cli`: 126 unit + 24 integration tests (all commands, track sessions, merge, validate, roundtrip, render-md snapshots)
+- `toolpath-desktop`: 13 unit tests (IPC command modules — source listing, derive validation, export round-trip, upload stub, keychain input checks)
 
 Validate example documents: `for f in examples/*.json; do cargo run -p toolpath-cli -- validate --input "$f"; done`
 
 ## Feature flags
 
 - `toolpath-claude` has a `watcher` feature (default: on) gating `notify`/`tokio` dependencies for filesystem watching
+
+## toolpath-desktop
+
+Tauri 2 app. Rust backend links `toolpath`, `toolpath-claude`, `toolpath-git`, `toolpath-github` directly (no CLI subprocess). Frontend is Svelte 5 + TypeScript + Vite, in the Elm-architecture (TEA) shape.
+
+Layout:
+- `crates/toolpath-desktop/src/` — Rust backend (Tauri IPC commands).
+- `crates/toolpath-desktop/frontend/` — Svelte app (bundled by Vite; managed with `bun`).
+  - `src/lib/types.ts` — `Model`, `Msg`, `Cmd`, IPC payload types (mirror Rust serde).
+  - `src/lib/update.ts` — pure `update(msg, model) -> [model, cmd]` reducer + `initialModel()`.
+  - `src/lib/store.svelte.ts` — reactive Svelte 5 store wrapping `update`, runs `Cmd`s (invoke / batch / emitMsg / fn).
+  - `src/lib/ipc.ts` — typed `invoke()` + `listen()` wrappers around `@tauri-apps/api`.
+  - `src/lib/viz.ts` — dagre-d3 DAG renderer.
+  - `src/routes/*.svelte` — one component per route, pure views over `store.m`.
+  - `src/app.svelte` — top-level switch on `store.m.route`.
+
+Tauri dev loop: `cargo tauri dev` spawns `bun --cwd frontend run dev` (Vite on `http://localhost:1420`), then runs the Rust binary against that URL. Frontend edits hot-reload via Vite HMR without restarting Rust; Rust edits trigger `cargo run` to restart. Production: `cargo tauri build` runs `bun --cwd frontend run build` first, bundling to `frontend/dist/`.
+
+Streaming pattern (Claude project/session lists): Rust command spawns a thread that emits `claude:project`, `claude:session`, `claude:projects-done`, `claude:sessions-done` events. The Svelte component subscribes with `$effect(() => { listen(...) ... return unlisten; })` — Svelte tears down listeners automatically when the effect's deps change or the component unmounts.
+
+Package manager for the frontend is `bun` (installed at `~/.bun/bin/bun`). `bun install` to set up, `bun run check` for `svelte-check`, `bun run build` for a production Vite build. Never commit `node_modules/` or `dist/` — both are ignored.
+
+Dev: `cargo tauri dev` from the crate directory. Build: `cargo tauri build`. GitHub PAT is stored in the OS keychain under service `dev.pathbase.toolpath-desktop`. Pathbase upload is a stub as of 0.1.0 — it validates the payload and returns a mock URL.
 
 ## Versioning and release checklist
 

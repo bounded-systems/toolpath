@@ -14,6 +14,7 @@ All notable changes to the Toolpath workspace are documented here.
 - `toolpath-pi` 0.1.0: new crate — reads Pi (pi.dev) coding-agent session JSONL logs, implements `ConversationProvider`, and derives Toolpath `Path` documents via `toolpath-convo`'s shared derivation (`toolpath_convo::derive_path`). Reads from `~/.pi/agent/sessions/` by default; base directory is configurable. Preserves Pi's in-file conversation tree (id/parentId) as a DAG in the derived `Path`, and follows `parentSession` links across session files (bounded depth). CLI subcommands planned: `path derive pi` and `path list pi` (wiring may be merged separately).
 - `toolpath-claude` 0.7.0: `ClaudeProjector` for projecting `ConversationView` back to Claude `Conversation`. Enriched derive: full text, tool invocation steps, `agent://` URNs, token usage, tool results via cross-entry assembly, `conversation.init` steps.
 - `toolpath-cli` 0.3.1: `path project claude` and `path incept` commands for projecting toolpath documents into Claude sessions.
+- `toolpath-desktop` 0.1.0: new crate — Tauri 2 desktop app for non-technical users. Source discovery for Claude Code + Pi + local git + GitHub PRs; interactive DAG preview (d3 + dagre-d3, Svelte 5 + TypeScript frontend); local `.path.json` export; stubbed Pathbase upload. GitHub PAT stored in the OS keychain under `dev.pathbase.toolpath-desktop`. Hot-reloading dev loop via `cargo tauri dev` (spawns Vite on port 1420).
 
 ## 0.3.0 — toolpath-cli
 
