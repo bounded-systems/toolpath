@@ -1,0 +1,846 @@
+//! Implementation of `toolpath-convo` traits for Gemini CLI conversations.
+//!
+//! Key differences from the Claude implementation:
+//!
+//! - Gemini stores tool results inline on the same message as the call, so
+//!   there's no cross-message "tool-result-only" assembly pass.
+//! - Sub-agent work lives in sibling chat files inside the same session
+//!   UUID directory. When a `task` tool invocation fires in the main
+//!   chat, the matching sub-agent file's turns are populated onto a
+//!   [`DelegatedWork`].
+
+use std::collections::HashMap;
+
+use crate::GeminiConvo;
+use crate::types::{ChatFile, Conversation, GeminiMessage, GeminiRole, Thought, ToolCall};
+use serde_json::{Map, Value};
+use toolpath_convo::{
+    ConversationMeta, ConversationProvider, ConversationView, ConvoError, DelegatedWork,
+    EnvironmentSnapshot, Role, TokenUsage, ToolCategory, ToolInvocation, ToolResult, Turn,
+};
+
+// ── Role/tool mapping ────────────────────────────────────────────────
+
+fn gemini_role_to_role(role: &GeminiRole) -> Role {
+    match role {
+        GeminiRole::User => Role::User,
+        GeminiRole::Gemini => Role::Assistant,
+        GeminiRole::Info => Role::System,
+        GeminiRole::Other(s) => Role::Other(s.clone()),
+    }
+}
+
+/// Classify a Gemini CLI tool name into toolpath's category ontology.
+///
+/// Returns `None` for unrecognized tools. Keep this table in sync with
+/// https://geminicli.com/docs/reference/tools.
+pub fn tool_category(name: &str) -> Option<ToolCategory> {
+    match name {
+        "read_file" | "read_many_files" | "list_directory" | "get_internal_docs"
+        | "read_mcp_resource" => Some(ToolCategory::FileRead),
+        "glob" | "grep_search" | "search_file_content" => Some(ToolCategory::FileSearch),
+        "write_file" | "replace" | "edit" => Some(ToolCategory::FileWrite),
+        "run_shell_command" => Some(ToolCategory::Shell),
+        "web_fetch" | "google_web_search" => Some(ToolCategory::Network),
+        "task" | "activate_skill" => Some(ToolCategory::Delegation),
+        _ => None,
+    }
+}
+
+// ── Message → Turn ────────────────────────────────────────────────────
+
+fn message_to_turn(msg: &GeminiMessage, working_dir: Option<&str>) -> Turn {
+    let text = msg.content.text();
+    let thinking = flatten_thoughts(msg.thoughts());
+    let tool_uses: Vec<ToolInvocation> = msg
+        .tool_calls()
+        .iter()
+        .map(tool_call_to_invocation)
+        .collect();
+
+    let token_usage = msg.tokens.as_ref().map(|t| TokenUsage {
+        input_tokens: t.input,
+        output_tokens: t.output,
+        cache_read_tokens: t.cached,
+        cache_write_tokens: None,
+    });
+
+    let environment = working_dir.map(|wd| EnvironmentSnapshot {
+        working_dir: Some(wd.to_string()),
+        vcs_branch: None,
+        vcs_revision: None,
+    });
+
+    let mut extra = HashMap::new();
+    let gemini_extra = build_gemini_extra(msg);
+    if !gemini_extra.is_empty() {
+        extra.insert("gemini".to_string(), Value::Object(gemini_extra));
+    }
+
+    Turn {
+        id: msg.id.clone(),
+        parent_id: None,
+        role: gemini_role_to_role(&msg.role),
+        timestamp: msg.timestamp.clone(),
+        text,
+        thinking,
+        tool_uses,
+        model: msg.model.clone(),
+        stop_reason: None,
+        token_usage,
+        environment,
+        delegations: vec![],
+        extra,
+    }
+}
+
+fn flatten_thoughts(thoughts: &[Thought]) -> Option<String> {
+    if thoughts.is_empty() {
+        return None;
+    }
+    let joined: Vec<String> = thoughts
+        .iter()
+        .filter_map(|t| match (&t.subject, &t.description) {
+            (Some(s), Some(d)) => Some(format!("**{}**\n{}", s, d)),
+            (Some(s), None) => Some(s.clone()),
+            (None, Some(d)) => Some(d.clone()),
+            (None, None) => None,
+        })
+        .collect();
+    if joined.is_empty() {
+        None
+    } else {
+        Some(joined.join("\n\n"))
+    }
+}
+
+fn tool_call_to_invocation(call: &ToolCall) -> ToolInvocation {
+    let text = call.result_text();
+    let is_error = call.is_error();
+    let result = if call.result.is_empty() && !is_error {
+        None
+    } else {
+        Some(ToolResult {
+            content: text,
+            is_error,
+        })
+    };
+    ToolInvocation {
+        id: call.id.clone(),
+        name: call.name.clone(),
+        input: call.args.clone(),
+        result,
+        category: tool_category(&call.name),
+    }
+}
+
+/// Collect fields that don't map cleanly onto the common `Turn` schema
+/// into a map that lives under `Turn.extra["gemini"]`.
+fn build_gemini_extra(msg: &GeminiMessage) -> Map<String, Value> {
+    let mut map = Map::new();
+
+    // Raw tokens struct (includes thoughts/tool/total not in the common schema).
+    if let Some(t) = &msg.tokens
+        && let Ok(v) = serde_json::to_value(t)
+    {
+        map.insert("tokens".to_string(), v);
+    }
+
+    // Thought metadata (subject + timestamp only; the text lives in
+    // Turn.thinking already).
+    if !msg.thoughts().is_empty() {
+        let meta: Vec<Value> = msg
+            .thoughts()
+            .iter()
+            .map(|t| {
+                serde_json::json!({
+                    "subject": t.subject,
+                    "timestamp": t.timestamp,
+                })
+            })
+            .collect();
+        map.insert("thoughts_meta".to_string(), Value::Array(meta));
+    }
+
+    // Tool call statuses (pending/executing/etc. — the result-only view
+    // on ToolInvocation loses this nuance).
+    if !msg.tool_calls().is_empty() {
+        let statuses: Vec<Value> = msg
+            .tool_calls()
+            .iter()
+            .map(|t| {
+                serde_json::json!({
+                    "id": t.id,
+                    "status": t.status,
+                    "result_display": t.result_display,
+                    "description": t.description,
+                    "display_name": t.display_name,
+                })
+            })
+            .collect();
+        map.insert("tool_call_meta".to_string(), Value::Array(statuses));
+    }
+
+    // Anything else that serde picked up via #[serde(flatten)]
+    for (k, v) in &msg.extra {
+        map.insert(k.clone(), v.clone());
+    }
+
+    map
+}
+
+// ── Delegation wiring ────────────────────────────────────────────────
+
+/// Build a `DelegatedWork` from a sub-agent chat file, optionally using
+/// a parent `ToolInvocation`'s fields as a fallback.
+fn sub_agent_to_delegation(
+    sub: &ChatFile,
+    working_dir: Option<&str>,
+    fallback_prompt: &str,
+    fallback_result: Option<&ToolResult>,
+) -> DelegatedWork {
+    let turns: Vec<Turn> = sub
+        .messages
+        .iter()
+        .map(|m| message_to_turn(m, working_dir))
+        .collect();
+
+    let prompt = first_user_text(sub).unwrap_or_else(|| fallback_prompt.to_string());
+
+    let result = sub
+        .summary
+        .clone()
+        .or_else(|| fallback_result.map(|r| r.content.clone()));
+
+    let agent_id = if sub.session_id.is_empty() {
+        format!("subagent-{}", turns.len())
+    } else {
+        sub.session_id.clone()
+    };
+
+    DelegatedWork {
+        agent_id,
+        prompt,
+        turns,
+        result,
+    }
+}
+
+fn first_user_text(chat: &ChatFile) -> Option<String> {
+    chat.messages
+        .iter()
+        .find(|m| m.role == GeminiRole::User)
+        .map(|m| m.content.text())
+        .filter(|t| !t.is_empty())
+}
+
+/// Build a fallback `DelegatedWork` from a `ToolInvocation` when no
+/// sub-agent file was found — mirrors the Claude provider's behaviour.
+fn tool_invocation_to_delegation(tu: &ToolInvocation) -> DelegatedWork {
+    DelegatedWork {
+        agent_id: tu.id.clone(),
+        prompt: tu
+            .input
+            .get("prompt")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string(),
+        turns: vec![],
+        result: tu.result.as_ref().map(|r| r.content.clone()),
+    }
+}
+
+// ── Conversation → View ──────────────────────────────────────────────
+
+fn conversation_to_view(convo: &Conversation) -> ConversationView {
+    let working_dir: Option<String> = convo.project_path.clone().or_else(|| {
+        convo
+            .main
+            .directories()
+            .first()
+            .map(|p| p.to_string_lossy().to_string())
+    });
+    let wd_ref = working_dir.as_deref();
+
+    // Sort sub-agents by start_time (deterministic attachment).
+    let mut sub_order: Vec<&ChatFile> = convo.sub_agents.iter().collect();
+    sub_order.sort_by_key(|s| s.start_time);
+    let mut sub_iter = sub_order.into_iter();
+
+    let mut turns: Vec<Turn> = Vec::with_capacity(convo.main.messages.len());
+
+    for msg in &convo.main.messages {
+        let mut turn = message_to_turn(msg, wd_ref);
+
+        // For each delegation-category tool invocation, try to pull the
+        // next sub-agent off the queue.
+        for tu in &turn.tool_uses {
+            if tu.category != Some(ToolCategory::Delegation) {
+                continue;
+            }
+            let delegation = match sub_iter.next() {
+                Some(sub) => {
+                    let prompt_fallback = tu
+                        .input
+                        .get("prompt")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    sub_agent_to_delegation(sub, wd_ref, prompt_fallback, tu.result.as_ref())
+                }
+                None => tool_invocation_to_delegation(tu),
+            };
+            turn.delegations.push(delegation);
+        }
+
+        turns.push(turn);
+    }
+
+    // Leftover sub-agents (no matching task invocation) attach to the
+    // last assistant turn, or get dropped if there is none.
+    let leftover: Vec<&ChatFile> = sub_iter.collect();
+    if !leftover.is_empty()
+        && let Some(last_assistant) = turns
+            .iter_mut()
+            .rev()
+            .find(|t| matches!(t.role, Role::Assistant))
+    {
+        for sub in leftover {
+            last_assistant
+                .delegations
+                .push(sub_agent_to_delegation(sub, wd_ref, "", None));
+        }
+    }
+
+    let total_usage = sum_usage(&turns);
+    let files_changed = extract_files_changed(&turns);
+
+    ConversationView {
+        id: convo.session_uuid.clone(),
+        started_at: convo.started_at,
+        last_activity: convo.last_activity,
+        turns,
+        total_usage,
+        provider_id: Some("gemini-cli".into()),
+        files_changed,
+        session_ids: vec![],
+        events: vec![],
+    }
+}
+
+fn sum_usage(turns: &[Turn]) -> Option<TokenUsage> {
+    let mut total = TokenUsage::default();
+    let mut any = false;
+    for turn in turns {
+        if let Some(u) = &turn.token_usage {
+            any = true;
+            total.input_tokens =
+                Some(total.input_tokens.unwrap_or(0) + u.input_tokens.unwrap_or(0));
+            total.output_tokens =
+                Some(total.output_tokens.unwrap_or(0) + u.output_tokens.unwrap_or(0));
+            total.cache_read_tokens = match (total.cache_read_tokens, u.cache_read_tokens) {
+                (Some(a), Some(b)) => Some(a + b),
+                (Some(a), None) => Some(a),
+                (None, Some(b)) => Some(b),
+                (None, None) => None,
+            };
+        }
+        // Also walk sub-agent turns inside delegations.
+        for d in &turn.delegations {
+            for t in &d.turns {
+                if let Some(u) = &t.token_usage {
+                    any = true;
+                    total.input_tokens =
+                        Some(total.input_tokens.unwrap_or(0) + u.input_tokens.unwrap_or(0));
+                    total.output_tokens =
+                        Some(total.output_tokens.unwrap_or(0) + u.output_tokens.unwrap_or(0));
+                    total.cache_read_tokens = match (total.cache_read_tokens, u.cache_read_tokens) {
+                        (Some(a), Some(b)) => Some(a + b),
+                        (Some(a), None) => Some(a),
+                        (None, Some(b)) => Some(b),
+                        (None, None) => None,
+                    };
+                }
+            }
+        }
+    }
+    if any { Some(total) } else { None }
+}
+
+fn extract_files_changed(turns: &[Turn]) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    let mut files = Vec::new();
+    let push = |tool_use: &ToolInvocation,
+                seen: &mut std::collections::HashSet<String>,
+                files: &mut Vec<String>| {
+        if tool_use.category == Some(ToolCategory::FileWrite)
+            && let Some(path) = file_path_from_args(&tool_use.input)
+            && seen.insert(path.clone())
+        {
+            files.push(path);
+        }
+    };
+    for turn in turns {
+        for tu in &turn.tool_uses {
+            push(tu, &mut seen, &mut files);
+        }
+        for d in &turn.delegations {
+            for t in &d.turns {
+                for tu in &t.tool_uses {
+                    push(tu, &mut seen, &mut files);
+                }
+            }
+        }
+    }
+    files
+}
+
+/// Pull the file path out of a tool's `args`. Gemini uses different key
+/// names depending on the tool (`file_path`, `path`, or `absolute_path`).
+pub(crate) fn file_path_from_args(args: &Value) -> Option<String> {
+    for key in ["file_path", "absolute_path", "path"] {
+        if let Some(v) = args.get(key).and_then(|v| v.as_str()) {
+            return Some(v.to_string());
+        }
+    }
+    None
+}
+
+// ── Public conversion helpers ────────────────────────────────────────
+
+/// Convert a Gemini [`Conversation`] into a [`ConversationView`].
+pub fn to_view(convo: &Conversation) -> ConversationView {
+    conversation_to_view(convo)
+}
+
+/// Convert a single [`GeminiMessage`] into a [`Turn`]. Does not perform
+/// any cross-message sub-agent assembly; call [`to_view`] for that.
+pub fn to_turn(msg: &GeminiMessage) -> Turn {
+    message_to_turn(msg, None)
+}
+
+// ── Trait impls ──────────────────────────────────────────────────────
+
+impl ConversationProvider for GeminiConvo {
+    fn list_conversations(&self, project: &str) -> toolpath_convo::Result<Vec<String>> {
+        GeminiConvo::list_conversations(self, project)
+            .map_err(|e| ConvoError::Provider(e.to_string()))
+    }
+
+    fn load_conversation(
+        &self,
+        project: &str,
+        conversation_id: &str,
+    ) -> toolpath_convo::Result<ConversationView> {
+        let convo = self
+            .read_conversation(project, conversation_id)
+            .map_err(|e| ConvoError::Provider(e.to_string()))?;
+        let view = conversation_to_view(&convo);
+        Ok(view)
+    }
+
+    fn load_metadata(
+        &self,
+        project: &str,
+        conversation_id: &str,
+    ) -> toolpath_convo::Result<ConversationMeta> {
+        let meta = self
+            .read_conversation_metadata(project, conversation_id)
+            .map_err(|e| ConvoError::Provider(e.to_string()))?;
+        Ok(ConversationMeta {
+            id: meta.session_uuid,
+            started_at: meta.started_at,
+            last_activity: meta.last_activity,
+            message_count: meta.message_count,
+            file_path: Some(meta.file_path),
+            predecessor: None,
+            successor: None,
+        })
+    }
+
+    fn list_metadata(&self, project: &str) -> toolpath_convo::Result<Vec<ConversationMeta>> {
+        let metas = self
+            .list_conversation_metadata(project)
+            .map_err(|e| ConvoError::Provider(e.to_string()))?;
+        Ok(metas
+            .into_iter()
+            .map(|m| ConversationMeta {
+                id: m.session_uuid,
+                started_at: m.started_at,
+                last_activity: m.last_activity,
+                message_count: m.message_count,
+                file_path: Some(m.file_path),
+                predecessor: None,
+                successor: None,
+            })
+            .collect())
+    }
+}
+
+// ── Tests ────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::PathResolver;
+    use std::fs;
+    use tempfile::TempDir;
+
+    fn setup_provider() -> (TempDir, GeminiConvo) {
+        let temp = TempDir::new().unwrap();
+        let gemini = temp.path().join(".gemini");
+        let session_dir = gemini.join("tmp/myrepo/chats/session-uuid");
+        fs::create_dir_all(&session_dir).unwrap();
+        fs::write(
+            gemini.join("projects.json"),
+            r#"{"projects":{"/abs/myrepo":"myrepo"}}"#,
+        )
+        .unwrap();
+
+        let main = r#"{
+  "sessionId":"main-s",
+  "projectHash":"h",
+  "startTime":"2026-04-17T15:00:00Z",
+  "lastUpdated":"2026-04-17T15:10:00Z",
+  "directories":["/abs/myrepo"],
+  "messages":[
+    {"id":"m1","timestamp":"2026-04-17T15:00:00Z","type":"user","content":[{"text":"Find the bug"}]},
+    {"id":"m2","timestamp":"2026-04-17T15:00:01Z","type":"gemini","content":"I'll delegate.","model":"gemini-3-flash-preview","tokens":{"input":100,"output":50,"cached":0,"thoughts":10,"tool":0,"total":160},"toolCalls":[
+      {"id":"task-1","name":"task","args":{"prompt":"Find auth bug"},"status":"success","timestamp":"2026-04-17T15:00:01Z","result":[{"functionResponse":{"id":"task-1","name":"task","response":{"output":"Found it"}}}]}
+    ]},
+    {"id":"m3","timestamp":"2026-04-17T15:05:00Z","type":"gemini","content":"Writing fix.","model":"gemini-3-flash-preview","tokens":{"input":200,"output":80,"cached":50,"thoughts":0,"tool":0,"total":330},"toolCalls":[
+      {"id":"write-1","name":"write_file","args":{"file_path":"src/auth.rs","content":"fn ok(){}"},"status":"success","timestamp":"2026-04-17T15:05:00Z","result":[{"functionResponse":{"id":"write-1","name":"write_file","response":{"output":"wrote"}}}]}
+    ]},
+    {"id":"m4","timestamp":"2026-04-17T15:05:05Z","type":"gemini","content":"Oops, fix again.","model":"gemini-3-flash-preview","toolCalls":[
+      {"id":"replace-1","name":"replace","args":{"file_path":"src/auth.rs","oldString":"a","newString":"b"},"status":"success","timestamp":"2026-04-17T15:05:05Z","result":[{"functionResponse":{"id":"replace-1","name":"replace","response":{"output":"ok"}}}]},
+      {"id":"write-2","name":"write_file","args":{"file_path":"src/lib.rs","content":"pub mod auth;"},"status":"success","timestamp":"2026-04-17T15:05:05Z","result":[{"functionResponse":{"id":"write-2","name":"write_file","response":{"output":"wrote"}}}]}
+    ]}
+  ]
+}"#;
+        fs::write(session_dir.join("main.json"), main).unwrap();
+
+        let sub = r#"{
+  "sessionId":"qclszz",
+  "projectHash":"h",
+  "startTime":"2026-04-17T15:01:00Z",
+  "lastUpdated":"2026-04-17T15:04:00Z",
+  "kind":"subagent",
+  "summary":"Found auth bug at line 42",
+  "messages":[
+    {"id":"s1","timestamp":"2026-04-17T15:01:00Z","type":"user","content":[{"text":"Search for auth bug"}]},
+    {"id":"s2","timestamp":"2026-04-17T15:02:00Z","type":"gemini","content":"","thoughts":[{"subject":"Searching","description":"looking in /auth","timestamp":"2026-04-17T15:02:00Z"}],"model":"gemini-3-flash-preview","tokens":{"input":20,"output":5,"cached":0},"toolCalls":[
+      {"id":"qclszz#0-0","name":"grep_search","args":{"pattern":"auth"},"status":"success","timestamp":"2026-04-17T15:02:00Z","result":[{"functionResponse":{"id":"qclszz#0-0","name":"grep_search","response":{"output":"auth.rs:42"}}}]}
+    ]}
+  ]
+}"#;
+        fs::write(session_dir.join("qclszz.json"), sub).unwrap();
+
+        let resolver = PathResolver::new().with_gemini_dir(&gemini);
+        (temp, GeminiConvo::with_resolver(resolver))
+    }
+
+    #[test]
+    fn test_tool_category_mapping() {
+        assert_eq!(tool_category("read_file"), Some(ToolCategory::FileRead));
+        assert_eq!(tool_category("glob"), Some(ToolCategory::FileSearch));
+        assert_eq!(tool_category("grep_search"), Some(ToolCategory::FileSearch));
+        assert_eq!(tool_category("write_file"), Some(ToolCategory::FileWrite));
+        assert_eq!(tool_category("replace"), Some(ToolCategory::FileWrite));
+        assert_eq!(
+            tool_category("run_shell_command"),
+            Some(ToolCategory::Shell)
+        );
+        assert_eq!(tool_category("web_fetch"), Some(ToolCategory::Network));
+        assert_eq!(tool_category("task"), Some(ToolCategory::Delegation));
+        assert_eq!(
+            tool_category("activate_skill"),
+            Some(ToolCategory::Delegation)
+        );
+        assert_eq!(tool_category("unknown"), None);
+    }
+
+    #[test]
+    fn test_load_conversation_basic() {
+        let (_t, p) = setup_provider();
+        let view =
+            ConversationProvider::load_conversation(&p, "/abs/myrepo", "session-uuid").unwrap();
+        assert_eq!(view.id, "session-uuid");
+        assert_eq!(view.provider_id.as_deref(), Some("gemini-cli"));
+        assert_eq!(view.turns.len(), 4);
+        assert_eq!(view.turns[0].role, Role::User);
+        assert_eq!(view.turns[0].text, "Find the bug");
+        assert_eq!(view.turns[1].role, Role::Assistant);
+        assert_eq!(view.turns[1].text, "I'll delegate.");
+        assert_eq!(
+            view.turns[1].model.as_deref(),
+            Some("gemini-3-flash-preview")
+        );
+    }
+
+    #[test]
+    fn test_delegation_populated_from_sub_agent() {
+        let (_t, p) = setup_provider();
+        let view =
+            ConversationProvider::load_conversation(&p, "/abs/myrepo", "session-uuid").unwrap();
+        let delegations = &view.turns[1].delegations;
+        assert_eq!(delegations.len(), 1);
+        let d = &delegations[0];
+        assert_eq!(d.agent_id, "qclszz");
+        assert_eq!(d.prompt, "Search for auth bug");
+        assert_eq!(d.result.as_deref(), Some("Found auth bug at line 42"));
+        // Sub-agent turns are populated, unlike Claude
+        assert_eq!(d.turns.len(), 2);
+        assert_eq!(d.turns[0].text, "Search for auth bug");
+    }
+
+    #[test]
+    fn test_tool_result_assembled_inline() {
+        let (_t, p) = setup_provider();
+        let view =
+            ConversationProvider::load_conversation(&p, "/abs/myrepo", "session-uuid").unwrap();
+        let result = view.turns[1].tool_uses[0].result.as_ref().unwrap();
+        assert_eq!(result.content, "Found it");
+        assert!(!result.is_error);
+    }
+
+    #[test]
+    fn test_tool_category_on_invocations() {
+        let (_t, p) = setup_provider();
+        let view =
+            ConversationProvider::load_conversation(&p, "/abs/myrepo", "session-uuid").unwrap();
+        assert_eq!(
+            view.turns[1].tool_uses[0].category,
+            Some(ToolCategory::Delegation)
+        );
+        assert_eq!(
+            view.turns[2].tool_uses[0].category,
+            Some(ToolCategory::FileWrite)
+        );
+    }
+
+    #[test]
+    fn test_token_usage_aggregated() {
+        let (_t, p) = setup_provider();
+        let view =
+            ConversationProvider::load_conversation(&p, "/abs/myrepo", "session-uuid").unwrap();
+        let total = view.total_usage.as_ref().unwrap();
+        // Main turns: (100,50), (200,80). Sub-agent turn: (20,5).
+        assert_eq!(total.input_tokens, Some(320));
+        assert_eq!(total.output_tokens, Some(135));
+        assert_eq!(total.cache_read_tokens, Some(50));
+    }
+
+    #[test]
+    fn test_files_changed() {
+        let (_t, p) = setup_provider();
+        let view =
+            ConversationProvider::load_conversation(&p, "/abs/myrepo", "session-uuid").unwrap();
+        assert_eq!(
+            view.files_changed,
+            vec!["src/auth.rs".to_string(), "src/lib.rs".to_string()]
+        );
+    }
+
+    #[test]
+    fn test_environment_working_dir() {
+        let (_t, p) = setup_provider();
+        let view =
+            ConversationProvider::load_conversation(&p, "/abs/myrepo", "session-uuid").unwrap();
+        for turn in &view.turns {
+            let wd = turn
+                .environment
+                .as_ref()
+                .and_then(|e| e.working_dir.as_deref());
+            assert_eq!(wd, Some("/abs/myrepo"));
+        }
+    }
+
+    #[test]
+    fn test_thinking_from_sub_agent_thoughts() {
+        let (_t, p) = setup_provider();
+        let view =
+            ConversationProvider::load_conversation(&p, "/abs/myrepo", "session-uuid").unwrap();
+        let sub_turn = &view.turns[1].delegations[0].turns[1];
+        let thinking = sub_turn.thinking.as_ref().unwrap();
+        assert!(thinking.contains("Searching"));
+        assert!(thinking.contains("looking in /auth"));
+    }
+
+    #[test]
+    fn test_extra_gemini_tokens_preserved() {
+        let (_t, p) = setup_provider();
+        let view =
+            ConversationProvider::load_conversation(&p, "/abs/myrepo", "session-uuid").unwrap();
+        let claude = view.turns[1].extra.get("gemini").expect("extra[gemini]");
+        let tokens = claude.get("tokens").unwrap();
+        assert_eq!(tokens["input"], 100);
+        assert_eq!(tokens["thoughts"], 10);
+        assert_eq!(tokens["total"], 160);
+    }
+
+    #[test]
+    fn test_list_metadata() {
+        let (_t, p) = setup_provider();
+        let metas = ConversationProvider::list_metadata(&p, "/abs/myrepo").unwrap();
+        assert_eq!(metas.len(), 1);
+        assert_eq!(metas[0].id, "session-uuid");
+        // Chains are not a thing in Gemini — link fields stay None.
+        assert!(metas[0].predecessor.is_none());
+        assert!(metas[0].successor.is_none());
+    }
+
+    #[test]
+    fn test_load_metadata() {
+        let (_t, p) = setup_provider();
+        let meta = ConversationProvider::load_metadata(&p, "/abs/myrepo", "session-uuid").unwrap();
+        assert_eq!(meta.id, "session-uuid");
+        // 4 main messages + 2 sub-agent messages
+        assert_eq!(meta.message_count, 6);
+    }
+
+    #[test]
+    fn test_list_conversations_via_trait() {
+        let (_t, p) = setup_provider();
+        let ids = ConversationProvider::list_conversations(&p, "/abs/myrepo").unwrap();
+        assert_eq!(ids, vec!["session-uuid".to_string()]);
+    }
+
+    #[test]
+    fn test_to_view_directly() {
+        let (_t, p) = setup_provider();
+        let convo = p.read_conversation("/abs/myrepo", "session-uuid").unwrap();
+        let view = to_view(&convo);
+        assert_eq!(view.turns.len(), 4);
+    }
+
+    #[test]
+    fn test_to_turn_single_message() {
+        let json = r#"{"id":"m","timestamp":"ts","type":"user","content":[{"text":"hi"}]}"#;
+        let msg: GeminiMessage = serde_json::from_str(json).unwrap();
+        let turn = to_turn(&msg);
+        assert_eq!(turn.id, "m");
+        assert_eq!(turn.text, "hi");
+        assert_eq!(turn.role, Role::User);
+    }
+
+    #[test]
+    fn test_file_path_from_args_all_keys() {
+        let v1 = serde_json::json!({"file_path": "/a"});
+        let v2 = serde_json::json!({"absolute_path": "/b"});
+        let v3 = serde_json::json!({"path": "/c"});
+        let v4 = serde_json::json!({"something_else": "/d"});
+        assert_eq!(file_path_from_args(&v1).as_deref(), Some("/a"));
+        assert_eq!(file_path_from_args(&v2).as_deref(), Some("/b"));
+        assert_eq!(file_path_from_args(&v3).as_deref(), Some("/c"));
+        assert_eq!(file_path_from_args(&v4), None);
+    }
+
+    #[test]
+    fn test_flatten_thoughts() {
+        let thoughts = vec![
+            Thought {
+                subject: Some("s1".into()),
+                description: Some("d1".into()),
+                timestamp: None,
+            },
+            Thought {
+                subject: None,
+                description: Some("d2".into()),
+                timestamp: None,
+            },
+            Thought {
+                subject: Some("s3".into()),
+                description: None,
+                timestamp: None,
+            },
+            Thought {
+                subject: None,
+                description: None,
+                timestamp: None,
+            },
+        ];
+        let out = flatten_thoughts(&thoughts).unwrap();
+        assert!(out.contains("s1"));
+        assert!(out.contains("d1"));
+        assert!(out.contains("d2"));
+        assert!(out.contains("s3"));
+    }
+
+    #[test]
+    fn test_flatten_thoughts_empty() {
+        assert!(flatten_thoughts(&[]).is_none());
+    }
+
+    #[test]
+    fn test_unused_delegation_fallback() {
+        // If sub-agent file is missing, delegation still emits from the
+        // tool_use fields.
+        let temp = TempDir::new().unwrap();
+        let gemini = temp.path().join(".gemini");
+        let session_dir = gemini.join("tmp/p/chats/s");
+        fs::create_dir_all(&session_dir).unwrap();
+        fs::write(gemini.join("projects.json"), r#"{"projects":{"/p":"p"}}"#).unwrap();
+
+        fs::write(
+            session_dir.join("main.json"),
+            r#"{
+  "sessionId":"main",
+  "projectHash":"",
+  "messages":[
+    {"id":"m1","timestamp":"ts","type":"user","content":[{"text":"x"}]},
+    {"id":"m2","timestamp":"ts","type":"gemini","content":"","toolCalls":[
+      {"id":"t1","name":"task","args":{"prompt":"go"},"status":"success","timestamp":"ts","result":[{"functionResponse":{"id":"t1","name":"task","response":{"output":"done"}}}]}
+    ]}
+  ]
+}"#,
+        )
+        .unwrap();
+
+        let mgr = GeminiConvo::with_resolver(PathResolver::new().with_gemini_dir(&gemini));
+        let view = ConversationProvider::load_conversation(&mgr, "/p", "s").unwrap();
+
+        let d = &view.turns[1].delegations[0];
+        assert_eq!(d.agent_id, "t1");
+        assert_eq!(d.prompt, "go");
+        assert_eq!(d.result.as_deref(), Some("done"));
+        assert!(d.turns.is_empty());
+    }
+
+    #[test]
+    fn test_leftover_subagent_attached_to_last_assistant() {
+        // Two sub-agents but only one `task` call — the second sub-agent
+        // attaches to the last assistant turn.
+        let temp = TempDir::new().unwrap();
+        let gemini = temp.path().join(".gemini");
+        let session_dir = gemini.join("tmp/p/chats/s");
+        fs::create_dir_all(&session_dir).unwrap();
+        fs::write(gemini.join("projects.json"), r#"{"projects":{"/p":"p"}}"#).unwrap();
+        fs::write(
+            session_dir.join("main.json"),
+            r#"{"sessionId":"main","projectHash":"","messages":[
+  {"id":"m1","timestamp":"ts","type":"user","content":[{"text":"x"}]},
+  {"id":"m2","timestamp":"ts","type":"gemini","content":"","toolCalls":[
+    {"id":"t1","name":"task","args":{},"status":"success","timestamp":"ts"}
+  ]}
+]}"#,
+        )
+        .unwrap();
+        fs::write(
+            session_dir.join("a.json"),
+            r#"{"sessionId":"a","projectHash":"","startTime":"2026-04-17T10:00:00Z","kind":"subagent","summary":"A","messages":[]}"#,
+        )
+        .unwrap();
+        fs::write(
+            session_dir.join("b.json"),
+            r#"{"sessionId":"b","projectHash":"","startTime":"2026-04-17T11:00:00Z","kind":"subagent","summary":"B","messages":[]}"#,
+        )
+        .unwrap();
+
+        let mgr = GeminiConvo::with_resolver(PathResolver::new().with_gemini_dir(&gemini));
+        let view = ConversationProvider::load_conversation(&mgr, "/p", "s").unwrap();
+        let delegations = &view.turns[1].delegations;
+        assert_eq!(delegations.len(), 2);
+        // a.json attaches to the task (first delegation), b.json is leftover
+        assert_eq!(delegations[0].agent_id, "a");
+        assert_eq!(delegations[1].agent_id, "b");
+    }
+}

@@ -45,6 +45,7 @@ crates/
   toolpath-git/       Derive from git repository history
   toolpath-github/    Derive from GitHub pull requests
   toolpath-claude/    Derive from Claude conversation logs
+  toolpath-gemini/    Derive from Gemini CLI conversation logs
   toolpath-pi/        Derive from Pi (pi.dev) agent sessions
   toolpath-dot/       Graphviz DOT visualization
   toolpath-md/        Markdown rendering for LLM consumption
@@ -75,6 +76,9 @@ path derive github --repo owner/repo --pr 42 --pretty
 # Derive from Claude conversation logs
 path derive claude --project /path/to/project --pretty
 
+# Derive from Gemini CLI conversation logs
+path derive gemini --project /path/to/project --pretty
+
 # Query for dead ends (abandoned approaches)
 path query dead-ends --input doc.json
 
@@ -99,10 +103,12 @@ path
     git       [--repo PATH] [--remote NAME] [--json]
     github    --repo OWNER/REPO [--json]
     claude    [--project PATH] [--json]
+    gemini    [--project PATH] [--json]
   derive
     git       --repo PATH --branch NAME[:START] [--base COMMIT] [--remote NAME] [--title TEXT]
     github    --repo OWNER/REPO --pr NUMBER [--no-ci] [--no-comments]
     claude    --project PATH [--session ID] [--all]
+    gemini    --project PATH [--session UUID] [--all] [--include-thinking]
   query
     ancestors --input FILE --step-id ID
     dead-ends --input FILE
