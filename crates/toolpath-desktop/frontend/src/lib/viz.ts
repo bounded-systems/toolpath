@@ -1,284 +1,373 @@
-// DAG renderer adapted from site/js/visualizer.js.
-// Takes a parsed Toolpath Document + a target SVG element.
+// Path graph renderer.
+//
+// Renders a Toolpath Document as a dagre-laid-out DAG of HTML "cards"
+// connected by SVG edges. Dead-end subtrees are hidden behind their
+// HEAD-path sibling until the user clicks the card's "expand" chip —
+// clicking the chip fires `onToggleBranch(nodeId)`, which flips a key in
+// `expandedBranches` and causes the graph to re-layout including those
+// nodes.
+//
+// Usage: `render(doc, containerEl, opts)`. Call again on any state change
+// (selected / expanded / toggles) — the function rebuilds the DOM under
+// `containerEl` from scratch.
 
-import * as d3 from "d3";
-// dagre-d3-es is a module-ESM fork of dagre-d3; API identical but split into
-// named exports. Types are incomplete, so the render factory is cast through
-// `unknown` to a callable signature.
-import { graphlib, render as dagreRenderRaw } from "dagre-d3-es";
-const dagreRender = dagreRenderRaw as unknown as () => (
-  group: unknown,
-  graph: unknown,
-) => void;
-
+import * as dagre from "@dagrejs/dagre";
 import type { ActorDef, Document, StepRef } from "./types";
 
-const COLORS = {
-  human: { fill: "#b5652b18", stroke: "#b5652b" },
-  agent: { fill: "#b5652b30", stroke: "#b5652b" },
-  tool: { fill: "#8a807815", stroke: "#8a8078" },
-  ci: { fill: "#8a807815", stroke: "#8a8078" },
-  dead: { fill: "#c4403018", stroke: "#c44030" },
-  base: { fill: "#ece5db", stroke: "#8a8078" },
-};
-const EDGE_ACTIVE = { stroke: "#2d2a26", width: 2 };
-const EDGE_INACTIVE = { stroke: "#8a8078", width: 1 };
-const EDGE_BASE = { stroke: "#b5652b", width: 1.5 };
-
-function actorType(a: string): keyof typeof COLORS | "tool" {
-  const i = a.indexOf(":");
-  const t = i < 0 ? a : a.substring(0, i);
-  return (t in COLORS ? (t as keyof typeof COLORS) : "tool");
-}
-function actorName(a: string): string {
-  const i = a.indexOf(":");
-  return i < 0 ? a : a.substring(i + 1);
-}
-function actorDisplay(a: string, defs: Record<string, ActorDef> | null): string {
-  const def = defs?.[a];
-  return def?.name ?? actorName(a);
-}
-function truncate(s: string | undefined, n: number): string {
-  return s && s.length > n ? `${s.substring(0, n)}…` : s ?? "";
-}
-
-function ancestors(steps: StepRef[], headId: string): Record<string, true> {
-  const map: Record<string, StepRef> = {};
-  for (const s of steps) map[s.step.id] = s;
-  const out: Record<string, true> = {};
-  const stack = [headId];
-  while (stack.length) {
-    const id = stack.pop()!;
-    if (out[id]) continue;
-    out[id] = true;
-    const s = map[id];
-    if (s?.step.parents) for (const p of s.step.parents) stack.push(p);
-  }
-  return out;
-}
-
-interface Cluster {
-  pathInfo: { id: string; head?: string } | null;
-  steps: StepRef[];
-  headId: string | null;
-  base: { uri: string; ref?: string } | null;
-  actors: Record<string, ActorDef> | null;
-  isRef?: boolean;
-}
-
-function normalizeClusters(doc: Document): Cluster[] {
-  if ("Step" in doc) {
-    return [
-      {
-        pathInfo: null,
-        steps: [doc.Step],
-        headId: null,
-        base: null,
-        actors: doc.Step.meta?.actors ?? null,
-      },
-    ];
-  }
-  if ("Path" in doc) {
-    const p = doc.Path;
-    return [
-      {
-        pathInfo: p.path,
-        steps: p.steps,
-        headId: p.path.head,
-        base: p.path.base ?? null,
-        actors: p.meta?.actors ?? null,
-      },
-    ];
-  }
-  if ("Graph" in doc) {
-    const g = doc.Graph;
-    const gActors = g.meta?.actors ?? null;
-    return g.paths.map((e) => {
-      if ("$ref" in e) {
-        return {
-          pathInfo: { id: e.$ref },
-          steps: [],
-          headId: null,
-          base: null,
-          isRef: true,
-          actors: gActors,
-        };
-      }
-      return {
-        pathInfo: e.path,
-        steps: e.steps,
-        headId: e.path.head,
-        base: e.path.base ?? null,
-        actors: (e as { meta?: { actors?: Record<string, ActorDef> } }).meta?.actors ?? gActors,
-      };
-    });
-  }
-  return [];
-}
-
 export interface RenderOpts {
-  showDead: boolean;
+  selectedStepId: string | null;
+  expandedBranches: Record<string, true>;
   showTs: boolean;
   showFiles: boolean;
-  onStepClick?: (step: StepRef, actors: Record<string, ActorDef> | null) => void;
+  onSelectStep: (step: StepRef, actors: Record<string, ActorDef> | null) => void;
+  onToggleBranch: (stepId: string) => void;
 }
+
+// ─── Document normalization ──────────────────────────────────────────────
+
+interface Normalized {
+  steps: StepRef[];
+  head: string | null;
+  actors: Record<string, ActorDef> | null;
+  stepMap: Map<string, StepRef>;
+  childrenMap: Map<string, string[]>;
+  headSet: Set<string>;
+}
+
+function normalize(doc: Document): Normalized {
+  let steps: StepRef[] = [];
+  let head: string | null = null;
+  let actors: Record<string, ActorDef> | null = null;
+
+  if ("Step" in doc) {
+    steps = [doc.Step];
+    actors = doc.Step.meta?.actors ?? null;
+  } else if ("Path" in doc) {
+    steps = doc.Path.steps;
+    head = doc.Path.path.head;
+    actors = doc.Path.meta?.actors ?? null;
+  } else if ("Graph" in doc) {
+    actors = doc.Graph.meta?.actors ?? null;
+    for (const p of doc.Graph.paths) {
+      if ("$ref" in p) continue;
+      if (head == null) head = p.path.head;
+      for (const s of p.steps) steps.push(s);
+    }
+  }
+
+  const stepMap = new Map<string, StepRef>(steps.map((s) => [s.step.id, s]));
+  const childrenMap = new Map<string, string[]>();
+  for (const s of steps) {
+    for (const pid of s.step.parents || []) {
+      const list = childrenMap.get(pid);
+      if (list) list.push(s.step.id);
+      else childrenMap.set(pid, [s.step.id]);
+    }
+  }
+
+  const headSet = new Set<string>();
+  if (head && stepMap.has(head)) {
+    const stack: string[] = [head];
+    while (stack.length) {
+      const id = stack.pop()!;
+      if (headSet.has(id)) continue;
+      headSet.add(id);
+      const s = stepMap.get(id);
+      if (s?.step.parents) for (const p of s.step.parents) stack.push(p);
+    }
+  }
+  return { steps, head, actors, stepMap, childrenMap, headSet };
+}
+
+// ─── Visibility + helpers ────────────────────────────────────────────────
+
+function actorType(a: string): string {
+  const i = a.indexOf(":");
+  return i < 0 ? a : a.slice(0, i);
+}
+function actorName(
+  a: string,
+  actors: Record<string, ActorDef> | null,
+): string {
+  const def = actors?.[a];
+  if (def?.name) return def.name;
+  const i = a.indexOf(":");
+  return i < 0 ? a : a.slice(i + 1);
+}
+function esc(s: string): string {
+  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+function cssSafeId(id: string): string {
+  return id.replace(/[^a-zA-Z0-9_-]/g, "_");
+}
+
+/** Walk dead-node → parent chain until hitting a HEAD-path ancestor. */
+function findHeadAncestor(
+  id: string,
+  stepMap: Map<string, StepRef>,
+  headSet: Set<string>,
+): string | null {
+  if (headSet.has(id)) return null;
+  let current: string | undefined = id;
+  while (current) {
+    const s = stepMap.get(current);
+    const parents = s?.step.parents;
+    if (!parents?.length) return null;
+    const p: string = parents[0];
+    if (headSet.has(p)) return p;
+    current = p;
+  }
+  return null;
+}
+
+function deadChildrenCount(
+  id: string,
+  headSet: Set<string>,
+  childrenMap: Map<string, string[]>,
+): number {
+  if (!headSet.has(id)) return 0;
+  const kids = childrenMap.get(id) ?? [];
+  let n = 0;
+  for (const k of kids) if (!headSet.has(k)) n++;
+  return n;
+}
+
+function isStepVisible(
+  id: string,
+  headSet: Set<string>,
+  stepMap: Map<string, StepRef>,
+  expandedBranches: Record<string, true>,
+): boolean {
+  if (headSet.has(id)) return true;
+  const anc = findHeadAncestor(id, stepMap, headSet);
+  return !!(anc && expandedBranches[anc]);
+}
+
+// ─── Rendering ────────────────────────────────────────────────────────────
+
+function renderCard(
+  s: StepRef,
+  flags: {
+    isHead: boolean;
+    isDead: boolean;
+    isFocused: boolean;
+    deadKids: number;
+    isExpanded: boolean;
+    actors: Record<string, ActorDef> | null;
+    showTs: boolean;
+    showFiles: boolean;
+  },
+): string {
+  const id = s.step.id;
+  const atype = actorType(s.step.actor);
+  const changeKeys = s.change ? Object.keys(s.change) : [];
+  const hasHidden = flags.deadKids > 0 && !flags.isExpanded;
+
+  const classes = [
+    "pg-card",
+    `pg-card--role-${atype}`,
+    flags.isHead ? "pg-card--head" : "",
+    flags.isDead ? "pg-card--dead" : "",
+    flags.isFocused ? "pg-card--focused" : "",
+    hasHidden ? "pg-card--has-hidden" : "",
+  ]
+    .filter(Boolean)
+    .join(" ");
+
+  const chips: string[] = [];
+  if (flags.isHead)
+    chips.push(`<span class="pg-card__chip pg-card__chip--head">HEAD</span>`);
+  if (flags.isDead)
+    chips.push(`<span class="pg-card__chip pg-card__chip--dead">dead</span>`);
+
+  const toggle =
+    flags.deadKids > 0
+      ? `<button class="pg-card__toggle${flags.isExpanded ? " pg-card__toggle--on" : ""}" data-toggle-branch="${esc(id)}">${flags.isExpanded ? "collapse" : "expand"}</button>`
+      : "";
+
+  const intent = s.meta?.intent ? esc(s.meta.intent) : "";
+  const ts =
+    flags.showTs && s.step.timestamp
+      ? `<div class="pg-card__ts">${esc(s.step.timestamp.replace("T", " ").replace("Z", " UTC"))}</div>`
+      : "";
+  const files =
+    flags.showFiles && changeKeys.length
+      ? `<div class="pg-card__files">${changeKeys
+          .map((k) => `<span>${esc(k)}</span>`)
+          .join(" · ")}</div>`
+      : "";
+
+  return `
+    <div class="${classes}" id="pg-card-${cssSafeId(id)}" data-step-id="${esc(id)}">
+      <div class="pg-card__head">
+        <span class="pg-card__id">${esc(id)}</span>
+        <div class="pg-card__chips">${chips.join("")}</div>
+      </div>
+      ${intent ? `<div class="pg-card__intent">${intent}</div>` : ""}
+      <div class="pg-card__actor">${esc(actorName(s.step.actor, flags.actors))}</div>
+      ${ts}
+      ${files}
+      ${toggle ? `<div class="pg-card__footer">${toggle}</div>` : ""}
+    </div>`;
+}
+
+function pointsToPath(pts: { x: number; y: number }[]): string {
+  if (pts.length === 0) return "";
+  if (pts.length === 1) return `M ${pts[0].x} ${pts[0].y}`;
+  let d = `M ${pts[0].x} ${pts[0].y}`;
+  for (let i = 1; i < pts.length; i++) d += ` L ${pts[i].x} ${pts[i].y}`;
+  return d;
+}
+
+const NS = "http://www.w3.org/2000/svg";
 
 export function render(
   doc: Document,
-  svgEl: SVGSVGElement,
+  container: HTMLElement,
   opts: RenderOpts,
-): { fit: () => void } | null {
-  const clusters = normalizeClusters(doc);
-  if (!clusters.length) return null;
+): void {
+  const { steps, head, actors, stepMap, childrenMap, headSet } = normalize(doc);
 
-  const graph = new graphlib.Graph({ compound: true, multigraph: false })
-    .setGraph({ rankdir: "TB", nodesep: 60, ranksep: 50, marginx: 30, marginy: 30 })
-    .setDefaultEdgeLabel(() => ({}));
+  // Build container DOM
+  container.innerHTML = "";
+  const graphEl = document.createElement("div");
+  graphEl.className = "path-graph";
+  const svgEl = document.createElementNS(NS, "svg");
+  svgEl.setAttribute("class", "path-graph__edges");
+  // Arrow markers live in <defs>
+  const defs = document.createElementNS(NS, "defs");
+  defs.innerHTML = `
+    <marker id="pg-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#8a8078" />
+    </marker>
+    <marker id="pg-arrow-dead" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#c44030" fill-opacity="0.8" />
+    </marker>`;
+  svgEl.appendChild(defs);
+  const nodesEl = document.createElement("div");
+  nodesEl.className = "path-graph__nodes";
+  graphEl.appendChild(svgEl);
+  graphEl.appendChild(nodesEl);
+  container.appendChild(graphEl);
 
-  clusters.forEach((cluster, ci) => {
-    const prefix = clusters.length > 1 ? `c${ci}/` : "";
-    const anc = cluster.headId ? ancestors(cluster.steps, cluster.headId) : null;
-
-    if (clusters.length > 1) {
-      graph.setNode(`cluster_${ci}`, {
-        label: cluster.pathInfo?.id ?? `cluster-${ci}`,
-        clusterLabelPos: "top",
-        style: "fill: transparent; stroke: #b5652b26; stroke-dasharray: 4,3;",
-      });
-    }
-
-    if (cluster.base) {
-      const baseId = `${prefix}__BASE__`;
-      graph.setNode(baseId, {
-        label: "BASE",
-        shape: "ellipse",
-        style: `fill: ${COLORS.base.fill}; stroke: ${COLORS.base.stroke}; stroke-width: 2px;`,
-        labelStyle: "font-family: 'IBM Plex Mono', monospace; font-size: 10px; font-weight: 600;",
-      });
-      if (clusters.length > 1) graph.setParent(baseId, `cluster_${ci}`);
-    }
-
-    if (cluster.isRef) {
-      const refId = `${prefix}${cluster.pathInfo!.id}`;
-      graph.setNode(refId, {
-        label: `$ref: ${cluster.pathInfo!.id}`,
-        shape: "rect",
-        style: "fill: #8a807815; stroke: #8a8078; stroke-dasharray: 4,3; stroke-width: 1px;",
-        labelStyle: "font-family: 'IBM Plex Mono', monospace; font-size: 10px; font-style: italic;",
-      });
-      return;
-    }
-
-    const roots: string[] = [];
-    for (const s of cluster.steps) {
-      const sid = s.step.id;
-      const nodeId = `${prefix}${sid}`;
-      const isDead = anc && !anc[sid];
-      const isHead = sid === cluster.headId;
-      if (isDead && !opts.showDead) continue;
-      if (!s.step.parents || !s.step.parents.length) roots.push(nodeId);
-
-      const t = actorType(s.step.actor);
-      const colors = COLORS[t];
-      const lines = [sid, actorDisplay(s.step.actor, cluster.actors)];
-      if (s.meta?.intent) lines.push(truncate(s.meta.intent, 30));
-      if (opts.showTs && s.step.timestamp) lines.push(s.step.timestamp.substring(11, 19));
-      if (opts.showFiles && s.change) for (const f of Object.keys(s.change)) lines.push(truncate(f, 28));
-
-      const fill = isDead ? COLORS.dead.fill : colors.fill;
-      const stroke = isDead ? COLORS.dead.stroke : colors.stroke;
-      graph.setNode(nodeId, {
-        label: lines.join("\n"),
-        shape: "rect",
-        style: `fill: ${fill}; stroke: ${stroke}; stroke-width: ${isHead ? "3px" : "1.5px"}; stroke-dasharray: ${isDead || t === "ci" ? "4,3" : "none"};`,
-        labelStyle: `font-family: 'IBM Plex Mono', monospace; font-size: 10px; ${isHead ? "font-weight: bold;" : ""}`,
-        _step: s,
-        _clusterIndex: ci,
-        _isDead: isDead,
-        _isHead: isHead,
-      });
-      if (clusters.length > 1) graph.setParent(nodeId, `cluster_${ci}`);
-    }
-
-    for (const s of cluster.steps) {
-      const sid = s.step.id;
-      const targetId = `${prefix}${sid}`;
-      const isDead = anc && !anc[sid];
-      if (isDead && !opts.showDead) continue;
-      if (!s.step.parents) continue;
-      for (const pid of s.step.parents) {
-        const srcId = `${prefix}${pid}`;
-        if (!graph.node(srcId)) continue;
-        if (!opts.showDead && anc && !anc[pid]) continue;
-        const bothActive = anc && anc[sid] && anc[pid];
-        const style = bothActive ? EDGE_ACTIVE : EDGE_INACTIVE;
-        const dash = bothActive ? "" : "4,3";
-        graph.setEdge(srcId, targetId, {
-          style: `stroke: ${style.stroke}; stroke-width: ${style.width}px;${dash ? ` stroke-dasharray: ${dash};` : ""}`,
-          arrowheadStyle: `fill: ${style.stroke}`,
-          curve: d3.curveBasis,
-        });
-      }
-    }
-
-    if (cluster.base) {
-      const baseNodeId = `${prefix}__BASE__`;
-      for (const rid of roots) {
-        if (graph.node(rid)) {
-          graph.setEdge(baseNodeId, rid, {
-            style: `stroke: ${EDGE_BASE.stroke}; stroke-width: ${EDGE_BASE.width}px;`,
-            arrowheadStyle: `fill: ${EDGE_BASE.stroke}`,
-            curve: d3.curveBasis,
-          });
-        }
-      }
-    }
-  });
-
-  const svg = d3.select<SVGSVGElement, unknown>(svgEl);
-  svg.selectAll("*").remove();
-  const group = svg.append("g");
-  dagreRender()(group, graph);
-
-  const zoom = d3
-    .zoom<SVGSVGElement, unknown>()
-    .scaleExtent([0.1, 4])
-    .on("zoom", (ev) => group.attr("transform", ev.transform));
-  svg.call(zoom);
-
-  function fit() {
-    const gNode = group.node();
-    if (!gNode) return;
-    const bounds = (gNode as SVGGraphicsElement).getBBox();
-    if (!bounds.width || !bounds.height) return;
-    const parent = svgEl.parentElement;
-    if (!parent) return;
-    const sx = parent.clientWidth / (bounds.width + 60);
-    const sy = parent.clientHeight / (bounds.height + 60);
-    const scale = Math.min(sx, sy, 1.5);
-    const tx = (parent.clientWidth - bounds.width * scale) / 2 - bounds.x * scale;
-    const ty = (parent.clientHeight - bounds.height * scale) / 2 - bounds.y * scale;
-    svg
-      .transition()
-      .duration(300)
-      .call(zoom.transform, d3.zoomIdentity.translate(tx, ty).scale(scale));
+  if (steps.length === 0) {
+    nodesEl.innerHTML = `<div class="path-graph__empty">This document has no steps to visualize.</div>`;
+    return;
   }
-  fit();
 
-  if (opts.onStepClick) {
-    svg.selectAll<SVGGElement, string>("g.node").on("click", function () {
-      // dagre-d3 stashes node id on __data__
-      const id = (this as SVGGElement & { __data__: string }).__data__;
-      const data = graph.node(id) as {
-        _step?: StepRef;
-        _clusterIndex?: number;
-      } | undefined;
-      if (data?._step && typeof data._clusterIndex === "number") {
-        const cluster = clusters[data._clusterIndex];
-        opts.onStepClick!(data._step, cluster?.actors ?? null);
-      }
+  // Visible step set
+  const visible = steps.filter((s) =>
+    isStepVisible(s.step.id, headSet, stepMap, opts.expandedBranches),
+  );
+
+  // Pass 1 — render cards so the browser can measure them.
+  nodesEl.innerHTML = visible
+    .map((s) => {
+      const id = s.step.id;
+      return renderCard(s, {
+        isHead: id === head,
+        isDead: !headSet.has(id),
+        isFocused: id === opts.selectedStepId,
+        deadKids: deadChildrenCount(id, headSet, childrenMap),
+        isExpanded: !!opts.expandedBranches[id],
+        actors,
+        showTs: opts.showTs,
+        showFiles: opts.showFiles,
+      });
+    })
+    .join("");
+
+  // Pass 2 — measure.
+  const dims = new Map<string, { width: number; height: number }>();
+  for (const s of visible) {
+    const el = document.getElementById(`pg-card-${cssSafeId(s.step.id)}`);
+    if (!el) continue;
+    dims.set(s.step.id, {
+      width: el.offsetWidth,
+      height: el.offsetHeight,
     });
   }
 
-  return { fit };
+  // Pass 3 — dagre layout.
+  const g = new dagre.graphlib.Graph();
+  g.setGraph({
+    rankdir: "TB",
+    nodesep: 30,
+    ranksep: 48,
+    marginx: 16,
+    marginy: 16,
+  });
+  g.setDefaultEdgeLabel(() => ({}));
+  for (const s of visible) {
+    const d = dims.get(s.step.id);
+    if (!d) continue;
+    g.setNode(s.step.id, d);
+  }
+  const visibleIds = new Set(visible.map((s) => s.step.id));
+  for (const s of visible) {
+    const id = s.step.id;
+    for (const p of s.step.parents || []) {
+      if (!visibleIds.has(p)) continue;
+      const childIsDead = !headSet.has(id);
+      g.setEdge(p, id, { dead: childIsDead });
+    }
+  }
+  dagre.layout(g);
+  const gi = g.graph();
+
+  // Pass 4 — size + position.
+  const w = Math.ceil(gi.width ?? 0);
+  const h = Math.ceil(gi.height ?? 0);
+  graphEl.style.width = w + "px";
+  graphEl.style.height = h + "px";
+  svgEl.setAttribute("width", String(w));
+  svgEl.setAttribute("height", String(h));
+  for (const s of visible) {
+    const n = g.node(s.step.id);
+    if (!n) continue;
+    const el = document.getElementById(`pg-card-${cssSafeId(s.step.id)}`);
+    if (!el) continue;
+    el.style.left = n.x - n.width / 2 + "px";
+    el.style.top = n.y - n.height / 2 + "px";
+    el.style.visibility = "visible";
+  }
+
+  // Pass 5 — edges.
+  for (const path of Array.from(svgEl.querySelectorAll("path.path-graph__edge"))) {
+    path.remove();
+  }
+  for (const e of g.edges()) {
+    const edge = g.edge(e) as { points: { x: number; y: number }[]; dead?: boolean };
+    if (!edge?.points?.length) continue;
+    const d = pointsToPath(edge.points);
+    const path = document.createElementNS(NS, "path");
+    path.setAttribute("d", d);
+    path.setAttribute(
+      "class",
+      "path-graph__edge" + (edge.dead ? " path-graph__edge--dead" : ""),
+    );
+    path.setAttribute(
+      "marker-end",
+      edge.dead ? "url(#pg-arrow-dead)" : "url(#pg-arrow)",
+    );
+    svgEl.appendChild(path);
+  }
+
+  // Click delegation
+  nodesEl.onclick = (ev: MouseEvent) => {
+    const target = ev.target as HTMLElement;
+    const toggle = target.closest<HTMLElement>("[data-toggle-branch]");
+    if (toggle) {
+      ev.stopPropagation();
+      const id = toggle.getAttribute("data-toggle-branch")!;
+      opts.onToggleBranch(id);
+      return;
+    }
+    const card = target.closest<HTMLElement>("[data-step-id]");
+    if (!card) return;
+    const id = card.getAttribute("data-step-id")!;
+    const step = stepMap.get(id);
+    if (!step) return;
+    opts.onSelectStep(step, actors);
+  };
 }

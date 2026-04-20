@@ -40,7 +40,7 @@
   </nav>
 </header>
 
-<main class="screen">
+<main class={"screen" + (store.m.route === "preview" ? " screen--wide" : "")}>
   {#if store.m.error}
     <div class="error">
       {store.m.error}

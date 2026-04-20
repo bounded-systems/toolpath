@@ -161,7 +161,8 @@ export interface PreviewSlice {
   filename: string;
   selectedStep: StepRef | null;
   selectedActors: Record<string, ActorDef> | null;
-  showDead: boolean;
+  /** HEAD-ancestor node ids whose dead subtrees are expanded. */
+  expandedBranches: Record<string, true>;
   showTs: boolean;
   showFiles: boolean;
   vizEpoch: number;
@@ -232,7 +233,8 @@ export type Msg =
   | { t: "DeriveFailed"; error: unknown }
 
   // Preview
-  | { t: "PreviewToggle"; key: "showDead" | "showTs" | "showFiles" }
+  | { t: "PreviewToggle"; key: "showTs" | "showFiles" }
+  | { t: "PreviewToggleBranch"; nodeId: string }
   | { t: "PreviewSelectStep"; step: StepRef; actors: Record<string, ActorDef> | null }
   | { t: "PreviewExport" }
   | { t: "PreviewExportDone" }
