@@ -1,68 +1,98 @@
 <script lang="ts">
-  import { store } from "./lib/store.svelte";
-  import Home from "./routes/Home.svelte";
-  import BrowseAgents from "./routes/BrowseAgents.svelte";
-  import BrowseClaude from "./routes/BrowseClaude.svelte";
-  import BrowsePi from "./routes/BrowsePi.svelte";
-  import BrowseGit from "./routes/BrowseGit.svelte";
-  import BrowseGithub from "./routes/BrowseGithub.svelte";
-  import Preview from "./routes/Preview.svelte";
-  import Result from "./routes/Result.svelte";
+    import { store } from "./lib/store.svelte";
+    import Home from "./routes/Home.svelte";
+    import BrowseAgents from "./routes/BrowseAgents.svelte";
+    import BrowseClaude from "./routes/BrowseClaude.svelte";
+    import BrowsePi from "./routes/BrowsePi.svelte";
+    import BrowseGit from "./routes/BrowseGit.svelte";
+    import BrowseGithub from "./routes/BrowseGithub.svelte";
+    import Preview from "./routes/Preview.svelte";
+    import Result from "./routes/Result.svelte";
+    import type { Route } from "./lib/types";
 
-  // `__TAURI_INTERNALS__` is injected by Tauri's webview. In a plain browser
-  // tab (e.g. the Vite dev server at localhost:1420 opened manually for
-  // CSS/DevTools work) it's undefined, every IPC call errors, and every
-  // screen looks broken. Detect that once and surface a clear banner.
-  const notInTauri =
-    typeof window !== "undefined" &&
-    !(window as unknown as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__;
+    const notInTauri =
+        typeof window !== "undefined" &&
+        !(window as unknown as { __TAURI_INTERNALS__?: unknown })
+            .__TAURI_INTERNALS__;
+
+    // Primary nav. §-numbers match the cartographic eyebrow styling.
+    const TABS: { key: Route; num: string; label: string }[] = [
+        { key: "home", num: "1", label: "New upload" },
+        { key: "preview", num: "2", label: "Preview" },
+        { key: "result", num: "3", label: "Result" },
+    ];
+
+    // "Home" is selected whenever we're on home or in any browse sub-flow.
+    function activeTab(r: Route): Route {
+        if (r.startsWith("browse-")) return "home";
+        return r;
+    }
 </script>
 
-{#if notInTauri}
-  <div class="banner banner--warn">
-    <strong>Not a Tauri window.</strong>
-    This page is the Vite dev server; IPC calls won't work. Use the native
-    window opened by <code>cargo tauri dev</code>.
-  </div>
-{/if}
+<div class="backdrop"></div>
 
-<header class="appbar">
-  <div class="appbar__brand">
-    <span class="appbar__logo" aria-hidden="true"></span>
-    <strong>Toolpath</strong>
-    <span class="appbar__tag">Pathbase companion</span>
-  </div>
-  <nav class="appbar__nav">
-    <button
-      class="linklike"
-      onclick={() => store.dispatch({ t: "NavigateTo", screen: "home" })}
-    >Home</button>
-  </nav>
-</header>
+<div class="window">
+    <!-- Primary tabs -->
+    <nav class="tabs" aria-label="Primary">
+        {#each TABS as t (t.key)}
+            {@const isActive = activeTab(store.m.route) === t.key}
+            {@const disabled =
+                (t.key === "preview" && !store.m.preview) ||
+                (t.key === "result" && !store.m.result)}
+            <button
+                class={"tabs__item" + (isActive ? " tabs__item--active" : "")}
+                {disabled}
+                style={disabled ? "opacity:0.4;cursor:not-allowed" : ""}
+                onclick={() =>
+                    !disabled &&
+                    store.dispatch({ t: "NavigateTo", screen: t.key })}
+            >
+                <span class="tabs__num">{t.num}:</span>
+                <span>{t.label}</span>
+            </button>
+        {/each}
+    </nav>
 
-<main class={"screen" + (store.m.route === "preview" ? " screen--wide" : "")}>
-  {#if store.m.error}
-    <div class="error">
-      {store.m.error}
-      <button class="linklike" onclick={() => store.dispatch({ t: "ClearError" })}>dismiss</button>
-    </div>
-  {/if}
+    <!-- Main scroll area -->
+    <main class="main">
+        {#if notInTauri}
+            <div class="banner">
+                <strong>Not a Tauri window.</strong>
+                This page is the Vite dev server; IPC calls won't work. Use the native
+                window opened by <code>cargo tauri dev</code>.
+            </div>
+        {/if}
 
-  {#if store.m.route === "home"}
-    <Home />
-  {:else if store.m.route === "browse-agents"}
-    <BrowseAgents />
-  {:else if store.m.route === "browse-claude"}
-    <BrowseClaude />
-  {:else if store.m.route === "browse-pi"}
-    <BrowsePi />
-  {:else if store.m.route === "browse-git"}
-    <BrowseGit />
-  {:else if store.m.route === "browse-github"}
-    <BrowseGithub />
-  {:else if store.m.route === "preview"}
-    <Preview />
-  {:else if store.m.route === "result"}
-    <Result />
-  {/if}
-</main>
+        {#if store.m.error}
+            <div class="page" style="padding-bottom:0">
+                <div class="error">
+                    <span>{store.m.error}</span>
+                    <span class="spacer"></span>
+                    <button
+                        class="btn btn--sm"
+                        onclick={() => store.dispatch({ t: "ClearError" })}
+                        >Dismiss</button
+                    >
+                </div>
+            </div>
+        {/if}
+
+        {#if store.m.route === "home"}
+            <Home />
+        {:else if store.m.route === "browse-agents"}
+            <BrowseAgents />
+        {:else if store.m.route === "browse-claude"}
+            <BrowseClaude />
+        {:else if store.m.route === "browse-pi"}
+            <BrowsePi />
+        {:else if store.m.route === "browse-git"}
+            <BrowseGit />
+        {:else if store.m.route === "browse-github"}
+            <BrowseGithub />
+        {:else if store.m.route === "preview"}
+            <Preview />
+        {:else if store.m.route === "result"}
+            <Result />
+        {/if}
+    </main>
+</div>
