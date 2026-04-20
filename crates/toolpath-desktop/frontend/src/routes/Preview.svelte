@@ -3,19 +3,23 @@
   import { store } from "../lib/store.svelte";
   import type { StepRef } from "../lib/types";
 
-  let svgEl: SVGSVGElement | null = $state(null);
+  let canvasEl: HTMLDivElement | null = $state(null);
 
-  // Re-render the viz when the underlying doc or toggles change.
+  // Re-render the graph whenever the underlying doc, selection, or toggles
+  // change. `vizEpoch` bumps on every toggle/branch-expand.
   $effect(() => {
     const p = store.m.preview;
-    if (!svgEl || !p) return;
-    const doc = p.doc;
-    const toggles = { showDead: p.showDead, showTs: p.showTs, showFiles: p.showFiles };
-    // Referenced to establish dep tracking:
+    if (!canvasEl || !p) return;
     const _epoch = p.vizEpoch;
-    renderViz(doc, svgEl, {
-      ...toggles,
-      onStepClick: (step, actors) => store.dispatch({ t: "PreviewSelectStep", step, actors }),
+    renderViz(p.doc, canvasEl, {
+      selectedStepId: p.selectedStep?.step.id ?? null,
+      expandedBranches: p.expandedBranches,
+      showTs: p.showTs,
+      showFiles: p.showFiles,
+      onSelectStep: (step, actors) =>
+        store.dispatch({ t: "PreviewSelectStep", step, actors }),
+      onToggleBranch: (nodeId) =>
+        store.dispatch({ t: "PreviewToggleBranch", nodeId }),
     });
   });
 
@@ -52,10 +56,6 @@
 
   <div class="toolbar">
     <label>
-      <input type="checkbox" class="checkbox" checked={preview.showDead} onchange={() => store.dispatch({ t: "PreviewToggle", key: "showDead" })} />
-      Dead ends
-    </label>
-    <label>
       <input type="checkbox" class="checkbox" checked={preview.showTs} onchange={() => store.dispatch({ t: "PreviewToggle", key: "showTs" })} />
       Timestamps
     </label>
@@ -64,12 +64,11 @@
       Files touched
     </label>
     <div class="spacer"></div>
+    <span class="kbd">Click a card's <em>expand</em> chip to reveal its dead-end branch.</span>
   </div>
 
   <div class="preview-layout">
-    <div class="preview-canvas">
-      <svg bind:this={svgEl}></svg>
-    </div>
+    <div class="preview-canvas" bind:this={canvasEl}></div>
     <div class="preview-panel">
       {#if !preview.selectedStep}
         <div class="preview-panel__empty">Click a step in the graph to inspect its diff and metadata.</div>

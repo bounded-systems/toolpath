@@ -440,7 +440,7 @@ export function update(msg: Msg, m: Model): [Model, Cmd | null] {
             filename: msg.filename,
             selectedStep: null,
             selectedActors: null,
-            showDead: true,
+            expandedBranches: {},
             showTs: false,
             showFiles: false,
             vizEpoch: 0,
@@ -470,6 +470,20 @@ export function update(msg: Msg, m: Model): [Model, Cmd | null] {
         {
           ...m,
           preview: { ...m.preview, [msg.key]: !m.preview[msg.key], vizEpoch: m.preview.vizEpoch + 1 },
+        },
+        null,
+      ];
+    }
+    case "PreviewToggleBranch": {
+      if (!m.preview) return [m, null];
+      const cur = m.preview.expandedBranches;
+      const next = { ...cur };
+      if (next[msg.nodeId]) delete next[msg.nodeId];
+      else next[msg.nodeId] = true;
+      return [
+        {
+          ...m,
+          preview: { ...m.preview, expandedBranches: next, vizEpoch: m.preview.vizEpoch + 1 },
         },
         null,
       ];

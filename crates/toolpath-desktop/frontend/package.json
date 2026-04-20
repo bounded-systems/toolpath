@@ -14,11 +14,9 @@
     "@tauri-apps/plugin-opener": "^2.5.3"
   },
   "devDependencies": {
+    "@dagrejs/dagre": "^1.1.4",
     "@sveltejs/vite-plugin-svelte": "^5",
     "@tsconfig/svelte": "^5",
-    "@types/d3": "^7",
-    "d3": "^7",
-    "dagre-d3-es": "^7",
     "svelte": "^5",
     "svelte-check": "^4",
     "typescript": "^5",
