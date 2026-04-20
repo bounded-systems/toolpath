@@ -3,6 +3,7 @@
   import { invoke, listen } from "../lib/ipc";
   import { store } from "../lib/store.svelte";
   import { dbg } from "../lib/debug";
+  import SourceLogo from "../lib/SourceLogo.svelte";
   import type { PiProject, PiSession } from "../lib/types";
 
   // Permanent subscriptions — `onMount` runs exactly once per component
@@ -127,7 +128,7 @@
             class={"row-card" + (isExpanded ? " row-card--selected" : "")}
             onclick={() => store.dispatch({ t: "PiExpandProject", path: p.project_path })}
           >
-            <span class="row-card__marker row-card__marker--water">●</span>
+            <span class="row-card__marker row-card__marker--water"><SourceLogo kind="pi" size={14} /></span>
             <div style="min-width:0">
               <div class="row-card__title">{p.display_name}</div>
               <div class="row-card__sub">{p.project_path}</div>

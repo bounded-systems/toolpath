@@ -1,5 +1,6 @@
 <script lang="ts">
   import { store } from "../lib/store.svelte";
+  import SourceLogo from "../lib/SourceLogo.svelte";
   const git = $derived(store.m.git);
 </script>
 
@@ -58,7 +59,7 @@
           class={"row-card" + (git.selected === b.name ? " row-card--selected" : "")}
           onclick={() => store.dispatch({ t: "GitSelectBranch", name: b.name })}
         >
-          <span class="row-card__marker">⎇</span>
+          <span class="row-card__marker" style="color:#f05133"><SourceLogo kind="git" size={14} /></span>
           <div style="min-width:0">
             <div class="row-card__title">{b.name}</div>
             <div class="row-card__sub">{b.subject || "(no subject)"}</div>

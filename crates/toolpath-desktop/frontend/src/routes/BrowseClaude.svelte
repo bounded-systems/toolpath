@@ -1,6 +1,7 @@
 <script lang="ts">
   import { invoke, listen } from "../lib/ipc";
   import { store } from "../lib/store.svelte";
+  import SourceLogo from "../lib/SourceLogo.svelte";
   import type { ClaudeProject, ClaudeSession } from "../lib/types";
 
   let subscribed: Promise<void> | null = $state(null);
@@ -109,7 +110,7 @@
             class={"row-card" + (isExpanded ? " row-card--selected" : "")}
             onclick={() => store.dispatch({ t: "ClaudeExpandProject", path: p.project_path })}
           >
-            <span class="row-card__marker">⊕</span>
+            <span class="row-card__marker"><SourceLogo kind="claude" size={14} /></span>
             <div style="min-width:0">
               <div class="row-card__title">{p.display_name}</div>
               <div class="row-card__sub">{p.project_path}</div>
