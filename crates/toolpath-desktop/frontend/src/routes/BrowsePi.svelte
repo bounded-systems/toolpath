@@ -95,94 +95,110 @@
   );
 </script>
 
-<div class="row">
-  <button class="linklike" onclick={() => store.dispatch({ t: "NavigateTo", screen: "browse-agents" })}>← Back</button>
-</div>
-<h1>pi.dev sessions</h1>
-<p class="subtitle">
-  {#if projectCount === 0 && pi.loadingProjects}
-    Scanning ~/.pi/agent/sessions/…
-  {:else}
-    {projectCount} project{projectCount === 1 ? "" : "s"}{pi.loadingProjects ? " — still scanning… " : " "}
-  {/if}
-  {#if pi.loadingProjects}<span class="spinner"></span>{/if}
-</p>
-
-{#if projectCount === 0 && pi.projectsDone}
-  <div class="notice">No pi.dev projects found. Run a pi.dev session and come back.</div>
-{:else}
-  <div class="list">
-    {#each pi.projects as p (p.project_path)}
-      {@const isExpanded = pi.expanded === p.project_path}
-      {@const selectedForProject = Object.keys(pi.selected[p.project_path] ?? {}).length}
-      <div>
-        <div
-          class={"list__item" + (isExpanded ? " list__item--expanded" : "")}
-          role="button"
-          tabindex="0"
-          onclick={() => store.dispatch({ t: "PiExpandProject", path: p.project_path })}
-        >
-          <div class="list__title">{p.display_name}</div>
-          <div class="spacer"></div>
-          <div class="list__meta">
-            {p.session_count} session{p.session_count === 1 ? "" : "s"}
-            {#if selectedForProject > 0} · <strong>{selectedForProject} selected</strong>{/if}
-          </div>
-        </div>
-        {#if isExpanded}
-          {@const sessions = pi.sessionsByPath[p.project_path] ?? []}
-          {@const loading = pi.sessionsLoading[p.project_path]}
-          <div class="list__children">
-            {#if sessions.length === 0 && loading}
-              <div class="list__loading-hint">Loading sessions… <span class="spinner"></span></div>
-            {:else if sessions.length === 0}
-              <div class="notice">No sessions in this project.</div>
-            {:else}
-              {#each sessions as s (s.session_id)}
-                {@const isChecked = !!(pi.selected[p.project_path] ?? {})[s.session_id]}
-                <label
-                  class="list__item"
-                  onclick={(ev: MouseEvent) => {
-                    if ((ev.target as HTMLElement).tagName !== "INPUT") {
-                      ev.preventDefault();
-                      store.dispatch({ t: "PiToggleSession", path: p.project_path, sid: s.session_id });
-                    }
-                  }}
-                >
-                  <input
-                    type="checkbox"
-                    class="checkbox"
-                    checked={isChecked}
-                    onclick={(ev: MouseEvent) => ev.stopPropagation()}
-                    onchange={() => store.dispatch({ t: "PiToggleSession", path: p.project_path, sid: s.session_id })}
-                  />
-                  <div>
-                    <div class="list__title">{s.session_id}</div>
-                    <div class="list__meta">
-                      {s.entry_count} entr{s.entry_count === 1 ? "y" : "ies"} · {fmtTime(s.timestamp)}
-                    </div>
-                  </div>
-                </label>
-              {/each}
-              {#if loading}
-                <div class="list__loading-hint">Still loading… <span class="spinner"></span></div>
-              {/if}
-            {/if}
-          </div>
-        {/if}
-      </div>
-    {/each}
+<div class="page">
+  <div class="row" style="margin-bottom:14px">
+    <button class="btn btn--ghost" onclick={() => store.dispatch({ t: "NavigateTo", screen: "home" })}>← Back</button>
   </div>
-{/if}
 
-<div class="row" style="margin-top:14px">
-  <div class="spacer"></div>
-  <span class="list__meta">
-    {selectedCount || "No"} session{selectedCount === 1 ? "" : "s"} selected
-  </span>
-  <button
-    class="primary"
-    disabled={!selectedCount || pi.deriving}
-    onclick={() => store.dispatch({ t: "PiDerive" })}
-  >{pi.deriving ? "Deriving…" : "Preview"}</button>
+  <div class="page__header">
+    <div>
+      <div class="page__eyebrow">§1.2 · PI.DEV · CONVERSATIONS</div>
+      <h1 class="page__title">Pi.dev</h1>
+      <p class="page__lede">
+        {#if projectCount === 0 && pi.loadingProjects}
+          Scanning <code>~/.pi/agent/sessions/</code> …
+        {:else}
+          {projectCount} project{projectCount === 1 ? "" : "s"}{pi.loadingProjects ? " — still scanning …" : ""}
+        {/if}
+        {#if pi.loadingProjects}<span class="spinner"></span>{/if}
+      </p>
+    </div>
+  </div>
+
+  {#if projectCount === 0 && pi.projectsDone}
+    <div class="notice">No pi.dev projects found. Run a pi.dev session and come back.</div>
+  {:else}
+    <div style="border:0.5px solid var(--ink-5); background:var(--paper-bright)">
+      {#each pi.projects as p (p.project_path)}
+        {@const isExpanded = pi.expanded === p.project_path}
+        {@const selectedForProject = Object.keys(pi.selected[p.project_path] ?? {}).length}
+        <div>
+          <button
+            class={"row-card" + (isExpanded ? " row-card--selected" : "")}
+            onclick={() => store.dispatch({ t: "PiExpandProject", path: p.project_path })}
+          >
+            <span class="row-card__marker row-card__marker--water">●</span>
+            <div style="min-width:0">
+              <div class="row-card__title">{p.display_name}</div>
+              <div class="row-card__sub">{p.project_path}</div>
+            </div>
+            <div class="row-card__right">
+              {p.session_count} session{p.session_count === 1 ? "" : "s"}
+              {#if selectedForProject > 0}<br/><span style="color:var(--road)">{selectedForProject} selected</span>{/if}
+            </div>
+          </button>
+          {#if isExpanded}
+            {@const sessions = pi.sessionsByPath[p.project_path] ?? []}
+            {@const loading = pi.sessionsLoading[p.project_path]}
+            <div class="row-card__children">
+              {#if sessions.length === 0 && loading}
+                <div style="padding:12px 18px; font-family:var(--font-mono); font-size:11px; color:var(--ink-3)">
+                  Loading sessions… <span class="spinner"></span>
+                </div>
+              {:else if sessions.length === 0}
+                <div style="padding:12px 18px"><div class="notice">No sessions in this project.</div></div>
+              {:else}
+                {#each sessions as s (s.session_id)}
+                  {@const isChecked = !!(pi.selected[p.project_path] ?? {})[s.session_id]}
+                  <label
+                    class={"row-card" + (isChecked ? " row-card--selected" : "")}
+                    style="padding-left:36px"
+                    onclick={(ev: MouseEvent) => {
+                      if ((ev.target as HTMLElement).tagName !== "INPUT") {
+                        ev.preventDefault();
+                        store.dispatch({ t: "PiToggleSession", path: p.project_path, sid: s.session_id });
+                      }
+                    }}
+                  >
+                    <input
+                      type="checkbox"
+                      class="checkbox"
+                      checked={isChecked}
+                      onclick={(ev: MouseEvent) => ev.stopPropagation()}
+                      onchange={() => store.dispatch({ t: "PiToggleSession", path: p.project_path, sid: s.session_id })}
+                    />
+                    <div style="min-width:0">
+                      <div class="row-card__title">{s.session_id}</div>
+                      <div class="row-card__meta">
+                        <span>{s.entry_count} entr{s.entry_count === 1 ? "y" : "ies"}</span>
+                        <span>{fmtTime(s.timestamp)}</span>
+                      </div>
+                    </div>
+                    <span class="row-card__right"></span>
+                  </label>
+                {/each}
+                {#if loading}
+                  <div style="padding:10px 18px; font-family:var(--font-mono); font-size:11px; color:var(--ink-3)">
+                    Still loading… <span class="spinner"></span>
+                  </div>
+                {/if}
+              {/if}
+            </div>
+          {/if}
+        </div>
+      {/each}
+    </div>
+  {/if}
+
+  <div class="row" style="margin-top:18px">
+    <span class="spacer"></span>
+    <span style="font-family:var(--font-mono); font-size:11px; color:var(--ink-3); letter-spacing:0.06em">
+      {selectedCount || "No"} session{selectedCount === 1 ? "" : "s"} selected
+    </span>
+    <button
+      class="btn btn--accent"
+      disabled={!selectedCount || pi.deriving}
+      onclick={() => store.dispatch({ t: "PiDerive" })}
+    >{pi.deriving ? "Deriving…" : "Preview →"}</button>
+  </div>
 </div>
