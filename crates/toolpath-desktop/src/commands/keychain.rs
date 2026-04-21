@@ -15,9 +15,7 @@ pub(crate) fn read_github_token() -> DesktopResult<String> {
     match entry.get_password() {
         Ok(tok) if !tok.is_empty() => Ok(tok),
         Ok(_) => Err(DesktopError::Auth("GitHub token is empty".into())),
-        Err(keyring::Error::NoEntry) => {
-            Err(DesktopError::Auth("GitHub token not set".into()))
-        }
+        Err(keyring::Error::NoEntry) => Err(DesktopError::Auth("GitHub token not set".into())),
         Err(e) => Err(DesktopError::Keychain(format!("read: {e}"))),
     }
 }

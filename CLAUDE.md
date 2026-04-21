@@ -17,6 +17,7 @@ crates/
   toolpath-github/              # derive from GitHub pull requests (REST API)
   toolpath-claude/              # derive from Claude conversation logs
   toolpath-gemini/              # derive from Gemini CLI conversation logs
+  toolpath-codex/               # derive from Codex CLI rollout files
   toolpath-pi/                  # derive from Pi (pi.dev) agent session logs
   toolpath-dot/                 # Graphviz DOT rendering
   toolpath-md/                  # Markdown rendering for LLM consumption
@@ -38,6 +39,7 @@ toolpath-cli (binary: path)
  ├── toolpath-github  → toolpath
  ├── toolpath-claude  → toolpath, toolpath-convo
  ├── toolpath-gemini  → toolpath, toolpath-convo
+ ├── toolpath-codex   → toolpath, toolpath-convo
  ├── toolpath-pi      → toolpath, toolpath-convo
  ├── toolpath-dot     → toolpath
  └── toolpath-md      → toolpath
@@ -46,7 +48,7 @@ toolpath-desktop (binary: toolpath-desktop, Tauri 2 app)
  ├── toolpath, toolpath-claude, toolpath-git, toolpath-github
 ```
 
-Cross-dependencies between satellite crates: `toolpath-claude → toolpath-convo`, `toolpath-gemini → toolpath-convo`, `toolpath-pi → toolpath-convo`. `toolpath-desktop` is a leaf — nothing depends on it.
+Cross-dependencies between satellite crates: `toolpath-claude → toolpath-convo`, `toolpath-gemini → toolpath-convo`, `toolpath-codex → toolpath-convo`, `toolpath-pi → toolpath-convo`. `toolpath-desktop` is a leaf — nothing depends on it.
 
 ## Build and test
 
@@ -67,6 +69,7 @@ cargo run -p toolpath-cli -- derive git --repo . --branch main --pretty
 cargo run -p toolpath-cli -- derive github --repo owner/repo --pr 42 --pretty
 cargo run -p toolpath-cli -- derive claude --project /path/to/project
 cargo run -p toolpath-cli -- derive gemini --project /path/to/project
+cargo run -p toolpath-cli -- derive codex --session <uuid>
 cargo run -p toolpath-cli -- derive pi --project /path/to/project
 cargo run -p toolpath-cli -- render dot --input doc.json
 cargo run -p toolpath-cli -- render md --input doc.json --detail full
@@ -100,6 +103,7 @@ Tests live alongside the code (`#[cfg(test)] mod tests`), plus `toolpath-cli` ha
 - `toolpath-github`: 28 unit + 2 doc tests (mapping, DAG construction, fixtures)
 - `toolpath-claude`: 216 unit + 5 doc tests (path resolution, conversation reading, query, chaining, watcher, derive)
 - `toolpath-gemini`: 163 unit + 12 integration + 4 doc tests (path resolution, chat-file parsing, query, watcher, derive, provider, round-trip fidelity)
+- `toolpath-codex`: 69 unit + 33 integration + 1 doc test (rollout parsing, provider assembly, patch-fidelity derive, real-session fixture, source→path fidelity invariants, JSON wire-level round-trip)
 - `toolpath-pi`: ~88 unit tests (types, paths, error, reader, io, provider)
 - `toolpath-dot`: 30 unit + 2 doc tests (render, visual conventions, escaping)
 - `toolpath-cli`: 126 unit + 24 integration tests (all commands, track sessions, merge, validate, roundtrip, render-md snapshots)
@@ -158,7 +162,7 @@ When changing a crate's public API (new types, new trait impls, new public metho
 
 **Release script** (`scripts/release.sh`) publishes in dependency order:
 - Tier 1: `toolpath` (no workspace deps)
-- Tier 2: `toolpath-convo` (depends on `toolpath`); then `toolpath-git`, `toolpath-github`, `toolpath-dot`, `toolpath-md`, `toolpath-claude`, `toolpath-gemini`, `toolpath-pi`
+- Tier 2: `toolpath-convo` (depends on `toolpath`); then `toolpath-git`, `toolpath-github`, `toolpath-dot`, `toolpath-md`, `toolpath-claude`, `toolpath-gemini`, `toolpath-codex`, `toolpath-pi`
 - Tier 3: `toolpath-cli` (depends on everything)
 
 Build the site after changes: `cd site && pnpm run build` (should produce 7 pages).
@@ -175,3 +179,4 @@ Build the site after changes: `cd site && pnpm run build` (should produce 7 page
 - Provider-specific extras convention: `Turn.extra` and `WatcherEvent::Progress.data` use provider-namespaced keys (e.g. `extra["claude"]`, `extra["gemini"]`). `toolpath-claude` populates `Turn.extra["claude"]` from `ConversationEntry.extra`; `toolpath-gemini` populates `Turn.extra["gemini"]` with the full `tokens` struct, per-thought metadata, and tool-call status. This lets trait-only consumers access provider metadata without importing provider types.
 - Shared derivation: `toolpath-convo` provides a provider-agnostic `ConversationView → Path` mapping via `toolpath_convo::derive_path`. New conversation providers should build on it rather than re-implementing the mapping.
 - Pi provider: `toolpath-pi` reads Pi session JSONL from `~/.pi/agent/sessions/`. Sessions use a tree (id/parentId) in a single file, and may link to a parent file via `parentSession` in the header. The tree is preserved as a DAG in the derived `Path`.
+- Codex provider: `toolpath-codex` reads Codex CLI rollout files from `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl`. Sessions are date-bucketed (not project-keyed). File-change fidelity is excellent — Codex's `patch_apply_end` events carry either the unified diff (for updates) or the full file content (for adds), so the derived `Path` gets a real `raw` perspective on every file artifact. See `docs/agents/formats/codex.md` for the full format reference.

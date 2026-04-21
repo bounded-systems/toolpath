@@ -82,6 +82,16 @@ pub enum DeriveSource {
         #[arg(long)]
         include_thinking: bool,
     },
+    /// Derive from Codex CLI rollout files
+    Codex {
+        /// Session id, UUID, or filename stem (default: most recent)
+        #[arg(short, long)]
+        session: Option<String>,
+
+        /// Process all sessions (emits one Path per session)
+        #[arg(long)]
+        all: bool,
+    },
     /// Derive from Pi (pi.dev) coding-agent session logs
     Pi {
         /// Project path (cwd the session ran in)
@@ -129,6 +139,7 @@ pub fn run(source: DeriveSource, pretty: bool) -> Result<()> {
             all,
             include_thinking,
         } => run_gemini(project, session, all, include_thinking, pretty),
+        DeriveSource::Codex { session, all } => run_codex(session, all, pretty),
         DeriveSource::Pi {
             project,
             session,
@@ -399,6 +410,43 @@ fn run_pi_with_manager(
         doc.to_json()?
     };
     println!("{}", json);
+    Ok(())
+}
+
+fn run_codex(session: Option<String>, all: bool, pretty: bool) -> Result<()> {
+    let manager = toolpath_codex::CodexConvo::new();
+    let config = toolpath_codex::derive::DeriveConfig { project_path: None };
+
+    let docs: Vec<toolpath::v1::Path> = if all {
+        let sessions = manager
+            .read_all_sessions()
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
+        if sessions.is_empty() {
+            anyhow::bail!("No Codex sessions found in ~/.codex/sessions");
+        }
+        toolpath_codex::derive::derive_project(&sessions, &config)
+    } else if let Some(sid) = session {
+        let s = manager
+            .read_session(&sid)
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
+        vec![toolpath_codex::derive::derive_path(&s, &config)]
+    } else {
+        let s = manager
+            .most_recent_session()
+            .map_err(|e| anyhow::anyhow!("{}", e))?
+            .ok_or_else(|| anyhow::anyhow!("No Codex sessions found in ~/.codex/sessions"))?;
+        vec![toolpath_codex::derive::derive_path(&s, &config)]
+    };
+
+    for path in &docs {
+        let doc = toolpath::v1::Document::Path(path.clone());
+        let json = if pretty {
+            doc.to_json_pretty()?
+        } else {
+            doc.to_json()?
+        };
+        println!("{}", json);
+    }
     Ok(())
 }
 

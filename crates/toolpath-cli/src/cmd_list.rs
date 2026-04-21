@@ -34,6 +34,8 @@ pub enum ListSource {
         #[arg(short, long)]
         project: Option<String>,
     },
+    /// List Codex CLI sessions (global, newest first)
+    Codex {},
     /// List Pi (pi.dev) projects or sessions
     Pi {
         /// Project path — if omitted, lists all projects
@@ -52,6 +54,7 @@ pub fn run(source: ListSource, json: bool) -> Result<()> {
         ListSource::Github { repo } => run_github(repo, json),
         ListSource::Claude { project } => run_claude(project, json),
         ListSource::Gemini { project } => run_gemini(project, json),
+        ListSource::Codex {} => run_codex(json),
         ListSource::Pi { project, base } => run_pi(project, base, json),
     }
 }
@@ -347,6 +350,65 @@ fn list_gemini_sessions(
                     &m.session_uuid, m.message_count, sub, date
                 );
             }
+        }
+    }
+    Ok(())
+}
+
+fn run_codex(json: bool) -> Result<()> {
+    let manager = toolpath_codex::CodexConvo::new();
+    let sessions = manager
+        .list_sessions()
+        .map_err(|e| anyhow::anyhow!("{}", e))?;
+
+    if json {
+        let items: Vec<serde_json::Value> = sessions
+            .iter()
+            .map(|m| {
+                serde_json::json!({
+                    "id": m.id,
+                    "started_at": m.started_at.map(|t| t.to_rfc3339()),
+                    "last_activity": m.last_activity.map(|t| t.to_rfc3339()),
+                    "cwd": m.cwd,
+                    "cli_version": m.cli_version,
+                    "git_branch": m.git_branch,
+                    "git_commit": m.git_commit,
+                    "first_user_message": m.first_user_message,
+                    "line_count": m.line_count,
+                    "file_path": m.file_path,
+                })
+            })
+            .collect();
+        let output = serde_json::json!({
+            "source": "codex",
+            "sessions": items,
+        });
+        println!("{}", serde_json::to_string_pretty(&output)?);
+    } else if sessions.is_empty() {
+        println!("No Codex sessions found in ~/.codex/sessions.");
+    } else {
+        println!("Codex sessions:");
+        println!();
+        for m in &sessions {
+            let date = m
+                .last_activity
+                .map(|t| t.format("%Y-%m-%d %H:%M").to_string())
+                .unwrap_or_else(|| "unknown".to_string());
+            let prompt = m
+                .first_user_message
+                .as_deref()
+                .map(|s| truncate(s, 60))
+                .unwrap_or_default();
+            let id_short: String = m.id.chars().take(8).collect();
+            let cwd = m
+                .cwd
+                .as_ref()
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or_default();
+            println!(
+                "  {} {:>4} lines  {}  {}  {}",
+                id_short, m.line_count, date, cwd, prompt
+            );
         }
     }
     Ok(())

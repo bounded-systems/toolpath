@@ -110,11 +110,7 @@ pub fn derive_pi(
 }
 
 #[tauri::command]
-pub fn derive_git(
-    repo_path: String,
-    branch: String,
-    base: Option<String>,
-) -> DesktopResult<Value> {
+pub fn derive_git(repo_path: String, branch: String, base: Option<String>) -> DesktopResult<Value> {
     if branch.is_empty() {
         return Err(DesktopError::InvalidInput("branch is required".into()));
     }
@@ -155,13 +151,9 @@ pub fn derive_github(
         ..Default::default()
     };
 
-    let path = toolpath_github::derive_pull_request(
-        &parsed.owner,
-        &parsed.repo,
-        parsed.number,
-        &config,
-    )
-    .map_err(|e| DesktopError::Derive(format!("derive github: {e:#}")))?;
+    let path =
+        toolpath_github::derive_pull_request(&parsed.owner, &parsed.repo, parsed.number, &config)
+            .map_err(|e| DesktopError::Derive(format!("derive github: {e:#}")))?;
 
     document_to_value(&toolpath::v1::Document::Path(path))
 }
