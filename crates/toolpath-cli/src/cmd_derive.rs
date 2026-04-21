@@ -92,6 +92,24 @@ pub enum DeriveSource {
         #[arg(long)]
         all: bool,
     },
+    /// Derive from opencode session databases
+    Opencode {
+        /// Session id (default: most recent)
+        #[arg(short, long)]
+        session: Option<String>,
+
+        /// Process all sessions (emits one Path per session)
+        #[arg(long)]
+        all: bool,
+
+        /// Filter by project id (SHA of repo's first root commit)
+        #[arg(long)]
+        project: Option<String>,
+
+        /// Skip snapshot-based file diff extraction
+        #[arg(long)]
+        no_snapshot_diffs: bool,
+    },
     /// Derive from Pi (pi.dev) coding-agent session logs
     Pi {
         /// Project path (cwd the session ran in)
@@ -140,6 +158,12 @@ pub fn run(source: DeriveSource, pretty: bool) -> Result<()> {
             include_thinking,
         } => run_gemini(project, session, all, include_thinking, pretty),
         DeriveSource::Codex { session, all } => run_codex(session, all, pretty),
+        DeriveSource::Opencode {
+            session,
+            all,
+            project,
+            no_snapshot_diffs,
+        } => run_opencode(session, all, project, no_snapshot_diffs, pretty),
         DeriveSource::Pi {
             project,
             session,
@@ -353,6 +377,83 @@ fn run_claude_with_manager(
     }
 
     Ok(())
+}
+
+fn run_opencode(
+    session: Option<String>,
+    all: bool,
+    project: Option<String>,
+    no_snapshot_diffs: bool,
+    pretty: bool,
+) -> Result<()> {
+    #[cfg(target_os = "emscripten")]
+    {
+        let _ = (session, all, project, no_snapshot_diffs, pretty);
+        anyhow::bail!(
+            "'path derive opencode' requires a native environment (SQLite + git2 not available under wasm)"
+        );
+    }
+
+    #[cfg(not(target_os = "emscripten"))]
+    {
+        let manager = toolpath_opencode::OpencodeConvo::new();
+        let config = toolpath_opencode::derive::DeriveConfig {
+            no_snapshot_diffs,
+            ..Default::default()
+        };
+
+        let docs: Vec<toolpath::v1::Path> = if all {
+            let metas = manager
+                .io()
+                .list_session_metadata(project.as_deref())
+                .map_err(|e| anyhow::anyhow!("{}", e))?;
+            if metas.is_empty() {
+                anyhow::bail!("No opencode sessions found");
+            }
+            let mut out = Vec::with_capacity(metas.len());
+            for m in metas {
+                let s = manager
+                    .read_session(&m.id)
+                    .map_err(|e| anyhow::anyhow!("{}: {}", m.id, e))?;
+                out.push(toolpath_opencode::derive::derive_path_with_resolver(
+                    &s,
+                    &config,
+                    manager.resolver(),
+                ));
+            }
+            out
+        } else if let Some(sid) = session {
+            let s = manager
+                .read_session(&sid)
+                .map_err(|e| anyhow::anyhow!("{}", e))?;
+            vec![toolpath_opencode::derive::derive_path_with_resolver(
+                &s,
+                &config,
+                manager.resolver(),
+            )]
+        } else {
+            let s = manager
+                .most_recent_session()
+                .map_err(|e| anyhow::anyhow!("{}", e))?
+                .ok_or_else(|| anyhow::anyhow!("No opencode sessions found"))?;
+            vec![toolpath_opencode::derive::derive_path_with_resolver(
+                &s,
+                &config,
+                manager.resolver(),
+            )]
+        };
+
+        for path in &docs {
+            let doc = toolpath::v1::Document::Path(path.clone());
+            let json = if pretty {
+                doc.to_json_pretty()?
+            } else {
+                doc.to_json()?
+            };
+            println!("{}", json);
+        }
+        Ok(())
+    }
 }
 
 fn run_pi(
