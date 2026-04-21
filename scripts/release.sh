@@ -17,11 +17,12 @@ set -euo pipefail
 #       toolpath-md       (depends on toolpath)
 #       toolpath-claude   (depends on toolpath, toolpath-convo)
 #       toolpath-gemini   (depends on toolpath, toolpath-convo)
+#       toolpath-codex    (depends on toolpath, toolpath-convo)
 #       toolpath-pi       (depends on toolpath, toolpath-convo)
 #   3. toolpath-cli       (depends on all of the above)
 #      toolpath-desktop   (depends on toolpath, toolpath-claude, toolpath-git, toolpath-github)
 
-ALL_CRATES=(toolpath toolpath-convo toolpath-git toolpath-github toolpath-dot toolpath-md toolpath-claude toolpath-gemini toolpath-pi toolpath-cli toolpath-desktop)
+ALL_CRATES=(toolpath toolpath-convo toolpath-git toolpath-github toolpath-dot toolpath-md toolpath-claude toolpath-gemini toolpath-codex toolpath-pi toolpath-cli toolpath-desktop)
 
 DRY_RUN=""
 AUTO_YES=""
@@ -206,11 +207,11 @@ if should_publish toolpath-convo; then
 fi
 
 # Tier 2b: satellite crates (depend on tier 1 and/or toolpath-convo)
-for crate in toolpath-git toolpath-github toolpath-dot toolpath-md toolpath-claude toolpath-gemini toolpath-pi; do
+for crate in toolpath-git toolpath-github toolpath-dot toolpath-md toolpath-claude toolpath-gemini toolpath-codex toolpath-pi; do
     publish "$crate"
 done
 
-for crate in toolpath-git toolpath-github toolpath-dot toolpath-md toolpath-claude toolpath-gemini toolpath-pi; do
+for crate in toolpath-git toolpath-github toolpath-dot toolpath-md toolpath-claude toolpath-gemini toolpath-codex toolpath-pi; do
     if should_publish "$crate"; then
         wait_for_index "$crate" "$(crate_version "$crate")"
     fi

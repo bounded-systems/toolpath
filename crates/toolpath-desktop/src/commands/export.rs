@@ -64,11 +64,8 @@ mod tests {
     fn save_document_writes_pretty_json() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("out.path.json");
-        let written = save_document(
-            minimal_document(),
-            path.to_string_lossy().into_owned(),
-        )
-        .expect("save");
+        let written =
+            save_document(minimal_document(), path.to_string_lossy().into_owned()).expect("save");
         let body = std::fs::read_to_string(&written).unwrap();
         // Pretty output uses indentation.
         assert!(body.contains("  \"path\""));

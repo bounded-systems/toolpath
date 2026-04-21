@@ -5013,6 +5013,7 @@ dependencies = [
  "tempfile",
  "toolpath",
  "toolpath-claude",
+ "toolpath-codex",
  "toolpath-convo",
  "toolpath-dot",
  "toolpath-gemini",
@@ -5020,6 +5021,20 @@ dependencies = [
  "toolpath-github",
  "toolpath-md",
  "toolpath-pi",
+]
+
+[[package]]
+name = "toolpath-codex"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 1.0.69",
+ "toolpath",
+ "toolpath-convo",
 ]
 
 [[package]]

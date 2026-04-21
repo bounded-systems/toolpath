@@ -71,7 +71,10 @@ pub fn list_claude_projects() -> DesktopResult<Vec<ClaudeProjectSummary>> {
         let (session_count, last_activity) = match manager.list_conversation_metadata(&project_path)
         {
             Ok(metas) => {
-                let last = metas.first().and_then(|m| m.last_activity).map(|t| t.to_rfc3339());
+                let last = metas
+                    .first()
+                    .and_then(|m| m.last_activity)
+                    .map(|t| t.to_rfc3339());
                 (metas.len(), last)
             }
             Err(_) => (0, None),
@@ -174,17 +177,18 @@ pub fn list_agents() -> DesktopResult<Vec<AgentSummary>> {
             reason: if claude_available {
                 None
             } else {
-                Some("No ~/.claude directory found — use Claude Code at least once and try again.".into())
+                Some(
+                    "No ~/.claude directory found — use Claude Code at least once and try again."
+                        .into(),
+                )
             },
             data_path: claude_path,
         },
         {
             let pi = toolpath_pi::PiConvo::new();
             let pi_available = pi.exists();
-            let pi_path = std::path::PathBuf::from(
-                std::env::var("HOME").unwrap_or_default(),
-            )
-            .join(".pi/agent/sessions");
+            let pi_path = std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default())
+                .join(".pi/agent/sessions");
             AgentSummary {
                 id: "pi-dev".into(),
                 name: "pi.dev".into(),
@@ -202,8 +206,7 @@ pub fn list_agents() -> DesktopResult<Vec<AgentSummary>> {
                             .into(),
                     )
                 },
-                data_path: pi_available
-                    .then(|| pi_path.to_string_lossy().into_owned()),
+                data_path: pi_available.then(|| pi_path.to_string_lossy().into_owned()),
             }
         },
     ])
@@ -254,7 +257,10 @@ pub fn list_claude_projects_stream(app: AppHandle) -> DesktopResult<()> {
 
         // Chain heads only — cheap directory walk + chain index lookup,
         // no per-session JSONL parsing.
-        let session_count = manager.list_conversations(&path).map(|v| v.len()).unwrap_or(0);
+        let session_count = manager
+            .list_conversations(&path)
+            .map(|v| v.len())
+            .unwrap_or(0);
 
         let _ = app.emit(
             "claude:project",
@@ -374,7 +380,10 @@ pub fn list_pi_projects_stream(app: AppHandle) -> DesktopResult<()> {
 
     for project in projects {
         let display_name = project.clone();
-        let session_count = manager.list_sessions(&project).map(|v| v.len()).unwrap_or(0);
+        let session_count = manager
+            .list_sessions(&project)
+            .map(|v| v.len())
+            .unwrap_or(0);
         let _ = app.emit(
             "pi:project",
             PiProjectQuick {
