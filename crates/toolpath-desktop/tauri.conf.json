@@ -7,11 +7,11 @@
     "frontendDist": "frontend/dist",
     "devUrl": "http://localhost:1420",
     "beforeDevCommand": {
-      "script": "bun run dev",
+      "script": "bun install && bun run dev",
       "cwd": "./frontend"
     },
     "beforeBuildCommand": {
-      "script": "bun run build",
+      "script": "bun install && bun run build",
       "cwd": "./frontend"
     }
   },
