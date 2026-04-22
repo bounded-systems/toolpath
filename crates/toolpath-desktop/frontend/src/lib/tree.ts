@@ -7,6 +7,7 @@
 // of the HEAD-path steps used by the chat/transcript view.
 
 import { classify, type ChatTurnKind } from "./classify";
+import { renderMarkdown } from "./markdown";
 import type { StepRef, TreeFilter } from "./types";
 import { actorName, actorType, normalize, type Normalized } from "./viz";
 
@@ -127,20 +128,51 @@ export interface ChatTurn {
   kind: ChatTurnKind;
   /** User / assistant text (from change[k].structural.extra.text). */
   text: string | null;
+  /** Sanitized markdown-rendered HTML for {@link text}. Precomputed at
+   *  flatten time so re-renders of the chat list (which happen on any
+   *  unrelated state change — filter typing, selection, view toggle) skip
+   *  the `marked.parse + DOMPurify.sanitize` pipeline. Empty string if
+   *  `text` is null/empty. */
+  textHtml: string;
   /** Summary of tool names in this turn (from extra.tool_uses). */
   toolNames: string[];
   /** Thinking-block text, if captured (from extra.thinking). */
   thinking: string | null;
+  /** Sanitized markdown-rendered HTML for {@link thinking}. Precomputed
+   *  for the same reason as {@link textHtml}. Empty string if `thinking`
+   *  is null/empty. */
+  thinkingHtml: string;
   /** Model identifier (e.g. `claude-opus-4-6`). */
   model: string | null;
   /** For `kind === "tool"` only: the name of the invoked tool. */
   toolName: string | null;
+  /** For `kind === "tool"`: the first non-empty `change[k].raw` on the
+   *  step — file-write tools carry a unified diff there. Precomputed at
+   *  flatten time so the diff body doesn't re-split on every render. */
+  toolDiff: { path: string; raw: string; lines: string[] } | null;
   /** For `kind === "assistant"`: the `tool.invoke` sibling steps spawned
    *  by this assistant turn (Claude derives them as separate siblings
    *  rather than linear descendants). Rendered inline inside the bubble. */
   toolInvocations: ChatTurn[];
 }
 
+
+/** Pick the first non-empty `change[k].raw` on a step — file-write tools
+ *  (Edit/Write) carry the unified diff there. Precomputed once per turn
+ *  at flatten time so the chat view doesn't re-split on every render. */
+function firstRawDiff(
+  s: StepRef,
+): { path: string; raw: string; lines: string[] } | null {
+  const ch = s.change;
+  if (!ch) return null;
+  for (const key of Object.keys(ch)) {
+    const raw = ch[key]?.raw;
+    if (typeof raw === "string" && raw.length) {
+      return { path: key, raw, lines: raw.split("\n") };
+    }
+  }
+  return null;
+}
 
 /**
  * Linearise the HEAD-ancestor chain earliest → latest for a chat-style
@@ -192,10 +224,13 @@ export function flattenChatHead(norm: Normalized): ChatTurn[] {
       changeKeys: s.change ? Object.keys(s.change) : [],
       kind: c.kind,
       text: c.text,
+      textHtml: c.text ? renderMarkdown(c.text) : "",
       toolNames: c.toolNames,
       thinking: c.thinking,
+      thinkingHtml: c.thinking ? renderMarkdown(c.thinking) : "",
       model: c.model,
       toolName: c.toolName,
+      toolDiff: firstRawDiff(s),
       toolInvocations: [],
     };
   };

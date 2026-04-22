@@ -11,7 +11,6 @@
 
   import { tick } from "svelte";
   import { store } from "./store.svelte";
-  import { renderMarkdown } from "./markdown";
   import {
     buildTree,
     flattenChatHead,
@@ -35,7 +34,7 @@
     if (collapsedTools[t.id]) return false;
     if (expandedTools[t.id]) return true;
     // Default: auto-expand tool turns that have a raw diff to show.
-    return !!toolDiff(t);
+    return !!t.toolDiff;
   }
 
   $effect(() => {
@@ -101,19 +100,6 @@
   const toolInput = (t: ChatTurn) => readField(t, "input");
   const toolResult = (t: ChatTurn) => readField(t, "result");
 
-  /** Pick the first non-empty `change[k].raw` — file-write tools carry the
-   *  unified diff there so we render it as a proper diff block rather than
-   *  a JSON dump of `input`. */
-  function toolDiff(t: ChatTurn): { path: string; raw: string } | null {
-    const ch = t.step.change;
-    if (!ch) return null;
-    for (const key of Object.keys(ch)) {
-      const raw = ch[key]?.raw;
-      if (typeof raw === "string" && raw.length) return { path: key, raw };
-    }
-    return null;
-  }
-
   /** Tag each diff line with a class so CSS can color add/remove/hunk/meta. */
   function diffLineClass(line: string): string {
     if (line.startsWith("@@")) return "diff-line diff-line--hunk";
@@ -147,7 +133,7 @@
           >
             <div class="chat-msg__bubble">
               {#if t.text}
-                <div class="chat-msg__text markdown">{@html renderMarkdown(t.text)}</div>
+                <div class="chat-msg__text markdown">{@html t.textHtml}</div>
               {:else}
                 <div class="chat-msg__text chat-msg__text--empty">(empty message)</div>
               {/if}
@@ -175,12 +161,12 @@
             {#if t.thinking}
               <details class="chat-thinking">
                 <summary>Thinking…</summary>
-                <div class="chat-thinking__body markdown">{@html renderMarkdown(t.thinking)}</div>
+                <div class="chat-thinking__body markdown">{@html t.thinkingHtml}</div>
               </details>
             {/if}
 
             {#if t.text}
-              <div class="chat-msg__text markdown">{@html renderMarkdown(t.text)}</div>
+              <div class="chat-msg__text markdown">{@html t.textHtml}</div>
             {:else if t.toolNames.length === 0}
               <div class="chat-msg__text chat-msg__text--empty">(no text in this turn)</div>
             {/if}
@@ -202,7 +188,7 @@
               <div class="chat-tool-list">
                 {#each t.toolInvocations as tool (tool.id)}
                   {@const expanded = isExpanded(tool)}
-                  {@const diff = toolDiff(tool)}
+                  {@const diff = tool.toolDiff}
                   <div class={"chat-tool" + (diff ? " chat-tool--has-diff" : "")} data-chat-id={tool.id}>
                     <button
                       type="button"
@@ -225,7 +211,7 @@
                       <div class="chat-tool__body">
                         {#if diff}
                           <div class="chat-tool__section-label">Diff · {diff.path}</div>
-                          <pre class="chat-tool__diff"><code>{#each diff.raw.split("\n") as line, i (i)}<span class={diffLineClass(line)}>{line}
+                          <pre class="chat-tool__diff"><code>{#each diff.lines as line, i (i)}<span class={diffLineClass(line)}>{line}
 </span>{/each}</code></pre>
                         {:else if input}
                           <div class="chat-tool__section-label">Input</div>
