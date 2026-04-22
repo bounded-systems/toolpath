@@ -1,0 +1,953 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Toolpath — viz prototype (dagre graph)</title>
+  <script src="https://cdn.jsdelivr.net/npm/dagre@0.8.5/dist/dagre.min.js"></script>
+  <style>
+    :root {
+      --bg:        #18181e;
+      --panel:     #1e1e24;
+      --panel-2:   #24242c;
+      --border:    #33333c;
+      --text:      #e5e5e7;
+      --muted:     #888892;
+      --dim:       #55555e;
+      --hover:     #2a2a34;
+      --active:    #34343e;
+
+      --human:     #e8a85c;
+      --agent:     #8abeb7;
+      --tool:      #a8a4a0;
+      --ci:        #c9a8ea;
+      --dead:      #cc6666;
+      --head:      #ffd666;
+
+      --diff-add:  #98c379;
+      --diff-del:  #e06c75;
+      --hunk:      #81a2be;
+      --link:      #81a2be;
+
+      --sidebar-w: 380px;
+    }
+
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body { height: 100%; }
+    body {
+      font-family: ui-monospace, 'SF Mono', Menlo, Consolas, 'DejaVu Sans Mono', monospace;
+      font-size: 12px;
+      line-height: 1.5;
+      color: var(--text);
+      background: var(--bg);
+    }
+
+    #app { display: flex; height: 100vh; }
+
+    /* ========== Sidebar ========== */
+    #sidebar {
+      width: var(--sidebar-w);
+      flex-shrink: 0;
+      background: var(--panel);
+      border-right: 1px solid var(--border);
+      display: flex;
+      flex-direction: column;
+    }
+    .sb-header {
+      padding: 12px 14px 10px;
+      border-bottom: 1px solid var(--border);
+    }
+    .sb-title {
+      font-size: 12px;
+      font-weight: 700;
+      color: var(--text);
+      letter-spacing: 0.01em;
+    }
+    .sb-sub {
+      font-size: 10px;
+      color: var(--muted);
+      margin-top: 3px;
+    }
+    .sb-controls {
+      padding: 8px 10px;
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      gap: 6px;
+    }
+    .sb-search {
+      flex: 1;
+      padding: 4px 8px;
+      font: inherit;
+      font-size: 11px;
+      background: var(--bg);
+      color: var(--text);
+      border: 1px solid var(--border);
+      border-radius: 3px;
+    }
+    .sb-search:focus { outline: none; border-color: var(--agent); }
+    .sb-filters {
+      display: flex;
+      gap: 4px;
+      padding: 8px 10px;
+      border-bottom: 1px solid var(--border);
+      flex-wrap: wrap;
+    }
+    .filter-btn {
+      padding: 3px 9px;
+      font: inherit;
+      font-size: 10px;
+      background: transparent;
+      color: var(--muted);
+      border: 1px solid var(--border);
+      border-radius: 3px;
+      cursor: pointer;
+    }
+    .filter-btn:hover { color: var(--text); border-color: var(--muted); }
+    .filter-btn.active {
+      background: var(--active);
+      color: var(--text);
+      border-color: var(--muted);
+    }
+    .tree {
+      flex: 1;
+      overflow: auto;
+      padding: 6px 0 12px;
+    }
+    .tree-row {
+      padding: 0 12px;
+      display: flex;
+      align-items: baseline;
+      cursor: pointer;
+      white-space: nowrap;
+      font-size: 11px;
+      line-height: 18px;
+    }
+    .tree-row:hover { background: var(--hover); }
+    .tree-row.active { background: var(--active); }
+    .tree-row.active .tree-intent { color: var(--text); opacity: 1; }
+    .tree-row.off-path { opacity: 0.42; }
+    .tree-row.off-path:hover { opacity: 1; }
+
+    .tree-prefix {
+      color: var(--dim);
+      white-space: pre;
+      flex-shrink: 0;
+    }
+    .tree-marker {
+      flex-shrink: 0;
+      margin-right: 4px;
+    }
+    .tree-marker.head { color: var(--head); }
+    .tree-marker.on   { color: var(--muted); }
+    .tree-marker.dead { color: var(--dead); }
+
+    .tree-id    { color: var(--muted); margin-right: 6px; }
+    .tree-actor { font-weight: 600; }
+    .tree-intent {
+      color: var(--muted);
+      margin-left: 6px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .role-human .tree-actor    { color: var(--human); }
+    .role-agent .tree-actor    { color: var(--agent); }
+    .role-tool  .tree-actor    { color: var(--tool); }
+    .role-ci    .tree-actor    { color: var(--ci); }
+
+    .sb-legend {
+      padding: 8px 14px 10px;
+      border-top: 1px solid var(--border);
+      font-size: 10px;
+      color: var(--muted);
+      display: grid;
+      grid-template-columns: auto 1fr;
+      gap: 2px 10px;
+    }
+    .sb-legend .k { color: var(--text); }
+
+    /* ========== Main detail ========== */
+    #main {
+      flex: 1;
+      overflow: auto;
+      padding: 24px 32px 40px;
+    }
+    .main-inner { margin: 0 auto; }
+    .path-header { max-width: 820px; margin: 0 auto 20px; }
+
+    .path-header {
+      margin-bottom: 20px;
+      padding-bottom: 14px;
+      border-bottom: 1px solid var(--border);
+    }
+    .path-header h1 {
+      font-size: 15px;
+      color: var(--text);
+      margin-bottom: 6px;
+    }
+    .path-header .meta {
+      font-size: 11px;
+      color: var(--muted);
+    }
+    .path-header code {
+      color: var(--link);
+      background: var(--panel);
+      padding: 1px 5px;
+      border-radius: 2px;
+      font-size: 10.5px;
+    }
+
+    .empty-hint {
+      padding: 20px;
+      background: var(--panel);
+      border: 1px dashed var(--border);
+      border-radius: 4px;
+      color: var(--muted);
+      text-align: center;
+    }
+
+    /* Dagre-laid-out graph canvas */
+    #graph {
+      position: relative;
+      margin: 0 auto;
+      min-height: 200px;
+    }
+    #graph > svg.edges {
+      position: absolute;
+      top: 0;
+      left: 0;
+      overflow: visible;
+      pointer-events: none;
+      z-index: 1;
+    }
+    #graph > .nodes {
+      position: relative;
+      width: 100%;
+      height: 100%;
+    }
+    .edge {
+      stroke: var(--muted);
+      stroke-width: 1.5;
+      fill: none;
+    }
+    .edge.dead {
+      stroke: var(--dead);
+      stroke-width: 1.5;
+      opacity: 0.7;
+      stroke-dasharray: 5 3;
+    }
+    .card {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-left-width: 3px;
+      border-radius: 4px;
+      padding: 16px 18px;
+      position: absolute;
+      width: 520px;
+      box-sizing: border-box;
+      visibility: hidden;
+      z-index: 2;
+    }
+    .card.filtered { opacity: 0.2; }
+    /* Stacked-shadow peek when the card has collapsed dead-end children. */
+    .card.has-hidden {
+      box-shadow:
+        8px  8px  0 -1px var(--panel),
+        8px  8px  0  0   var(--border),
+        15px 15px 0 -1px var(--panel),
+        15px 15px 0  0   var(--dead);
+    }
+    .branch-toggle {
+      margin-left: auto;
+      padding: 2px 8px;
+      background: var(--panel-2);
+      border: 1px solid var(--border);
+      border-radius: 3px;
+      color: var(--muted);
+      font: inherit;
+      font-size: 10px;
+      cursor: pointer;
+      white-space: nowrap;
+    }
+    .branch-toggle:hover {
+      color: var(--text);
+      border-color: var(--muted);
+      background: var(--active);
+    }
+    .branch-toggle.expanded {
+      background: var(--active);
+      color: var(--text);
+      border-color: var(--muted);
+    }
+    .card.role-human  { border-left-color: var(--human); }
+    .card.role-agent  { border-left-color: var(--agent); }
+    .card.role-tool   { border-left-color: var(--tool); }
+    .card.role-ci     { border-left-color: var(--ci); }
+    .card.is-head     { border-left-color: var(--head); }
+    .card.is-dead     { border-left-color: var(--dead); opacity: 0.75; }
+    .card.hidden      { display: none; }
+    .card.focused     { background: var(--panel-2); border-color: var(--muted); }
+    .card.flash       { animation: flash-pulse 1.2s ease-out; }
+    @keyframes flash-pulse {
+      0%   { box-shadow: 0 0 0 3px var(--agent); }
+      100% { box-shadow: 0 0 0 0 transparent; }
+    }
+
+    .card-title {
+      display: flex;
+      align-items: baseline;
+      gap: 10px;
+      margin-bottom: 12px;
+      font-size: 13px;
+    }
+    .card-title .id {
+      color: var(--muted);
+      font-weight: 600;
+    }
+    .card-title .intent {
+      color: var(--text);
+      font-weight: 500;
+      flex: 1;
+    }
+    .chip {
+      font-size: 9.5px;
+      font-weight: 700;
+      padding: 2px 6px;
+      border-radius: 3px;
+      letter-spacing: 0.04em;
+    }
+    .chip.head { background: var(--head); color: var(--bg); }
+    .chip.dead { background: var(--dead); color: var(--bg); }
+
+    .card dl {
+      display: grid;
+      grid-template-columns: 90px 1fr;
+      gap: 3px 14px;
+      font-size: 11px;
+    }
+    .card dt { color: var(--muted); }
+    .card dd { color: var(--text); word-break: break-word; }
+    .card dd .sub { color: var(--muted); margin-left: 6px; }
+    .card.role-human dd.actor  { color: var(--human); }
+    .card.role-agent dd.actor  { color: var(--agent); }
+    .card.role-tool  dd.actor  { color: var(--tool); }
+
+    .change-list {
+      margin-top: 14px;
+      padding-top: 12px;
+      border-top: 1px solid var(--border);
+    }
+    .change {
+      margin-bottom: 10px;
+    }
+    .change-path {
+      font-size: 11px;
+      color: var(--link);
+      margin-bottom: 4px;
+    }
+    .diff {
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 3px;
+      padding: 8px 10px;
+      font-size: 11px;
+      line-height: 1.45;
+      white-space: pre;
+      overflow-x: auto;
+    }
+    .diff .add  { color: var(--diff-add); }
+    .diff .del  { color: var(--diff-del); }
+    .diff .hunk { color: var(--hunk); }
+    .diff .ctx  { color: var(--muted); }
+
+    .no-change { color: var(--muted); font-size: 11px; margin-top: 10px; }
+  </style>
+</head>
+<body>
+  <div id="app">
+    <aside id="sidebar">
+      <div class="sb-header">
+        <div class="sb-title" id="sb-title">—</div>
+        <div class="sb-sub" id="sb-sub">—</div>
+      </div>
+      <div class="sb-controls">
+        <input class="sb-search" id="sb-search" placeholder="search steps…" />
+      </div>
+      <div class="sb-filters">
+        <button class="filter-btn active" data-filter="all">all</button>
+        <button class="filter-btn" data-filter="head">on HEAD</button>
+        <button class="filter-btn" data-filter="dead">dead ends</button>
+      </div>
+      <div class="tree" id="tree"></div>
+      <div class="sb-legend">
+        <span class="k" style="color: var(--head);">★</span><span>HEAD step</span>
+        <span class="k" style="color: var(--muted);">●</span><span>on HEAD path</span>
+        <span class="k" style="color: var(--dead);">⌀</span><span>dead end</span>
+        <span class="k">colors</span><span>actor type (human / agent / tool)</span>
+      </div>
+    </aside>
+
+    <section id="main">
+      <div class="main-inner">
+        <div class="path-header" id="path-header"></div>
+        <div id="graph">
+          <svg class="edges" id="edges">
+            <defs>
+              <marker id="arrow-normal" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+                <path d="M 0 0 L 10 5 L 0 10 z" fill="#888892" />
+              </marker>
+              <marker id="arrow-dead" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+                <path d="M 0 0 L 10 5 L 0 10 z" fill="#cc6666" fill-opacity="0.8" />
+              </marker>
+            </defs>
+          </svg>
+          <div class="nodes" id="nodes"></div>
+        </div>
+      </div>
+    </section>
+  </div>
+
+  <script>
+    // =====================================================================
+    // Dummy Toolpath Path document (mirrors crates/toolpath JSON shape)
+    // =====================================================================
+    const DOC = {
+      Path: {
+        path: {
+          id: "retry-logic",
+          title: "Add retry logic for flaky cargo tests",
+          head: "step-006",
+          base: { uri: "git://github.com/empathic/toolpath#main", ref: "a1b2c3d" }
+        },
+        steps: [
+          {
+            step: {
+              id: "step-001",
+              actor: "human:alex",
+              timestamp: "2026-04-18T10:12:03Z"
+            },
+            meta: { intent: "Kick off session: flaky cargo tests need retry" }
+          },
+          {
+            step: {
+              id: "step-002",
+              actor: "agent:claude-code",
+              parents: ["step-001"],
+              timestamp: "2026-04-18T10:14:27Z"
+            },
+            meta: { intent: "Scaffold retry() helper" },
+            change: {
+              "src/retry.rs": {
+                raw:
+                  "@@ -0,0 +1,14 @@\n" +
+                  "+pub fn retry<T, E, F>(n: usize, mut f: F) -> Result<T, E>\n" +
+                  "+where F: FnMut() -> Result<T, E>\n" +
+                  "+{\n" +
+                  "+    let mut last: Option<E> = None;\n" +
+                  "+    for _ in 0..=n {\n" +
+                  "+        match f() {\n" +
+                  "+            Ok(v) => return Ok(v),\n" +
+                  "+            Err(e) => last = Some(e),\n" +
+                  "+        }\n" +
+                  "+    }\n" +
+                  "+    Err(last.unwrap())\n" +
+                  "+}\n"
+              }
+            }
+          },
+          {
+            step: {
+              id: "step-003",
+              actor: "tool:cargo-test",
+              parents: ["step-002"],
+              timestamp: "2026-04-18T10:15:03Z"
+            },
+            meta: { intent: "cargo test — FAILED: retry runs n+1 times (off-by-one)" }
+          },
+          {
+            step: {
+              id: "step-004",
+              actor: "agent:claude-code",
+              parents: ["step-002"],
+              timestamp: "2026-04-18T10:16:41Z"
+            },
+            meta: { intent: "Fix off-by-one: 0..=n → 0..n" },
+            change: {
+              "src/retry.rs": {
+                raw:
+                  "@@ -5,3 +5,3 @@\n" +
+                  "     let mut last: Option<E> = None;\n" +
+                  "-    for _ in 0..=n {\n" +
+                  "+    for _ in 0..n {\n" +
+                  "         match f() {\n"
+              }
+            }
+          },
+          {
+            step: {
+              id: "step-005",
+              actor: "tool:cargo-test",
+              parents: ["step-004"],
+              timestamp: "2026-04-18T10:17:12Z"
+            },
+            meta: { intent: "cargo test — passed (12 tests, 0 failures)" }
+          },
+          {
+            step: {
+              id: "step-006",
+              actor: "human:alex",
+              parents: ["step-005"],
+              timestamp: "2026-04-18T10:20:05Z"
+            },
+            meta: { intent: "Add doc comment, review, ship it" },
+            change: {
+              "src/retry.rs": {
+                raw:
+                  "@@ -1,2 +1,5 @@\n" +
+                  "+/// Calls `f` up to `n` times, returning the first `Ok` value.\n" +
+                  "+/// On exhaustion, returns the last `Err`.\n" +
+                  " pub fn retry<T, E, F>(n: usize, mut f: F) -> Result<T, E>\n" +
+                  " where F: FnMut() -> Result<T, E>\n"
+              }
+            }
+          }
+        ],
+        meta: {
+          actors: {
+            "human:alex":        { name: "Alex" },
+            "agent:claude-code": { name: "Claude Code" },
+            "tool:cargo-test":   { name: "cargo test" }
+          }
+        }
+      }
+    };
+
+    // =====================================================================
+    // Data helpers
+    // =====================================================================
+    const path    = DOC.Path.path;
+    const steps   = DOC.Path.steps;
+    const actors  = DOC.Path.meta?.actors ?? {};
+    const stepMap = Object.fromEntries(steps.map(s => [s.step.id, s]));
+
+    const childrenMap = { __root__: [] };
+    for (const s of steps) {
+      const ps = s.step.parents || [];
+      if (!ps.length) childrenMap.__root__.push(s.step.id);
+      for (const p of ps) (childrenMap[p] = childrenMap[p] || []).push(s.step.id);
+    }
+
+    // HEAD ancestors (the "live" path)
+    const headSet = (() => {
+      const out = new Set();
+      const stack = [path.head];
+      while (stack.length) {
+        const id = stack.pop();
+        if (out.has(id)) continue;
+        out.add(id);
+        const s = stepMap[id];
+        if (s?.step.parents) for (const p of s.step.parents) stack.push(p);
+      }
+      return out;
+    })();
+
+    function actorType(a) {
+      const i = a.indexOf(":");
+      return i < 0 ? a : a.slice(0, i);
+    }
+    function actorName(a) {
+      const def = actors[a];
+      if (def?.name) return def.name;
+      const i = a.indexOf(":");
+      return i < 0 ? a : a.slice(i + 1);
+    }
+    function fmtTime(t) {
+      return t ? t.replace("T", " ").replace("Z", " UTC") : "—";
+    }
+
+    // Reorder children so that the HEAD-path child is visited LAST.
+    // Combined with the "last child inherits parent's lane" rule in
+    // allocateLanes, this keeps the main/live branch in lane 0.
+    function reorderChildren(kids) {
+      const head = [], other = [];
+      for (const k of kids) (headSet.has(k) ? head : other).push(k);
+      return [...other, ...head];
+    }
+
+    // DFS flatten with gutter bookkeeping (sidebar tree connectors)
+    function flatten() {
+      const out = [];
+      function visit(id, depth, gutters, isLast) {
+        out.push({ id, depth, gutters: gutters.slice(), isLast });
+        const kids = reorderChildren(childrenMap[id] || []);
+        const next = [...gutters, !isLast];
+        kids.forEach((kid, i) =>
+          visit(kid, depth + 1, next, i === kids.length - 1)
+        );
+      }
+      const roots = reorderChildren(childrenMap.__root__);
+      roots.forEach((r, i) => visit(r, 0, [], i === roots.length - 1));
+      return out;
+    }
+
+    function prefixFor(node) {
+      if (node.depth === 0) return "";
+      let s = "";
+      for (let lvl = 0; lvl < node.depth - 1; lvl++) {
+        s += node.gutters[lvl] ? "│  " : "   ";
+      }
+      s += node.isLast ? "└─ " : "├─ ";
+      return s;
+    }
+
+    // =====================================================================
+    // Render
+    // =====================================================================
+    let focusedId = path.head;
+    let filter = "all";
+    let query = "";
+    let expandedBranches = new Set();   // HEAD card ids whose dead subtrees are visible
+    const flatOrder = flatten();         // sidebar tree: all nodes in DFS order
+
+    // Walk up from a dead node until we hit its first HEAD ancestor.
+    function findHeadAncestorForDead(id) {
+      if (headSet.has(id)) return null;
+      let current = id;
+      while (current) {
+        const s = stepMap[current];
+        if (!s?.step.parents?.length) return null;
+        const p = s.step.parents[0];
+        if (headSet.has(p)) return p;
+        current = p;
+      }
+      return null;
+    }
+
+    // Count direct dead children of a HEAD node (i.e. fork points into dead
+    // subtrees). Dead nodes themselves don't have toggles.
+    function deadChildrenCount(id) {
+      if (!headSet.has(id)) return 0;
+      return (childrenMap[id] || []).filter(c => !headSet.has(c)).length;
+    }
+
+    // Is this step currently visible in the main graph?
+    function isStepVisible(id) {
+      if (headSet.has(id)) return true;
+      const p = findHeadAncestorForDead(id);
+      return !!(p && expandedBranches.has(p));
+    }
+
+    function matchesFilter(id) {
+      const onPath = headSet.has(id);
+      if (filter === "head" && !onPath) return false;
+      if (filter === "dead" && onPath)  return false;
+      const s = stepMap[id];
+      if (query) {
+        const hay = `${id} ${s.step.actor} ${s.meta?.intent || ""}`.toLowerCase();
+        if (!hay.includes(query)) return false;
+      }
+      return true;
+    }
+
+    function renderSidebar() {
+      document.getElementById("sb-title").textContent = path.title || path.id;
+      const onHead = Array.from(headSet).length;
+      document.getElementById("sb-sub").textContent =
+        `${steps.length} steps · ${onHead} on HEAD · head ${path.head}`;
+
+      const tree = document.getElementById("tree");
+      tree.innerHTML = "";
+
+      for (const node of flatOrder) {
+        const s = stepMap[node.id];
+        if (!s) continue;
+        if (!matchesFilter(node.id)) continue;
+
+        const onPath = headSet.has(node.id);
+        const isDead = !onPath;
+        const isHead = node.id === path.head;
+
+        const row = document.createElement("div");
+        row.className =
+          `tree-row role-${actorType(s.step.actor)} ` +
+          (onPath ? "on-path " : "off-path ") +
+          (focusedId === node.id ? "active" : "");
+        row.dataset.stepId = node.id;
+
+        const prefix = document.createElement("span");
+        prefix.className = "tree-prefix";
+        prefix.textContent = prefixFor(node);
+        row.appendChild(prefix);
+
+        const marker = document.createElement("span");
+        marker.className =
+          "tree-marker " + (isHead ? "head" : isDead ? "dead" : "on");
+        marker.textContent = isHead ? "★ " : isDead ? "⌀ " : "● ";
+        row.appendChild(marker);
+
+        const id = document.createElement("span");
+        id.className = "tree-id";
+        id.textContent = node.id;
+        row.appendChild(id);
+
+        const actor = document.createElement("span");
+        actor.className = "tree-actor";
+        actor.textContent = actorName(s.step.actor);
+        row.appendChild(actor);
+
+        const intent = s.meta?.intent || "";
+        if (intent) {
+          const it = document.createElement("span");
+          it.className = "tree-intent";
+          it.textContent = "· " + intent;
+          row.appendChild(it);
+        }
+
+        row.addEventListener("click", () => focusStep(node.id));
+        tree.appendChild(row);
+      }
+    }
+
+    function renderPathHeader() {
+      const el = document.getElementById("path-header");
+      const b = path.base;
+      el.innerHTML =
+        `<h1>${escapeHtml(path.title || path.id)}</h1>` +
+        `<div class="meta">` +
+        `${steps.length} steps · head <code>${path.head}</code>` +
+        (b ? ` · base <code>${escapeHtml(b.ref || "")}</code> <span style="color:var(--muted)">${escapeHtml(b.uri || "")}</span>` : "") +
+        `</div>`;
+    }
+
+    function renderCardHtml(nodeId) {
+      const s = stepMap[nodeId];
+      const isHead = nodeId === path.head;
+      const isDead = !headSet.has(nodeId);
+      const deadKids = deadChildrenCount(nodeId);
+      const expanded = expandedBranches.has(nodeId);
+      const hasHidden = deadKids > 0 && !expanded;
+
+      const changeKeys = s.change ? Object.keys(s.change) : [];
+      const changesHtml =
+        changeKeys.length === 0
+          ? `<div class="no-change">No change body on this step.</div>`
+          : `<div class="change-list">` +
+            changeKeys
+              .map(k => {
+                const ch = s.change[k];
+                let inner = "";
+                if (ch.raw)
+                  inner += `<pre class="diff">${diffHtml(ch.raw)}</pre>`;
+                if (ch.structural)
+                  inner += `<pre class="diff">${escapeHtml(JSON.stringify(ch.structural, null, 2))}</pre>`;
+                return `<div class="change"><div class="change-path">${escapeHtml(k)}</div>${inner}</div>`;
+              })
+              .join("") +
+            `</div>`;
+
+      const classes = [
+        "card",
+        `role-${actorType(s.step.actor)}`,
+        isHead ? "is-head" : "",
+        isDead ? "is-dead" : "",
+        focusedId === nodeId ? "focused" : "",
+        matchesFilter(nodeId) ? "" : "filtered",
+        hasHidden ? "has-hidden" : ""
+      ].filter(Boolean).join(" ");
+
+      const toggleHtml = deadKids > 0
+        ? `<button class="branch-toggle${expanded ? " expanded" : ""}" data-toggle-id="${escapeHtml(nodeId)}">${expanded ? "collapse" : "expand"}</button>`
+        : "";
+
+      return `
+        <div class="${classes}" id="card-${escapeHtml(nodeId)}" data-step-id="${escapeHtml(nodeId)}">
+          <div class="card-title">
+            <span class="id">${escapeHtml(s.step.id)}</span>
+            <span class="intent">${escapeHtml(s.meta?.intent || "(no intent)")}</span>
+            ${isHead ? '<span class="chip head">HEAD</span>' : ""}
+            ${isDead ? '<span class="chip dead">DEAD END</span>' : ""}
+            ${toggleHtml}
+          </div>
+          <dl>
+            <dt>Actor</dt>
+            <dd class="actor">${escapeHtml(actorName(s.step.actor))}<span class="sub">${escapeHtml(s.step.actor)}</span></dd>
+            <dt>Time</dt>
+            <dd>${escapeHtml(fmtTime(s.step.timestamp))}</dd>
+            <dt>Parents</dt>
+            <dd>${(s.step.parents || []).map(p => `<code style="color:var(--link)">${escapeHtml(p)}</code>`).join(", ") || "—"}</dd>
+          </dl>
+          ${changesHtml}
+        </div>`;
+    }
+
+    function renderGraph() {
+      const nodesEl = document.getElementById("nodes");
+      const graphEl = document.getElementById("graph");
+      const svgEl   = document.getElementById("edges");
+
+      // Only render cards that are currently visible (HEAD path + any
+      // expanded dead subtrees).
+      const visible = steps.filter(s => isStepVisible(s.step.id));
+
+      // 1. Render card HTML.
+      nodesEl.innerHTML = visible.map(s => renderCardHtml(s.step.id)).join("");
+
+      if (typeof dagre === "undefined") return;
+
+      // 2. Measure each rendered card's size.
+      const dims = {};
+      for (const s of visible) {
+        const el = document.getElementById(`card-${s.step.id}`);
+        if (!el) continue;
+        dims[s.step.id] = { width: el.offsetWidth, height: el.offsetHeight };
+      }
+
+      // 3. Build a dagre graph from visible nodes + edges between them.
+      const g = new dagre.graphlib.Graph();
+      g.setGraph({ rankdir: "TB", nodesep: 40, ranksep: 56, marginx: 20, marginy: 20 });
+      g.setDefaultEdgeLabel(() => ({}));
+
+      for (const s of visible) {
+        const d = dims[s.step.id];
+        if (!d) continue;
+        g.setNode(s.step.id, { width: d.width, height: d.height });
+      }
+      for (const s of visible) {
+        const id = s.step.id;
+        for (const p of s.step.parents || []) {
+          if (!stepMap[p]) continue;
+          if (!isStepVisible(p)) continue;
+          const childIsDead = !headSet.has(id);
+          g.setEdge(p, id, { dead: childIsDead });
+        }
+      }
+
+      dagre.layout(g);
+      const gi = g.graph();
+
+      // 4. Size the canvas.
+      graphEl.style.width = gi.width + "px";
+      graphEl.style.height = gi.height + "px";
+      svgEl.setAttribute("width", gi.width);
+      svgEl.setAttribute("height", gi.height);
+
+      // 5. Position + reveal each visible card.
+      for (const s of visible) {
+        const n = g.node(s.step.id);
+        if (!n) continue;
+        const el = document.getElementById(`card-${s.step.id}`);
+        if (!el) continue;
+        el.style.left = (n.x - n.width / 2) + "px";
+        el.style.top  = (n.y - n.height / 2) + "px";
+        el.style.visibility = "visible";
+      }
+
+      // 6. Redraw edges: clear previous paths but keep <defs>.
+      Array.from(svgEl.querySelectorAll("path.edge")).forEach(p => p.remove());
+      const NS = "http://www.w3.org/2000/svg";
+      g.edges().forEach(e => {
+        const edge = g.edge(e);
+        if (!edge || !edge.points || !edge.points.length) return;
+        const pts = edge.points;
+        const d = pts.map((p, i) => (i === 0 ? `M ${p.x} ${p.y}` : `L ${p.x} ${p.y}`)).join(" ");
+        const path = document.createElementNS(NS, "path");
+        path.setAttribute("d", d);
+        path.setAttribute("class", "edge" + (edge.dead ? " dead" : ""));
+        path.setAttribute("marker-end", edge.dead ? "url(#arrow-dead)" : "url(#arrow-normal)");
+        svgEl.appendChild(path);
+      });
+    }
+
+
+    function focusStep(id, opts = {}) {
+      focusedId = id;
+      // If focusing a dead node, make sure its branch is expanded so it's visible.
+      if (!headSet.has(id)) {
+        const p = findHeadAncestorForDead(id);
+        if (p) expandedBranches.add(p);
+      }
+      render();
+      const card = document.getElementById(`card-${id}`);
+      const treeRow = document.querySelector(`#tree .tree-row[data-step-id="${id}"]`);
+      if (opts.scrollCard !== false && card) {
+        card.scrollIntoView({ behavior: "smooth", block: "center", inline: "center" });
+      }
+      if (card) {
+        card.classList.remove("flash");
+        void card.offsetWidth; // restart animation
+        card.classList.add("flash");
+      }
+      if (treeRow) {
+        treeRow.scrollIntoView({ behavior: "smooth", block: "nearest" });
+      }
+    }
+
+    function escapeHtml(s) {
+      return String(s)
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;");
+    }
+    function diffHtml(raw) {
+      return raw
+        .split("\n")
+        .map(line => {
+          if (line.startsWith("@@")) return `<span class="hunk">${escapeHtml(line)}</span>`;
+          if (line.startsWith("+"))  return `<span class="add">${escapeHtml(line)}</span>`;
+          if (line.startsWith("-"))  return `<span class="del">${escapeHtml(line)}</span>`;
+          return `<span class="ctx">${escapeHtml(line)}</span>`;
+        })
+        .join("\n");
+    }
+
+    function render() {
+      renderSidebar();
+      renderPathHeader();
+      renderGraph();
+    }
+
+    // =====================================================================
+    // Events
+    // =====================================================================
+    document.getElementById("sb-search").addEventListener("input", e => {
+      query = e.target.value.trim().toLowerCase();
+      render();
+    });
+    document.querySelectorAll(".filter-btn").forEach(b => {
+      b.addEventListener("click", () => {
+        document.querySelectorAll(".filter-btn").forEach(x => x.classList.remove("active"));
+        b.classList.add("active");
+        filter = b.dataset.filter;
+        render();
+      });
+    });
+
+    document.getElementById("nodes").addEventListener("click", e => {
+      // Branch-expand chip — handled before the card-focus fallthrough.
+      const toggle = e.target.closest(".branch-toggle");
+      if (toggle) {
+        e.stopPropagation();
+        const id = toggle.dataset.toggleId;
+        if (expandedBranches.has(id)) {
+          expandedBranches.delete(id);
+          // If the currently focused card was inside this branch, move focus
+          // back to the HEAD card that owns it (otherwise focusedId would
+          // point at a now-invisible node).
+          if (focusedId && !headSet.has(focusedId)
+              && findHeadAncestorForDead(focusedId) === id) {
+            focusedId = id;
+          }
+        } else {
+          expandedBranches.add(id);
+        }
+        render();
+        return;
+      }
+      const card = e.target.closest(".card");
+      if (!card || !card.dataset.stepId) return;
+      focusStep(card.dataset.stepId, { scrollCard: false });
+    });
+
+    render();
+  </script>
+</body>
+</html>

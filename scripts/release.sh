@@ -16,10 +16,14 @@ set -euo pipefail
 #       toolpath-dot      (depends on toolpath)
 #       toolpath-md       (depends on toolpath)
 #       toolpath-claude   (depends on toolpath, toolpath-convo)
+#       toolpath-gemini   (depends on toolpath, toolpath-convo)
+#       toolpath-codex    (depends on toolpath, toolpath-convo)
+#       toolpath-opencode (depends on toolpath, toolpath-convo)
 #       toolpath-pi       (depends on toolpath, toolpath-convo)
 #   3. toolpath-cli       (depends on all of the above)
+#      toolpath-desktop   (depends on toolpath, toolpath-claude, toolpath-git, toolpath-github)
 
-ALL_CRATES=(toolpath toolpath-convo toolpath-git toolpath-github toolpath-dot toolpath-md toolpath-claude toolpath-pi toolpath-cli)
+ALL_CRATES=(toolpath toolpath-convo toolpath-git toolpath-github toolpath-dot toolpath-md toolpath-claude toolpath-gemini toolpath-codex toolpath-opencode toolpath-pi toolpath-cli toolpath-desktop)
 
 DRY_RUN=""
 AUTO_YES=""
@@ -196,25 +200,26 @@ if should_publish toolpath; then
 fi
 
 # Tier 2a: toolpath-convo (depends on toolpath). Published before the other
-# satellite crates so that toolpath-claude and toolpath-pi (which depend on it)
-# see it live on the index.
+# satellite crates so that toolpath-claude, toolpath-gemini, and toolpath-pi
+# (which depend on it) see it live on the index.
 publish toolpath-convo
 if should_publish toolpath-convo; then
     wait_for_index toolpath-convo "$(crate_version toolpath-convo)"
 fi
 
 # Tier 2b: satellite crates (depend on tier 1 and/or toolpath-convo)
-for crate in toolpath-git toolpath-github toolpath-dot toolpath-md toolpath-claude toolpath-pi; do
+for crate in toolpath-git toolpath-github toolpath-dot toolpath-md toolpath-claude toolpath-gemini toolpath-codex toolpath-opencode toolpath-pi; do
     publish "$crate"
 done
 
-for crate in toolpath-git toolpath-github toolpath-dot toolpath-md toolpath-claude toolpath-pi; do
+for crate in toolpath-git toolpath-github toolpath-dot toolpath-md toolpath-claude toolpath-gemini toolpath-codex toolpath-opencode toolpath-pi; do
     if should_publish "$crate"; then
         wait_for_index "$crate" "$(crate_version "$crate")"
     fi
 done
 
-# Tier 3: CLI binary (depends on everything above)
+# Tier 3: CLI binary + desktop app (depend on everything above)
 publish toolpath-cli
+publish toolpath-desktop
 
 echo "=== done ==="

@@ -5,10 +5,14 @@ members = [
     "crates/toolpath-git",
     "crates/toolpath-github",
     "crates/toolpath-claude",
+    "crates/toolpath-gemini",
+    "crates/toolpath-codex",
+    "crates/toolpath-opencode",
     "crates/toolpath-dot",
     "crates/toolpath-md",
     "crates/toolpath-pi",
     "crates/toolpath-cli",
+    "crates/toolpath-desktop",
 ]
 resolver = "2"
 
@@ -18,13 +22,17 @@ license = "Apache-2.0"
 
 [workspace.dependencies]
 toolpath = { version = "0.2.0", path = "crates/toolpath" }
-toolpath-convo = { version = "0.6.0", path = "crates/toolpath-convo" }
+toolpath-convo = { version = "0.7.0", path = "crates/toolpath-convo" }
 toolpath-git = { version = "0.1.3", path = "crates/toolpath-git" }
 toolpath-claude = { version = "0.7.0", path = "crates/toolpath-claude", default-features = false }
+toolpath-gemini = { version = "0.1.0", path = "crates/toolpath-gemini", default-features = false }
+toolpath-codex = { version = "0.1.0", path = "crates/toolpath-codex" }
+toolpath-opencode = { version = "0.1.0", path = "crates/toolpath-opencode" }
 toolpath-github = { version = "0.2.0", path = "crates/toolpath-github" }
 toolpath-dot = { version = "0.1.2", path = "crates/toolpath-dot" }
 toolpath-md = { version = "0.2.0", path = "crates/toolpath-md" }
 toolpath-pi = { version = "0.1.0", path = "crates/toolpath-pi" }
+toolpath-desktop = { version = "0.1.0", path = "crates/toolpath-desktop" }
 
 reqwest = { version = "0.12", features = ["blocking", "json"] }
 serde = { version = "1.0", features = ["derive"] }
@@ -39,6 +47,7 @@ notify = { version = "7", features = ["macos_kqueue"] }
 similar = "2"
 tempfile = "3.15"
 insta = "1"
+rusqlite = { version = "0.32", features = ["bundled"] }
 
 [profile.wasm]
 inherits = "release"

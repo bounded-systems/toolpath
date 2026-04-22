@@ -45,10 +45,14 @@ crates/
   toolpath-git/       Derive from git repository history
   toolpath-github/    Derive from GitHub pull requests
   toolpath-claude/    Derive from Claude conversation logs
+  toolpath-gemini/    Derive from Gemini CLI conversation logs
+  toolpath-codex/     Derive from Codex CLI rollout files
+  toolpath-opencode/  Derive from opencode SQLite databases
   toolpath-pi/        Derive from Pi (pi.dev) agent sessions
   toolpath-dot/       Graphviz DOT visualization
   toolpath-md/        Markdown rendering for LLM consumption
   toolpath-cli/       Unified CLI (binary: path)
+  toolpath-desktop/   Tauri 2 desktop app (binary: toolpath-desktop)
 ```
 
 See each crate's README for library-level documentation.
@@ -74,6 +78,15 @@ path derive github --repo owner/repo --pr 42 --pretty
 # Derive from Claude conversation logs
 path derive claude --project /path/to/project --pretty
 
+# Derive from Gemini CLI conversation logs
+path derive gemini --project /path/to/project --pretty
+
+# Derive from Codex CLI rollout files (most recent session by default)
+path derive codex --pretty
+
+# Derive from opencode session database (most recent session by default)
+path derive opencode --pretty
+
 # Query for dead ends (abandoned approaches)
 path query dead-ends --input doc.json
 
@@ -98,10 +111,16 @@ path
     git       [--repo PATH] [--remote NAME] [--json]
     github    --repo OWNER/REPO [--json]
     claude    [--project PATH] [--json]
+    gemini    [--project PATH] [--json]
+    codex     [--json]
+    opencode  [--project ID] [--json]
   derive
     git       --repo PATH --branch NAME[:START] [--base COMMIT] [--remote NAME] [--title TEXT]
     github    --repo OWNER/REPO --pr NUMBER [--no-ci] [--no-comments]
     claude    --project PATH [--session ID] [--all]
+    gemini    --project PATH [--session UUID] [--all] [--include-thinking]
+    codex     [--session UUID|STEM] [--all]
+    opencode  [--session ID] [--all] [--project ID] [--no-snapshot-diffs]
   query
     ancestors --input FILE --step-id ID
     dead-ends --input FILE

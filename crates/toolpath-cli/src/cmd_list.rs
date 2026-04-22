@@ -28,6 +28,20 @@ pub enum ListSource {
         #[arg(short, long)]
         project: Option<String>,
     },
+    /// List Gemini CLI projects or sessions
+    Gemini {
+        /// Project path — if omitted, lists all projects
+        #[arg(short, long)]
+        project: Option<String>,
+    },
+    /// List Codex CLI sessions (global, newest first)
+    Codex {},
+    /// List opencode sessions (global, newest first)
+    Opencode {
+        /// Filter by project id (SHA of repo's first root commit)
+        #[arg(short, long)]
+        project: Option<String>,
+    },
     /// List Pi (pi.dev) projects or sessions
     Pi {
         /// Project path — if omitted, lists all projects
@@ -45,6 +59,9 @@ pub fn run(source: ListSource, json: bool) -> Result<()> {
         ListSource::Git { repo, remote } => run_git(repo, remote, json),
         ListSource::Github { repo } => run_github(repo, json),
         ListSource::Claude { project } => run_claude(project, json),
+        ListSource::Gemini { project } => run_gemini(project, json),
+        ListSource::Codex {} => run_codex(json),
+        ListSource::Opencode { project } => run_opencode(project, json),
         ListSource::Pi { project, base } => run_pi(project, base, json),
     }
 }
@@ -253,6 +270,227 @@ fn list_claude_sessions(
     Ok(())
 }
 
+fn run_gemini(project: Option<String>, json: bool) -> Result<()> {
+    let manager = toolpath_gemini::GeminiConvo::new();
+
+    match project {
+        None => list_gemini_projects(&manager, json),
+        Some(project_path) => list_gemini_sessions(&manager, &project_path, json),
+    }
+}
+
+fn list_gemini_projects(manager: &toolpath_gemini::GeminiConvo, json: bool) -> Result<()> {
+    let projects = manager
+        .list_projects()
+        .map_err(|e| anyhow::anyhow!("{}", e))?;
+
+    if json {
+        let items: Vec<serde_json::Value> = projects
+            .iter()
+            .map(|p| serde_json::json!({ "path": p }))
+            .collect();
+        let output = serde_json::json!({
+            "source": "gemini",
+            "projects": items,
+        });
+        println!("{}", serde_json::to_string_pretty(&output)?);
+    } else {
+        println!("Gemini projects:");
+        println!();
+        if projects.is_empty() {
+            println!("  (none)");
+        } else {
+            for p in &projects {
+                println!("  {}", p);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn list_gemini_sessions(
+    manager: &toolpath_gemini::GeminiConvo,
+    project_path: &str,
+    json: bool,
+) -> Result<()> {
+    let metadata = manager
+        .list_conversation_metadata(project_path)
+        .map_err(|e| anyhow::anyhow!("{}", e))?;
+
+    if json {
+        let items: Vec<serde_json::Value> = metadata
+            .iter()
+            .map(|m| {
+                serde_json::json!({
+                    "session_uuid": m.session_uuid,
+                    "messages": m.message_count,
+                    "sub_agents": m.sub_agent_count,
+                    "started_at": m.started_at.map(|t| t.to_rfc3339()),
+                    "last_activity": m.last_activity.map(|t| t.to_rfc3339()),
+                })
+            })
+            .collect();
+        let output = serde_json::json!({
+            "source": "gemini",
+            "project": project_path,
+            "sessions": items,
+        });
+        println!("{}", serde_json::to_string_pretty(&output)?);
+    } else {
+        println!("Gemini sessions for {}:", project_path);
+        println!();
+        if metadata.is_empty() {
+            println!("  (none)");
+        } else {
+            for m in &metadata {
+                let date = m
+                    .last_activity
+                    .map(|t| t.format("%Y-%m-%d %H:%M").to_string())
+                    .unwrap_or_else(|| "unknown".to_string());
+                let sub = if m.sub_agent_count > 0 {
+                    format!(" +{} sub", m.sub_agent_count)
+                } else {
+                    String::new()
+                };
+                println!(
+                    "  {} {:>4} msgs{}  {}",
+                    &m.session_uuid, m.message_count, sub, date
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+fn run_codex(json: bool) -> Result<()> {
+    let manager = toolpath_codex::CodexConvo::new();
+    let sessions = manager
+        .list_sessions()
+        .map_err(|e| anyhow::anyhow!("{}", e))?;
+
+    if json {
+        let items: Vec<serde_json::Value> = sessions
+            .iter()
+            .map(|m| {
+                serde_json::json!({
+                    "id": m.id,
+                    "started_at": m.started_at.map(|t| t.to_rfc3339()),
+                    "last_activity": m.last_activity.map(|t| t.to_rfc3339()),
+                    "cwd": m.cwd,
+                    "cli_version": m.cli_version,
+                    "git_branch": m.git_branch,
+                    "git_commit": m.git_commit,
+                    "first_user_message": m.first_user_message,
+                    "line_count": m.line_count,
+                    "file_path": m.file_path,
+                })
+            })
+            .collect();
+        let output = serde_json::json!({
+            "source": "codex",
+            "sessions": items,
+        });
+        println!("{}", serde_json::to_string_pretty(&output)?);
+    } else if sessions.is_empty() {
+        println!("No Codex sessions found in ~/.codex/sessions.");
+    } else {
+        println!("Codex sessions:");
+        println!();
+        for m in &sessions {
+            let date = m
+                .last_activity
+                .map(|t| t.format("%Y-%m-%d %H:%M").to_string())
+                .unwrap_or_else(|| "unknown".to_string());
+            let prompt = m
+                .first_user_message
+                .as_deref()
+                .map(|s| truncate(s, 60))
+                .unwrap_or_default();
+            let id_short: String = m.id.chars().take(8).collect();
+            let cwd = m
+                .cwd
+                .as_ref()
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or_default();
+            println!(
+                "  {} {:>4} lines  {}  {}  {}",
+                id_short, m.line_count, date, cwd, prompt
+            );
+        }
+    }
+    Ok(())
+}
+
+fn run_opencode(project: Option<String>, json: bool) -> Result<()> {
+    #[cfg(target_os = "emscripten")]
+    {
+        let _ = (project, json);
+        anyhow::bail!(
+            "'path list opencode' requires a native environment (SQLite + git2 not available under wasm)"
+        );
+    }
+
+    #[cfg(not(target_os = "emscripten"))]
+    {
+        let manager = toolpath_opencode::OpencodeConvo::new();
+        let metas = manager
+            .io()
+            .list_session_metadata(project.as_deref())
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
+
+        if json {
+            let items: Vec<serde_json::Value> = metas
+                .iter()
+                .map(|m| {
+                    serde_json::json!({
+                        "id": m.id,
+                        "project_id": m.project_id,
+                        "directory": m.directory,
+                        "title": m.title,
+                        "version": m.version,
+                        "started_at": m.started_at.map(|t| t.to_rfc3339()),
+                        "last_activity": m.last_activity.map(|t| t.to_rfc3339()),
+                        "message_count": m.message_count,
+                        "first_user_message": m.first_user_message,
+                        "summary_additions": m.summary_additions,
+                        "summary_deletions": m.summary_deletions,
+                        "summary_files": m.summary_files,
+                    })
+                })
+                .collect();
+            let output = serde_json::json!({
+                "source": "opencode",
+                "project": project,
+                "sessions": items,
+            });
+            println!("{}", serde_json::to_string_pretty(&output)?);
+        } else if metas.is_empty() {
+            println!("No opencode sessions found in the database.");
+        } else {
+            println!("opencode sessions:");
+            println!();
+            for m in &metas {
+                let date = m
+                    .last_activity
+                    .map(|t| t.format("%Y-%m-%d %H:%M").to_string())
+                    .unwrap_or_else(|| "unknown".to_string());
+                let id_short: String = m.id.trim_start_matches("ses_").chars().take(10).collect();
+                let prompt = m
+                    .first_user_message
+                    .as_deref()
+                    .map(|s| truncate(s, 60))
+                    .unwrap_or_default();
+                let dir = m.directory.to_string_lossy();
+                println!(
+                    "  {} {:>4} msgs  {}  {}  {}",
+                    id_short, m.message_count, date, dir, prompt
+                );
+            }
+        }
+        Ok(())
+    }
+}
+
 fn run_pi(project: Option<String>, base: Option<PathBuf>, json: bool) -> Result<()> {
     let manager = if let Some(path) = base {
         let resolver = toolpath_pi::PathResolver::new().with_sessions_dir(&path);
@@ -332,7 +570,6 @@ fn list_pi_sessions(manager: &toolpath_pi::PiConvo, project_path: &str, json: bo
     Ok(())
 }
 
-#[cfg(not(target_os = "emscripten"))]
 fn truncate(s: &str, max: usize) -> String {
     if s.chars().count() <= max {
         s.to_string()
@@ -574,5 +811,65 @@ mod tests {
         // A project that doesn't have a directory should error via PiError.
         let result = list_pi_sessions(&manager, "/does/not/exist", false);
         assert!(result.is_err());
+    }
+
+    fn setup_gemini_manager() -> (tempfile::TempDir, toolpath_gemini::GeminiConvo) {
+        let temp = tempfile::tempdir().unwrap();
+        let gemini = temp.path().join(".gemini");
+        let session_dir = gemini.join("tmp/myrepo/chats/session-uuid");
+        std::fs::create_dir_all(&session_dir).unwrap();
+        std::fs::write(
+            gemini.join("projects.json"),
+            r#"{"projects":{"/abs/myrepo":"myrepo"}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            session_dir.join("main.json"),
+            r#"{"sessionId":"s","projectHash":"","startTime":"2026-04-17T10:00:00Z","lastUpdated":"2026-04-17T10:10:00Z","directories":["/abs/myrepo"],"messages":[
+  {"id":"u1","timestamp":"2026-04-17T10:00:00Z","type":"user","content":[{"text":"Hello"}]}
+]}"#,
+        )
+        .unwrap();
+        let resolver = toolpath_gemini::PathResolver::new().with_gemini_dir(&gemini);
+        (temp, toolpath_gemini::GeminiConvo::with_resolver(resolver))
+    }
+
+    #[test]
+    fn test_list_gemini_projects_human() {
+        let (_t, mgr) = setup_gemini_manager();
+        let result = list_gemini_projects(&mgr, false);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_list_gemini_projects_json() {
+        let (_t, mgr) = setup_gemini_manager();
+        let result = list_gemini_projects(&mgr, true);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_list_gemini_sessions_human() {
+        let (_t, mgr) = setup_gemini_manager();
+        let result = list_gemini_sessions(&mgr, "/abs/myrepo", false);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_list_gemini_sessions_json() {
+        let (_t, mgr) = setup_gemini_manager();
+        let result = list_gemini_sessions(&mgr, "/abs/myrepo", true);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_list_gemini_sessions_empty() {
+        let temp = tempfile::tempdir().unwrap();
+        let gemini = temp.path().join(".gemini");
+        std::fs::create_dir_all(gemini.join("tmp/empty")).unwrap();
+        let resolver = toolpath_gemini::PathResolver::new().with_gemini_dir(&gemini);
+        let mgr = toolpath_gemini::GeminiConvo::with_resolver(resolver);
+        let result = list_gemini_sessions(&mgr, "/nowhere", false);
+        assert!(result.is_ok());
     }
 }
