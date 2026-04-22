@@ -172,7 +172,11 @@ pub fn derive_path(view: &ConversationView, config: &DeriveConfig) -> Path {
             let Some(path) = extract_file_path(tool) else {
                 continue;
             };
-            let (raw, mut t_extra) = file_write_change(tool, &path);
+            // Shared derivation doesn't have access to a local checkout,
+            // so it can't resolve pre-write file state. Providers that do
+            // (e.g. `toolpath-claude`) build their own steps and pass a
+            // resolved `before_state` directly to `file_write_diff`.
+            let (raw, mut t_extra) = file_write_change(tool, &path, None);
             t_extra.insert(
                 "tool".to_string(),
                 serde_json::Value::String(tool.name.clone()),
@@ -292,9 +296,15 @@ fn extract_file_path(tool: &ToolInvocation) -> Option<String> {
 ///
 /// See [`file_write_diff`] for the input shapes handled; this helper
 /// additionally captures the structured before/after strings in `extra`.
+///
+/// `before_state` is threaded through to [`file_write_diff`] for the
+/// `Write { content }` shape: when `Some`, it becomes the pre-image and
+/// is also recorded in `extra["before"]`. When `None`, the diff falls
+/// back to an empty pre-image (addition-only hunk).
 fn file_write_change(
     tool: &ToolInvocation,
     path: &str,
+    before_state: Option<&str>,
 ) -> (Option<String>, HashMap<String, serde_json::Value>) {
     let input = &tool.input;
     let str_field = |k: &str| input.get(k).and_then(|v| v.as_str()).map(str::to_string);
@@ -305,12 +315,18 @@ fn file_write_change(
         extra.insert("before".to_string(), serde_json::Value::String(old.clone()));
         extra.insert("after".to_string(), serde_json::Value::String(new.clone()));
     } else if let Some(content) = str_field("content") {
+        if let Some(before) = before_state {
+            extra.insert(
+                "before".to_string(),
+                serde_json::Value::String(before.to_string()),
+            );
+        }
         extra.insert("after".to_string(), serde_json::Value::String(content));
     } else if let Some(edits) = input.get("edits").and_then(|v| v.as_array()) {
         extra.insert("edits".to_string(), serde_json::Value::Array(edits.clone()));
     }
 
-    (file_write_diff(&tool.name, input, path), extra)
+    (file_write_diff(&tool.name, input, path, before_state), extra)
 }
 
 /// Compute a unified diff string for a file-write tool invocation, given the
@@ -323,13 +339,28 @@ fn file_write_change(
 ///
 /// Shapes handled:
 ///   - `Edit    { old_string, new_string, ... }`  → diff old→new
-///   - `Write   { content }`                      → diff ""→content
+///   - `Write   { content }`                      → diff `before_state`→content
+///     (uses `""` when `before_state` is `None`, producing an addition-only hunk)
 ///   - `MultiEdit { edits: [{old_string, new_string}, ...] }` → hunks joined,
 ///     each prefixed with `# edit N/total` so consumers can tell them apart.
+///
+/// # `before_state` for `Write`
+///
+/// The `Write` tool replaces a file's whole contents but the JSONL log
+/// doesn't carry the prior state. Callers that can reconstruct it
+/// out-of-band (e.g. by reading `git show HEAD:<path>`) should pass it
+/// as `before_state`; the resulting diff shows honest `-`/`+` lines for
+/// replaced content. When `None`, we fall back to diffing against the
+/// empty string — correct for new files, misleading for overwrites, but
+/// the best we can do from the log alone.
+///
+/// `before_state` is ignored for `Edit` / `MultiEdit` shapes, which
+/// already carry their own `old_string`/`new_string` pre-image.
 pub fn file_write_diff(
     tool_name: &str,
     input: &serde_json::Value,
     path: &str,
+    before_state: Option<&str>,
 ) -> Option<String> {
     let str_field = |k: &str| input.get(k).and_then(|v| v.as_str());
 
@@ -338,9 +369,11 @@ pub fn file_write_diff(
         return Some(unified_diff(path, old, new));
     }
 
-    // Write — whole-file content; diff against empty so we see additions.
+    // Write — whole-file content; diff against the caller-supplied
+    // before-state when present, else empty (addition-only hunk).
     if let Some(content) = str_field("content") {
-        return Some(unified_diff(path, "", content));
+        let before = before_state.unwrap_or("");
+        return Some(unified_diff(path, before, content));
     }
 
     // MultiEdit — multiple sequential edits on one file.
@@ -627,6 +660,56 @@ mod tests {
         let sc = ch.structural.as_ref().unwrap();
         assert_eq!(sc.extra["after"], serde_json::json!("hi\nthere\n"));
         assert!(!sc.extra.contains_key("before"));
+    }
+
+    #[test]
+    fn test_file_write_diff_write_without_before_state_is_addition_only() {
+        // Backwards-compatible fallback: `None` → diff against "".
+        let input = serde_json::json!({
+            "file_path": "hello.txt",
+            "content": "hi\nthere\n",
+        });
+        let raw = file_write_diff("Write", &input, "hello.txt", None)
+            .expect("write should emit diff");
+        assert!(raw.contains("+hi"));
+        assert!(raw.contains("+there"));
+        // No `-` lines — nothing was there before.
+        assert!(
+            !raw.lines()
+                .any(|l| l.starts_with('-') && !l.starts_with("---"))
+        );
+    }
+
+    #[test]
+    fn test_file_write_diff_write_with_before_state_shows_replacement() {
+        let input = serde_json::json!({
+            "file_path": "hello.txt",
+            "content": "hi\nthere\n",
+        });
+        let raw = file_write_diff("Write", &input, "hello.txt", Some("bye\nfriend\n"))
+            .expect("write should emit diff");
+        // Before content should appear as removals.
+        assert!(raw.contains("-bye"));
+        assert!(raw.contains("-friend"));
+        // After content should appear as additions.
+        assert!(raw.contains("+hi"));
+        assert!(raw.contains("+there"));
+    }
+
+    #[test]
+    fn test_file_write_diff_before_state_ignored_for_edit_shape() {
+        // `Edit` has its own `old_string`; supplied before_state should
+        // be ignored.
+        let input = serde_json::json!({
+            "file_path": "a.rs",
+            "old_string": "foo",
+            "new_string": "bar",
+        });
+        let raw = file_write_diff("Edit", &input, "a.rs", Some("something else entirely"))
+            .expect("edit should emit diff");
+        assert!(raw.contains("-foo"));
+        assert!(raw.contains("+bar"));
+        assert!(!raw.contains("something else entirely"));
     }
 
     #[test]
