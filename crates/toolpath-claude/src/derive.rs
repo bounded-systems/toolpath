@@ -9,11 +9,62 @@ use crate::provider::to_view;
 use crate::types::{ContentPart, Conversation, MessageContent, MessageRole};
 use serde_json::json;
 use std::collections::HashMap;
+use std::path::Path as FsPath;
+use std::process::Command;
 use toolpath::v1::{
     ActorDefinition, ArtifactChange, Base, Identity, Path, PathIdentity, PathMeta, Step,
     StepIdentity, StructuralChange,
 };
 use toolpath_convo::file_write_diff;
+
+/// Best-effort lookup of a file's contents at `HEAD` in the git repo
+/// rooted at `repo_dir` (or one of its ancestors).
+///
+/// Shells out to `git show HEAD:<relative-path>`. Returns `None` when
+/// any of these hold: `repo_dir` isn't inside a git repo, `path` isn't
+/// tracked at `HEAD`, `git` isn't on `PATH`, or the command otherwise
+/// fails. Used by the `Write`-tool before-state resolver; callers must
+/// fall through to the empty-string diff on `None`.
+///
+/// `path` may be absolute or relative. If absolute, it's made relative
+/// to `repo_dir` before invoking git; if it doesn't sit beneath
+/// `repo_dir`, returns `None`.
+fn git_head_content(repo_dir: &str, path: &str) -> Option<String> {
+    let repo = FsPath::new(repo_dir);
+    let file = FsPath::new(path);
+    let rel = if file.is_absolute() {
+        file.strip_prefix(repo).ok()?.to_path_buf()
+    } else {
+        file.to_path_buf()
+    };
+    // `git show HEAD:<path>` expects forward-slash paths.
+    let rel_str = rel.to_string_lossy().replace('\\', "/");
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .arg("show")
+        .arg(format!("HEAD:{rel_str}"))
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    String::from_utf8(output.stdout).ok()
+}
+
+/// Resolve the local working-directory root for a conversation entry,
+/// preferring the entry's own `cwd` (accurate per-turn) and falling
+/// back to the conversation-level project path. Strips any `file://`
+/// prefix the config may have carried.
+fn resolve_local_dir<'a>(
+    config_project: Option<&'a str>,
+    conversation_project: Option<&'a str>,
+    entry_cwd: Option<&'a str>,
+) -> Option<String> {
+    let raw = entry_cwd.or(config_project).or(conversation_project)?;
+    let stripped = raw.strip_prefix("file://").unwrap_or(raw);
+    Some(stripped.to_string())
+}
 
 /// Configuration for deriving Toolpath documents from Claude conversations.
 #[derive(Default)]
@@ -479,8 +530,29 @@ pub fn derive_path(conversation: &Conversation, config: &DeriveConfig) -> Path {
                     // For file-write tools (Edit / Write / MultiEdit /
                     // NotebookEdit), compute a unified diff so the artifact
                     // carries the actual change, not just the raw tool input.
+                    //
+                    // For `Write { content }` specifically the JSONL log
+                    // doesn't capture the prior file state, so we consult
+                    // git HEAD as a best-effort pre-image. If the project
+                    // isn't a git repo or the file isn't tracked, we fall
+                    // back to diffing against "" (addition-only hunk).
                     let raw = if category == "file_write" {
-                        file_write_diff(tool_name, &tool_use.input, &artifact_key)
+                        let before_state = if tool_name == "Write" {
+                            resolve_local_dir(
+                                config.project_path.as_deref(),
+                                conversation.project_path.as_deref(),
+                                entry.cwd.as_deref(),
+                            )
+                            .and_then(|dir| git_head_content(&dir, &artifact_key))
+                        } else {
+                            None
+                        };
+                        file_write_diff(
+                            tool_name,
+                            &tool_use.input,
+                            &artifact_key,
+                            before_state.as_deref(),
+                        )
                     } else {
                         None
                     };
@@ -2339,6 +2411,152 @@ mod tests {
 
         // Event step should use its own parent_uuid
         assert_eq!(path.steps[1].step.parents, vec!["uuid-u1".to_string()]);
+    }
+
+    #[test]
+    fn test_resolve_local_dir_prefers_entry_cwd() {
+        let dir = resolve_local_dir(
+            Some("/from/config"),
+            Some("/from/convo"),
+            Some("/from/entry"),
+        )
+        .unwrap();
+        assert_eq!(dir, "/from/entry");
+    }
+
+    #[test]
+    fn test_resolve_local_dir_falls_back_to_config_then_convo() {
+        let dir = resolve_local_dir(Some("/from/config"), Some("/from/convo"), None).unwrap();
+        assert_eq!(dir, "/from/config");
+        let dir = resolve_local_dir(None, Some("/from/convo"), None).unwrap();
+        assert_eq!(dir, "/from/convo");
+        assert!(resolve_local_dir(None, None, None).is_none());
+    }
+
+    #[test]
+    fn test_resolve_local_dir_strips_file_prefix() {
+        let dir = resolve_local_dir(Some("file:///usr/local/src"), None, None).unwrap();
+        assert_eq!(dir, "/usr/local/src");
+    }
+
+    /// End-to-end: spin up a real tempdir git repo with a tracked file,
+    /// run a Claude Write-tool invocation through `derive_path`, and
+    /// verify the resulting `raw` diff shows `-` lines for the prior
+    /// committed content (not just `+` additions).
+    #[test]
+    fn test_write_tool_before_state_comes_from_git_head() {
+        use std::process::Command;
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+
+        // Initialise a tiny git repo with a file checked in at HEAD.
+        let run = |args: &[&str]| {
+            let out = Command::new("git")
+                .current_dir(root)
+                .args(args)
+                .output()
+                .expect("git on PATH");
+            assert!(
+                out.status.success(),
+                "git {:?} failed: {}",
+                args,
+                String::from_utf8_lossy(&out.stderr)
+            );
+        };
+        run(&["init", "-q", "-b", "main"]);
+        run(&["config", "user.email", "test@example.com"]);
+        run(&["config", "user.name", "Test"]);
+        run(&["config", "commit.gpgsign", "false"]);
+        std::fs::write(root.join("hello.txt"), "old-content\n").unwrap();
+        run(&["add", "hello.txt"]);
+        run(&["commit", "-q", "-m", "init"]);
+
+        // Build a minimal Conversation with one assistant entry that
+        // carries a Write tool use against `hello.txt`.
+        let mut convo = Conversation::new("test-session-42".to_string());
+        let mut entry = make_entry(
+            "uuid-w",
+            MessageRole::Assistant,
+            "writing",
+            "2024-01-01T00:00:00Z",
+        );
+        entry.cwd = Some(root.to_string_lossy().into_owned());
+        // Override message content with a Write tool_use content part.
+        if let Some(msg) = &mut entry.message {
+            msg.content = Some(MessageContent::Parts(vec![ContentPart::ToolUse {
+                id: "tu-1".into(),
+                name: "Write".into(),
+                input: json!({
+                    "file_path": root.join("hello.txt").to_string_lossy(),
+                    "content": "new-content\n",
+                }),
+            }]));
+        }
+        convo.add_entry(entry);
+
+        let path = derive_path(&convo, &DeriveConfig::default());
+
+        // Find the tool step and its Write artifact change.
+        let artifact_key = root.join("hello.txt").to_string_lossy().into_owned();
+        let change = path
+            .steps
+            .iter()
+            .find_map(|s| s.change.get(&artifact_key))
+            .expect("tool step with hello.txt artifact");
+        let raw = change.raw.as_deref().expect("Write should emit raw diff");
+        assert!(
+            raw.contains("-old-content"),
+            "expected removal line, got:\n{raw}"
+        );
+        assert!(
+            raw.contains("+new-content"),
+            "expected addition line, got:\n{raw}"
+        );
+    }
+
+    /// Symmetric fallback: no git repo → before-state resolver returns
+    /// None → `file_write_diff` produces an addition-only diff (existing
+    /// behaviour preserved for new files / non-git projects).
+    #[test]
+    fn test_write_tool_falls_back_to_addition_only_without_git() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+
+        let mut convo = Conversation::new("test-session-43".to_string());
+        let mut entry = make_entry(
+            "uuid-w",
+            MessageRole::Assistant,
+            "writing",
+            "2024-01-01T00:00:00Z",
+        );
+        entry.cwd = Some(root.to_string_lossy().into_owned());
+        if let Some(msg) = &mut entry.message {
+            msg.content = Some(MessageContent::Parts(vec![ContentPart::ToolUse {
+                id: "tu-1".into(),
+                name: "Write".into(),
+                input: json!({
+                    "file_path": root.join("new.txt").to_string_lossy(),
+                    "content": "fresh\n",
+                }),
+            }]));
+        }
+        convo.add_entry(entry);
+
+        let path = derive_path(&convo, &DeriveConfig::default());
+        let artifact_key = root.join("new.txt").to_string_lossy().into_owned();
+        let raw = path
+            .steps
+            .iter()
+            .find_map(|s| s.change.get(&artifact_key))
+            .and_then(|c| c.raw.as_deref())
+            .expect("Write should emit raw diff");
+        assert!(raw.contains("+fresh"));
+        // No `-` lines (other than the `---` header).
+        assert!(
+            !raw.lines()
+                .any(|l| l.starts_with('-') && !l.starts_with("---")),
+            "unexpected removal line in:\n{raw}"
+        );
     }
 
     #[test]

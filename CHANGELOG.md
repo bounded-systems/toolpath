@@ -6,6 +6,7 @@ All notable changes to the Toolpath workspace are documented here.
 
 ### Changed
 
+- `toolpath-convo` 0.7.0: **breaking** — `file_write_diff` gains a `before_state: Option<&str>` parameter. For the `Write { content }` shape, callers can now supply the prior file contents (e.g. resolved from `git show HEAD:<path>`) so the resulting diff shows `-` lines for replaced content instead of an addition-only hunk. `None` preserves the old behaviour (diff against `""`). `Edit` / `MultiEdit` shapes are unaffected — they carry their own `old_string`. `toolpath-claude`'s Claude-JSONL deriver wires a best-effort git-HEAD lookup for `Write` tool invocations; falls back silently to additions-only when the project isn't a git repo, the file isn't tracked, or `git` isn't on `PATH`. (#35)
 - `toolpath-convo` 0.6.0: adds `derive_path(view, config) -> Path` and `DeriveConfig` (moved in from the unreleased `toolpath-derive` crate). `toolpath-convo` now depends on `toolpath`.
 - `toolpath-convo` 0.6.0: adds `ConversationProjector` trait, `AnyProjector` type-erasing wrapper, `extract_conversation()` for Path → ConversationView, and conversation sub-protocol (`conversation.init`, `conversation.append`, `tool.invoke`, `agent://` URN scheme).
 
