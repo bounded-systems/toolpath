@@ -407,11 +407,17 @@ pub fn file_write_diff(
 ///
 /// Always emits a `--- a/{path}` / `+++ b/{path}` header even when one side is
 /// empty so downstream renderers can anchor the change to the file it touched.
+///
+/// Any leading `/` on `path` is stripped before splicing into the header —
+/// git-style `a/` and `b/` prefixes already denote the repo root, so an
+/// absolute path like `/abs/file.rs` would otherwise emit `--- a//abs/file.rs`,
+/// which breaks `patch(1)` and other consumers that parse the header.
 pub fn unified_diff(path: &str, before: &str, after: &str) -> String {
     use similar::TextDiff;
     let diff = TextDiff::from_lines(before, after);
+    let display = path.trim_start_matches('/');
     let mut out = String::new();
-    out.push_str(&format!("--- a/{path}\n+++ b/{path}\n"));
+    out.push_str(&format!("--- a/{display}\n+++ b/{display}\n"));
     out.push_str(
         &diff
             .unified_diff()
@@ -710,6 +716,37 @@ mod tests {
         assert!(raw.contains("-foo"));
         assert!(raw.contains("+bar"));
         assert!(!raw.contains("something else entirely"));
+    }
+
+    #[test]
+    fn test_unified_diff_strips_leading_slash_on_absolute_path() {
+        // Regression for #36: headers for absolute paths must not contain `a//`.
+        let raw = unified_diff("/abs/path.rs", "a\n", "b\n");
+        assert!(
+            raw.contains("--- a/abs/path.rs\n"),
+            "missing stripped --- header: {raw}"
+        );
+        assert!(
+            raw.contains("+++ b/abs/path.rs\n"),
+            "missing stripped +++ header: {raw}"
+        );
+        assert!(
+            !raw.contains("a//"),
+            "header should not contain doubled slash: {raw}"
+        );
+        assert!(
+            !raw.contains("b//"),
+            "header should not contain doubled slash: {raw}"
+        );
+    }
+
+    #[test]
+    fn test_unified_diff_preserves_relative_path() {
+        // Relative paths (no leading slash) are unchanged — only a single
+        // leading `/` is stripped.
+        let raw = unified_diff("src/login.rs", "a\n", "b\n");
+        assert!(raw.contains("--- a/src/login.rs\n"), "{raw}");
+        assert!(raw.contains("+++ b/src/login.rs\n"), "{raw}");
     }
 
     #[test]

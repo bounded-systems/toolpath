@@ -1688,7 +1688,11 @@ mod tests {
         let tool_step = &path.steps[1];
         let ch = &tool_step.change["/src/login.rs"];
         let raw = ch.raw.as_deref().expect("edit tool should emit unified diff");
-        assert!(raw.contains("--- a//src/login.rs"), "{}", raw);
+        // Leading `/` is stripped from the header so `a/`/`b/` don't double up
+        // (git-style prefixes already denote the repo root). See #36.
+        assert!(raw.contains("--- a/src/login.rs"), "{}", raw);
+        assert!(raw.contains("+++ b/src/login.rs"), "{}", raw);
+        assert!(!raw.contains("a//"), "header should not double-slash: {}", raw);
         assert!(raw.contains("-validate_token()"), "{}", raw);
         assert!(raw.contains("+validate_token_v2()"), "{}", raw);
 
