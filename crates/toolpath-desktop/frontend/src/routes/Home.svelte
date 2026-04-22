@@ -1,41 +1,18 @@
 <script lang="ts">
-    import { store } from "../lib/store.svelte";
     import SourceLogo from "../lib/SourceLogo.svelte";
-    import type { Route } from "../lib/types";
+    import BrowseClaude from "./BrowseClaude.svelte";
+    import BrowsePi from "./BrowsePi.svelte";
+    import BrowseGit from "./BrowseGit.svelte";
+    import BrowseGithub from "./BrowseGithub.svelte";
 
     // Four source types, mirroring the cartographic source-picker tabs in the
-    // design. Each tab kicks off its own browse flow (live backend data).
+    // design. Each tab reveals the live browse view for that source.
     type SourceKind = "claude" | "pi" | "git" | "github";
-    const SOURCES: {
-        k: SourceKind;
-        label: string;
-        route: Route;
-        desc: string;
-    }[] = [
-        {
-            k: "claude",
-            label: "Claude Code",
-            route: "browse-claude",
-            desc: "Your local Claude Code sessions in ~/.claude/projects/.",
-        },
-        {
-            k: "pi",
-            label: "Pi.dev",
-            route: "browse-pi",
-            desc: "Pi agent conversations tracked on this machine.",
-        },
-        {
-            k: "git",
-            label: "Git",
-            route: "browse-git",
-            desc: "A local repository; branch history becomes the trace.",
-        },
-        {
-            k: "github",
-            label: "GitHub PR",
-            route: "browse-github",
-            desc: "A pull request URL. Fetches commits, reviews, and CI.",
-        },
+    const SOURCES: { k: SourceKind; label: string }[] = [
+        { k: "claude", label: "Claude Code" },
+        { k: "pi", label: "Pi.dev" },
+        { k: "git", label: "Git" },
+        { k: "github", label: "GitHub PR" },
     ];
 
     let active: SourceKind = $state("claude");
@@ -69,42 +46,14 @@
         {/each}
     </div>
 
-    <!-- Selected-source introduction card + continue button -->
-    {#each SOURCES as s (s.k)}
-        {#if active === s.k}
-            <div class="card-panel" style="margin-top:0; border-top:0">
-                <div class="row" style="align-items:flex-start; gap:16px">
-                    <div style="flex:1">
-                        <div class="section-label" style="margin-bottom:6px">
-                            <span class="section-label__num"
-                                >§1.{SOURCES.indexOf(s) + 1} ·</span
-                            >
-                            <span class="section-label__text">{s.label}</span>
-                            <span class="section-label__right"
-                                >sourced live</span
-                            >
-                        </div>
-                        <p
-                            style="font-family:var(--font-serif); font-size:14px; color:var(--ink-2); margin:0 0 8px"
-                        >
-                            {s.desc}
-                        </p>
-                        <p
-                            style="font-family:var(--font-mono); font-size:11px; color:var(--ink-4); letter-spacing:0.06em; margin:0"
-                        >
-                            ⎇ derived via <code>path derive {s.k}</code>
-                        </p>
-                    </div>
-                    <button
-                        class="btn btn--accent"
-                        onclick={() =>
-                            store.dispatch({
-                                t: "NavigateTo",
-                                screen: s.route,
-                            })}>Browse {s.label} →</button
-                    >
-                </div>
-            </div>
-        {/if}
-    {/each}
+    <!-- Inline browse view for the active source -->
+    {#if active === "claude"}
+        <BrowseClaude embedded />
+    {:else if active === "pi"}
+        <BrowsePi embedded />
+    {:else if active === "git"}
+        <BrowseGit embedded />
+    {:else if active === "github"}
+        <BrowseGithub embedded />
+    {/if}
 </div>

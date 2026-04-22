@@ -187,6 +187,7 @@ export type Msg =
   | { t: "AgentsSelect"; agent: AgentSummary }
 
   // Claude
+  | { t: "ClaudeEnsureProjects" }
   | { t: "ClaudeProjectReceived"; project: ClaudeProject }
   | { t: "ClaudeProjectsDone" }
   | { t: "ClaudeProjectsError"; error: string }
@@ -198,6 +199,7 @@ export type Msg =
   | { t: "ClaudeDerive" }
 
   // Pi
+  | { t: "PiEnsureProjects" }
   | { t: "PiProjectReceived"; project: PiProject }
   | { t: "PiProjectsDone" }
   | { t: "PiProjectsError"; error: string }
@@ -216,6 +218,7 @@ export type Msg =
   | { t: "GitDerive" }
 
   // GitHub
+  | { t: "GithubEnsureTokenStatus" }
   | { t: "GithubSetUrl"; value: string }
   | { t: "GithubTokenStatus"; hasToken: boolean }
   | { t: "GithubEditToken"; on: boolean }

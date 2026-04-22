@@ -1,24 +1,27 @@
 <script lang="ts">
   import { store } from "../lib/store.svelte";
   import SourceLogo from "../lib/SourceLogo.svelte";
+  let { embedded = false }: { embedded?: boolean } = $props();
   const git = $derived(store.m.git);
 </script>
 
-<div class="page">
-  <div class="row" style="margin-bottom:14px">
-    <button class="btn btn--ghost" onclick={() => store.dispatch({ t: "NavigateTo", screen: "home" })}>← Back</button>
-  </div>
-
-  <div class="page__header">
-    <div>
-      <div class="page__eyebrow">§1.3 · GIT · LOCAL REPOSITORY</div>
-      <h1 class="page__title">Local git repository</h1>
-      <p class="page__lede">
-        Point to a repo and pick a branch. History on that branch becomes the
-        derived Path document.
-      </p>
+<div class:page={!embedded}>
+  {#if !embedded}
+    <div class="row" style="margin-bottom:14px">
+      <button class="btn btn--ghost" onclick={() => store.dispatch({ t: "NavigateTo", screen: "home" })}>← Back</button>
     </div>
-  </div>
+
+    <div class="page__header">
+      <div>
+        <div class="page__eyebrow">§1.3 · GIT · LOCAL REPOSITORY</div>
+        <h1 class="page__title">Local git repository</h1>
+        <p class="page__lede">
+          Point to a repo and pick a branch. History on that branch becomes the
+          derived Path document.
+        </p>
+      </div>
+    </div>
+  {/if}
 
   <div class="section-label">
     <span class="section-label__num">§1.3.1 ·</span>

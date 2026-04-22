@@ -6,6 +6,14 @@
   import SourceLogo from "../lib/SourceLogo.svelte";
   import type { PiProject, PiSession } from "../lib/types";
 
+  let { embedded = false }: { embedded?: boolean } = $props();
+
+  // When embedded, there's no NavigateTo("browse-pi") to seed loading. Kick
+  // it off on mount; the msg is idempotent.
+  onMount(() => {
+    store.dispatch({ t: "PiEnsureProjects" });
+  });
+
   // Permanent subscriptions — `onMount` runs exactly once per component
   // mount, so unlike `$effect` there's no way for Svelte's reactivity
   // graph to re-fire it and stack duplicate listeners.
@@ -96,25 +104,27 @@
   );
 </script>
 
-<div class="page">
-  <div class="row" style="margin-bottom:14px">
-    <button class="btn btn--ghost" onclick={() => store.dispatch({ t: "NavigateTo", screen: "home" })}>← Back</button>
-  </div>
-
-  <div class="page__header">
-    <div>
-      <div class="page__eyebrow">§1.2 · PI.DEV · CONVERSATIONS</div>
-      <h1 class="page__title">Pi.dev</h1>
-      <p class="page__lede">
-        {#if projectCount === 0 && pi.loadingProjects}
-          Scanning <code>~/.pi/agent/sessions/</code> …
-        {:else}
-          {projectCount} project{projectCount === 1 ? "" : "s"}{pi.loadingProjects ? " — still scanning …" : ""}
-        {/if}
-        {#if pi.loadingProjects}<span class="spinner"></span>{/if}
-      </p>
+<div class:page={!embedded}>
+  {#if !embedded}
+    <div class="row" style="margin-bottom:14px">
+      <button class="btn btn--ghost" onclick={() => store.dispatch({ t: "NavigateTo", screen: "home" })}>← Back</button>
     </div>
-  </div>
+
+    <div class="page__header">
+      <div>
+        <div class="page__eyebrow">§1.2 · PI.DEV · CONVERSATIONS</div>
+        <h1 class="page__title">Pi.dev</h1>
+        <p class="page__lede">
+          {#if projectCount === 0 && pi.loadingProjects}
+            Scanning <code>~/.pi/agent/sessions/</code> …
+          {:else}
+            {projectCount} project{projectCount === 1 ? "" : "s"}{pi.loadingProjects ? " — still scanning …" : ""}
+          {/if}
+          {#if pi.loadingProjects}<span class="spinner"></span>{/if}
+        </p>
+      </div>
+    </div>
+  {/if}
 
   {#if projectCount === 0 && pi.projectsDone}
     <div class="notice">No pi.dev projects found. Run a pi.dev session and come back.</div>
