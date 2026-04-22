@@ -16,6 +16,26 @@ import { classify } from "./classify";
 import { renderMarkdown } from "./markdown";
 import type { ActorDef, Document, StepRef } from "./types";
 
+// Graph re-renders happen whenever any unrelated reactive state mutates
+// (selection, branch expansion, show-ts/show-files toggles). `marked.parse
+// + DOMPurify.sanitize` is expensive on long assistant turns, and the
+// same step body is almost always identical across consecutive renders
+// of the same document. Memoize by step id + body text so a repeat
+// `render()` is a map lookup rather than a fresh parse.
+//
+// The cache is keyed on both id and text because a doc reload could
+// reuse ids with new text; we also keep it unbounded because graph
+// views rarely exceed a few thousand steps and each entry is small.
+const cardMarkdownCache = new Map<string, { text: string; html: string }>();
+
+function memoRenderMarkdown(id: string, text: string): string {
+  const hit = cardMarkdownCache.get(id);
+  if (hit && hit.text === text) return hit.html;
+  const html = renderMarkdown(text);
+  cardMarkdownCache.set(id, { text, html });
+  return html;
+}
+
 export interface RenderOpts {
   selectedStepId: string | null;
   expandedBranches: Record<string, true>;
@@ -250,7 +270,7 @@ function renderCard(
         <div class="pg-card__chips">${chips.join("")}</div>
       </div>
       ${bodyText
-        ? `<div class="pg-card__body markdown markdown--compact">${renderMarkdown(bodyText)}</div>`
+        ? `<div class="pg-card__body markdown markdown--compact">${memoRenderMarkdown(id, bodyText)}</div>`
         : `<div class="pg-card__body pg-card__body--empty">(no message text)</div>`}
       ${toolUses}
       ${tsText ? `<div class="pg-card__ts">${tsText}</div>` : ""}
