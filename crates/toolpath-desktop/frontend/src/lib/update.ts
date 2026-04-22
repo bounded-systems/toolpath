@@ -477,6 +477,9 @@ export function update(msg: Msg, m: Model): [Model, Cmd | null] {
             showTs: false,
             showFiles: false,
             vizEpoch: 0,
+            treeQuery: "",
+            treeFilter: "all",
+            viewMode: "chat",
             exporting: false,
             uploading: false,
           },
@@ -525,6 +528,27 @@ export function update(msg: Msg, m: Model): [Model, Cmd | null] {
       if (!m.preview) return [m, null];
       return [
         { ...m, preview: { ...m.preview, selectedStep: msg.step, selectedActors: msg.actors } },
+        null,
+      ];
+    case "PreviewSetTreeQuery":
+      if (!m.preview) return [m, null];
+      return [{ ...m, preview: { ...m.preview, treeQuery: msg.value } }, null];
+    case "PreviewSetTreeFilter":
+      if (!m.preview) return [m, null];
+      return [{ ...m, preview: { ...m.preview, treeFilter: msg.value } }, null];
+    case "PreviewSetViewMode":
+      if (!m.preview) return [m, null];
+      // Bump vizEpoch when switching into graph mode so the renderer
+      // re-measures; the canvas div is remounted when {#if} flips.
+      return [
+        {
+          ...m,
+          preview: {
+            ...m.preview,
+            viewMode: msg.value,
+            vizEpoch: m.preview.vizEpoch + 1,
+          },
+        },
         null,
       ];
     case "PreviewExport": {

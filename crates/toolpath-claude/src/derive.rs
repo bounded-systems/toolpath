@@ -13,6 +13,7 @@ use toolpath::v1::{
     ActorDefinition, ArtifactChange, Base, Identity, Path, PathIdentity, PathMeta, Step,
     StepIdentity, StructuralChange,
 };
+use toolpath_convo::file_write_diff;
 
 /// Configuration for deriving Toolpath documents from Claude conversations.
 #[derive(Default)]
@@ -28,7 +29,7 @@ fn tool_category_str(name: &str) -> &'static str {
     match name {
         "Read" => "file_read",
         "Glob" | "Grep" => "file_search",
-        "Write" | "Edit" | "NotebookEdit" => "file_write",
+        "Write" | "Edit" | "MultiEdit" | "NotebookEdit" => "file_write",
         "Bash" => "shell",
         "WebFetch" | "WebSearch" => "network",
         "Task" => "delegation",
@@ -475,10 +476,19 @@ pub fn derive_path(conversation: &Conversation, config: &DeriveConfig) -> Path {
                         extra.insert("is_error".to_string(), json!(result.is_error));
                     }
 
+                    // For file-write tools (Edit / Write / MultiEdit /
+                    // NotebookEdit), compute a unified diff so the artifact
+                    // carries the actual change, not just the raw tool input.
+                    let raw = if category == "file_write" {
+                        file_write_diff(tool_name, &tool_use.input, &artifact_key)
+                    } else {
+                        None
+                    };
+
                     tool_changes.insert(
                         artifact_key,
                         ArtifactChange {
-                            raw: None,
+                            raw,
                             structural: Some(StructuralChange {
                                 change_type: "tool.invoke".to_string(),
                                 extra,
@@ -1559,6 +1569,64 @@ mod tests {
         let change = &tool_step.change["/src/main.rs"];
         let extra = &change.structural.as_ref().unwrap().extra;
         assert_eq!(extra["input"], input_json);
+    }
+
+    #[test]
+    fn test_derive_path_edit_tool_emits_unified_diff() {
+        let mut convo = Conversation::new("test-session-12345678".to_string());
+        let input_json = serde_json::json!({
+            "file_path": "/src/login.rs",
+            "old_string": "validate_token()",
+            "new_string": "validate_token_v2()",
+        });
+        convo.add_entry(ConversationEntry {
+            parent_uuid: None,
+            is_sidechain: false,
+            entry_type: "assistant".to_string(),
+            uuid: "uuid-edit".to_string(),
+            timestamp: "2024-01-01T00:00:00Z".to_string(),
+            session_id: Some("test-session".to_string()),
+            message: Some(Message {
+                role: MessageRole::Assistant,
+                content: Some(MessageContent::Parts(vec![ContentPart::ToolUse {
+                    id: "t-edit".to_string(),
+                    name: "Edit".to_string(),
+                    input: input_json,
+                }])),
+                model: None,
+                id: None,
+                message_type: None,
+                stop_reason: None,
+                stop_sequence: None,
+                usage: None,
+            }),
+            cwd: None,
+            git_branch: None,
+            version: None,
+            user_type: None,
+            request_id: None,
+            tool_use_result: None,
+            snapshot: None,
+            message_id: None,
+            extra: Default::default(),
+        });
+
+        let path = derive_path(&convo, &DeriveConfig::default());
+        // steps[0] = assistant turn, steps[1] = tool step (siblings).
+        let tool_step = &path.steps[1];
+        let ch = &tool_step.change["/src/login.rs"];
+        let raw = ch.raw.as_deref().expect("edit tool should emit unified diff");
+        assert!(raw.contains("--- a//src/login.rs"), "{}", raw);
+        assert!(raw.contains("-validate_token()"), "{}", raw);
+        assert!(raw.contains("+validate_token_v2()"), "{}", raw);
+
+        // Sanity-check the parent wiring that the chat view relies on:
+        // the tool step's parent is the assistant step, and they share
+        // the same `entry.uuid` root so the frontend splice works.
+        assert_eq!(
+            tool_step.step.parents,
+            vec![path.steps[0].step.id.clone()]
+        );
     }
 
     // ── tool result assembly ──────────────────────────────────────────

@@ -5044,6 +5044,7 @@ dependencies = [
  "chrono",
  "serde",
  "serde_json",
+ "similar",
  "thiserror 1.0.69",
  "toolpath",
 ]

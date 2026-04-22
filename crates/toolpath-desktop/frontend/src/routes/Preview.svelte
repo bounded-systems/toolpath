@@ -1,15 +1,45 @@
 <script lang="ts">
   import { render as renderViz } from "../lib/viz";
   import { store } from "../lib/store.svelte";
+  import StepTree from "../lib/StepTree.svelte";
+  import ChatView from "../lib/ChatView.svelte";
   import type { StepRef } from "../lib/types";
 
   let canvasEl: HTMLDivElement | null = $state(null);
 
+  // Graph-view zoom. Wheel/pinch with ctrl/meta zooms; plain wheel pans via
+  // the scroll container. Reset whenever the previewed doc changes.
+  const MIN_ZOOM = 0.25;
+  const MAX_ZOOM = 3;
+  const ZOOM_STEP = 1.15;
+  let zoom = $state(1);
+  $effect(() => { void store.m.preview?.doc; zoom = 1; });
+
+  function clampZoom(z: number): number {
+    return Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, z));
+  }
+  function zoomAt(delta: number) { zoom = clampZoom(zoom * delta); }
+  function zoomIn()   { zoomAt(ZOOM_STEP); }
+  function zoomOut()  { zoomAt(1 / ZOOM_STEP); }
+  function zoomReset() { zoom = 1; }
+
+  function onCanvasWheel(ev: WheelEvent) {
+    // macOS trackpad pinch arrives as wheel events with ctrlKey=true; plain
+    // two-finger scroll has ctrlKey=false and should bubble to the default
+    // scroll behaviour.
+    if (!(ev.ctrlKey || ev.metaKey)) return;
+    ev.preventDefault();
+    // deltaY < 0 means the user scrolled/pinched outward → zoom in.
+    const factor = Math.exp(-ev.deltaY * 0.01);
+    zoomAt(factor);
+  }
+
   // Re-render the graph whenever the underlying doc, selection, or toggles
-  // change. `vizEpoch` bumps on every toggle / branch-expand.
+  // change. `vizEpoch` bumps on every toggle / branch-expand. When view
+  // mode is "chat" the canvas div is not in the DOM, so this is a no-op.
   $effect(() => {
     const p = store.m.preview;
-    if (!canvasEl || !p) return;
+    if (!canvasEl || !p || p.viewMode !== "graph") return;
     const _epoch = p.vizEpoch;
     renderViz(p.doc, canvasEl, {
       selectedStepId: p.selectedStep?.step.id ?? null,
@@ -75,18 +105,28 @@
     </div>
   </div>
 
-  <!-- Body: inspector (left) + visualizer (right) -->
+  <!-- Body: tree + inspector (left) + visualizer (right) -->
   <div class="preview-body preview-body--split">
     <div class="preview-body__left">
       <div class="section-label">
         <span class="section-label__num">§2.1 ·</span>
+        <span class="section-label__text">Steps</span>
+        <span class="section-label__right">TREE</span>
+      </div>
+
+      <StepTree />
+
+      <div style="height:18px"></div>
+
+      <div class="section-label">
+        <span class="section-label__num">§2.2 ·</span>
         <span class="section-label__text">Inspector</span>
         <span class="section-label__right">STEP</span>
       </div>
 
       <div class="inspector">
         {#if !preview.selectedStep}
-          <div class="inspector__empty">Click a step in the graph to inspect its diff and metadata.</div>
+          <div class="inspector__empty">Click a step in the tree or graph to inspect its diff and metadata.</div>
         {:else}
           {@const s = preview.selectedStep}
           {@const actor = s.step.actor}
@@ -127,7 +167,7 @@
 
       <div style="height:18px"></div>
       <div class="section-label">
-        <span class="section-label__num">§2.2 ·</span>
+        <span class="section-label__num">§2.3 ·</span>
         <span class="section-label__text">Document</span>
         <span class="section-label__right">META</span>
       </div>
@@ -145,42 +185,87 @@
 
     <div class="preview-body__right">
       <div class="section-label">
-        <span class="section-label__num">§2.3 ·</span>
-        <span class="section-label__text">Provenance visualizer</span>
-        <span class="section-label__right">GRAPH</span>
+        <span class="section-label__num">§2.4 ·</span>
+        <span class="section-label__text">
+          {preview.viewMode === "chat" ? "Transcript" : "Graph view"}
+        </span>
+        <span class="section-label__right">
+          {preview.viewMode === "chat" ? "CHAT" : "DAG"}
+        </span>
       </div>
 
-      <div class="toolbar">
-        <label>
-          <input type="checkbox" class="checkbox" checked={preview.showTs} onchange={() => store.dispatch({ t: "PreviewToggle", key: "showTs" })} />
-          Timestamps
-        </label>
-        <label>
-          <input type="checkbox" class="checkbox" checked={preview.showFiles} onchange={() => store.dispatch({ t: "PreviewToggle", key: "showFiles" })} />
-          Files touched
-        </label>
-        <span class="spacer"></span>
-        <span class="kbd">Click a card's <em>expand</em> chip to reveal its dead-end branch.</span>
+      <div class="view-toggle" role="tablist" aria-label="Preview view mode">
+        <button
+          type="button"
+          role="tab"
+          aria-selected={preview.viewMode === "chat"}
+          class={"view-toggle__btn" + (preview.viewMode === "chat" ? " view-toggle__btn--active" : "")}
+          onclick={() => store.dispatch({ t: "PreviewSetViewMode", value: "chat" })}
+        >Chat view</button>
+        <button
+          type="button"
+          role="tab"
+          aria-selected={preview.viewMode === "graph"}
+          class={"view-toggle__btn" + (preview.viewMode === "graph" ? " view-toggle__btn--active" : "")}
+          onclick={() => store.dispatch({ t: "PreviewSetViewMode", value: "graph" })}
+        >Graph view</button>
       </div>
 
-      <div class="preview-canvas" style="height:520px" bind:this={canvasEl}></div>
+      {#if preview.viewMode === "chat"}
+        <ChatView />
 
-      <div style="margin-top:12px; font-family:var(--font-mono); font-size:10px; color:var(--ink-4); letter-spacing:0.08em; text-transform:uppercase; display:flex; gap:16px; align-items:center; border-top:0.5px solid var(--ink-5); padding-top:8px">
-        <span style="display:inline-flex; align-items:center; gap:5px">
-          <span style="width:8px; height:8px; background:var(--contour-2); transform:rotate(45deg); display:inline-block"></span>
-          human
-        </span>
-        <span style="display:inline-flex; align-items:center; gap:5px">
-          <span style="width:8px; height:8px; background:var(--road); border-radius:999px; display:inline-block"></span>
-          agent
-        </span>
-        <span style="display:inline-flex; align-items:center; gap:5px">
-          <span style="width:8px; height:8px; background:var(--paper-white); border:1px dashed var(--road); display:inline-block"></span>
-          dead-end
-        </span>
-        <span class="spacer"></span>
-        <span>{steps.length} steps · {actorSet.size} actors</span>
-      </div>
+        <div style="margin-top:12px; font-family:var(--font-mono); font-size:10px; color:var(--ink-4); letter-spacing:0.08em; text-transform:uppercase; display:flex; gap:16px; align-items:center; border-top:0.5px solid var(--ink-5); padding-top:8px">
+          <span>HEAD path only</span>
+          <span class="spacer"></span>
+          <span>{steps.length} steps · {actorSet.size} actors</span>
+        </div>
+      {:else}
+        <div class="toolbar">
+          <label>
+            <input type="checkbox" class="checkbox" checked={preview.showTs} onchange={() => store.dispatch({ t: "PreviewToggle", key: "showTs" })} />
+            Timestamps
+          </label>
+          <label>
+            <input type="checkbox" class="checkbox" checked={preview.showFiles} onchange={() => store.dispatch({ t: "PreviewToggle", key: "showFiles" })} />
+            Files touched
+          </label>
+          <span class="spacer"></span>
+          <div class="zoom-ctl" role="group" aria-label="Graph zoom">
+            <button type="button" class="zoom-ctl__btn" onclick={zoomOut} disabled={zoom <= MIN_ZOOM + 0.001} aria-label="Zoom out">−</button>
+            <button type="button" class="zoom-ctl__pct" onclick={zoomReset} title="Reset to 100%">{Math.round(zoom * 100)}%</button>
+            <button type="button" class="zoom-ctl__btn" onclick={zoomIn} disabled={zoom >= MAX_ZOOM - 0.001} aria-label="Zoom in">+</button>
+          </div>
+          <span class="kbd">⌘/ctrl + scroll to zoom</span>
+        </div>
+
+        <div
+          class="graph-scroll"
+          onwheel={onCanvasWheel}
+        >
+          <!-- `zoom` (non-standard but supported in WebKit/Chromium → all
+               Tauri runtimes) actually scales layout size, so the outer
+               scroll container sees correct content bounds. Transform:scale
+               would only rescale visuals and leave the scrollbars wrong. -->
+          <div class="graph-zoom" style="zoom: {zoom};" bind:this={canvasEl}></div>
+        </div>
+
+        <div style="margin-top:12px; font-family:var(--font-mono); font-size:10px; color:var(--ink-4); letter-spacing:0.08em; text-transform:uppercase; display:flex; gap:16px; align-items:center; border-top:0.5px solid var(--ink-5); padding-top:8px">
+          <span style="display:inline-flex; align-items:center; gap:5px">
+            <span style="width:8px; height:8px; background:var(--road); transform:rotate(45deg); display:inline-block"></span>
+            human
+          </span>
+          <span style="display:inline-flex; align-items:center; gap:5px">
+            <span style="width:8px; height:8px; background:var(--water); border-radius:999px; display:inline-block"></span>
+            agent
+          </span>
+          <span style="display:inline-flex; align-items:center; gap:5px">
+            <span style="width:8px; height:8px; background:var(--paper-white); border:1px dashed var(--road); display:inline-block"></span>
+            dead-end
+          </span>
+          <span class="spacer"></span>
+          <span>{steps.length} steps · {actorSet.size} actors</span>
+        </div>
+      {/if}
     </div>
   </div>
 {/if}

@@ -161,32 +161,36 @@ pub fn derive_path(view: &ConversationView, config: &DeriveConfig) -> Path {
             },
         );
 
-        // File-write tool invocations → artifact changes
+        // File-write tool invocations → artifact changes. Each gets a unified
+        // diff in `raw` (so it renders like a git diff) plus the structured
+        // before/after strings in `structural.extra` for tools that want to
+        // re-apply or inspect the op programmatically.
         for tool in &turn.tool_uses {
             if tool.category != Some(ToolCategory::FileWrite) {
                 continue;
             }
-            if let Some(path) = extract_file_path(tool) {
-                let mut t_extra: HashMap<String, serde_json::Value> = HashMap::new();
-                t_extra.insert(
-                    "tool".to_string(),
-                    serde_json::Value::String(tool.name.clone()),
-                );
-                t_extra.insert(
-                    "tool_id".to_string(),
-                    serde_json::Value::String(tool.id.clone()),
-                );
-                step.change.insert(
-                    path,
-                    ArtifactChange {
-                        raw: None,
-                        structural: Some(StructuralChange {
-                            change_type: "file.write".to_string(),
-                            extra: t_extra,
-                        }),
-                    },
-                );
-            }
+            let Some(path) = extract_file_path(tool) else {
+                continue;
+            };
+            let (raw, mut t_extra) = file_write_change(tool, &path);
+            t_extra.insert(
+                "tool".to_string(),
+                serde_json::Value::String(tool.name.clone()),
+            );
+            t_extra.insert(
+                "tool_id".to_string(),
+                serde_json::Value::String(tool.id.clone()),
+            );
+            step.change.insert(
+                path,
+                ArtifactChange {
+                    raw,
+                    structural: Some(StructuralChange {
+                        change_type: "file.write".to_string(),
+                        extra: t_extra,
+                    }),
+                },
+            );
         }
 
         steps.push(step);
@@ -282,6 +286,107 @@ fn extract_file_path(tool: &ToolInvocation) -> Option<String> {
         }
     }
     None
+}
+
+/// Build `(raw_diff, extra)` for a single FileWrite tool invocation.
+///
+/// See [`file_write_diff`] for the input shapes handled; this helper
+/// additionally captures the structured before/after strings in `extra`.
+fn file_write_change(
+    tool: &ToolInvocation,
+    path: &str,
+) -> (Option<String>, HashMap<String, serde_json::Value>) {
+    let input = &tool.input;
+    let str_field = |k: &str| input.get(k).and_then(|v| v.as_str()).map(str::to_string);
+
+    let mut extra: HashMap<String, serde_json::Value> = HashMap::new();
+
+    if let (Some(old), Some(new)) = (str_field("old_string"), str_field("new_string")) {
+        extra.insert("before".to_string(), serde_json::Value::String(old.clone()));
+        extra.insert("after".to_string(), serde_json::Value::String(new.clone()));
+    } else if let Some(content) = str_field("content") {
+        extra.insert("after".to_string(), serde_json::Value::String(content));
+    } else if let Some(edits) = input.get("edits").and_then(|v| v.as_array()) {
+        extra.insert("edits".to_string(), serde_json::Value::Array(edits.clone()));
+    }
+
+    (file_write_diff(&tool.name, input, path), extra)
+}
+
+/// Compute a unified diff string for a file-write tool invocation, given the
+/// raw tool input JSON. Handles Claude's Edit / Write / MultiEdit / NotebookEdit
+/// shapes; returns `None` for any unrecognised shape or if nothing to diff.
+///
+/// Exposed so non-Conversation derivers (e.g. `toolpath-claude`'s bespoke
+/// Claude-JSONL deriver, which emits its own `tool.invoke` steps) can populate
+/// `ArtifactChange.raw` without reimplementing the diff logic.
+///
+/// Shapes handled:
+///   - `Edit    { old_string, new_string, ... }`  → diff old→new
+///   - `Write   { content }`                      → diff ""→content
+///   - `MultiEdit { edits: [{old_string, new_string}, ...] }` → hunks joined,
+///     each prefixed with `# edit N/total` so consumers can tell them apart.
+pub fn file_write_diff(
+    tool_name: &str,
+    input: &serde_json::Value,
+    path: &str,
+) -> Option<String> {
+    let str_field = |k: &str| input.get(k).and_then(|v| v.as_str());
+
+    // Edit / NotebookEdit / anything else with old/new pair.
+    if let (Some(old), Some(new)) = (str_field("old_string"), str_field("new_string")) {
+        return Some(unified_diff(path, old, new));
+    }
+
+    // Write — whole-file content; diff against empty so we see additions.
+    if let Some(content) = str_field("content") {
+        return Some(unified_diff(path, "", content));
+    }
+
+    // MultiEdit — multiple sequential edits on one file.
+    if let Some(edits) = input.get("edits").and_then(|v| v.as_array()) {
+        if edits.is_empty() {
+            return None;
+        }
+        let mut parts: Vec<String> = Vec::new();
+        for (idx, edit) in edits.iter().enumerate() {
+            let old = edit
+                .get("old_string")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let new = edit
+                .get("new_string")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let header = format!("# edit {}/{}", idx + 1, edits.len());
+            parts.push(format!("{header}\n{}", unified_diff(path, old, new)));
+        }
+        return Some(parts.join("\n"));
+    }
+
+    // Unused today, but keeps `tool_name` addressable for future per-tool
+    // branches (e.g. NotebookEdit may one day need cell-scoped diffs).
+    let _ = tool_name;
+    None
+}
+
+/// Produce a minimal unified-diff string using `similar::TextDiff`.
+///
+/// Always emits a `--- a/{path}` / `+++ b/{path}` header even when one side is
+/// empty so downstream renderers can anchor the change to the file it touched.
+pub fn unified_diff(path: &str, before: &str, after: &str) -> String {
+    use similar::TextDiff;
+    let diff = TextDiff::from_lines(before, after);
+    let mut out = String::new();
+    out.push_str(&format!("--- a/{path}\n+++ b/{path}\n"));
+    out.push_str(
+        &diff
+            .unified_diff()
+            .context_radius(3)
+            .header("", "")
+            .to_string(),
+    );
+    out
 }
 
 #[cfg(test)]
@@ -475,6 +580,79 @@ mod tests {
         let path = derive_path(&view, &DeriveConfig::default());
         assert!(!path.steps[0].change.contains_key("x.rs"));
         assert_eq!(path.steps[0].change.len(), 1);
+    }
+
+    #[test]
+    fn test_tool_use_edit_emits_unified_diff() {
+        let mut turn = base_turn("t1", Role::Assistant);
+        turn.tool_uses = vec![fw_tool(
+            "Edit",
+            "tu1",
+            serde_json::json!({
+                "file_path": "src/login.rs",
+                "old_string": "validate_token()",
+                "new_string": "validate_token_v2()",
+            }),
+        )];
+        let view = view_with(vec![turn]);
+        let path = derive_path(&view, &DeriveConfig::default());
+        let ch = &path.steps[0].change["src/login.rs"];
+        let raw = ch.raw.as_deref().expect("edit should emit unified diff");
+        assert!(raw.contains("--- a/src/login.rs"));
+        assert!(raw.contains("+++ b/src/login.rs"));
+        assert!(raw.contains("-validate_token()"));
+        assert!(raw.contains("+validate_token_v2()"));
+        let sc = ch.structural.as_ref().unwrap();
+        assert_eq!(sc.extra["before"], serde_json::json!("validate_token()"));
+        assert_eq!(sc.extra["after"], serde_json::json!("validate_token_v2()"));
+    }
+
+    #[test]
+    fn test_tool_use_write_emits_full_content_diff() {
+        let mut turn = base_turn("t1", Role::Assistant);
+        turn.tool_uses = vec![fw_tool(
+            "Write",
+            "tu1",
+            serde_json::json!({
+                "file_path": "hello.txt",
+                "content": "hi\nthere\n",
+            }),
+        )];
+        let view = view_with(vec![turn]);
+        let path = derive_path(&view, &DeriveConfig::default());
+        let ch = &path.steps[0].change["hello.txt"];
+        let raw = ch.raw.as_deref().expect("write should emit diff");
+        assert!(raw.contains("+hi"));
+        assert!(raw.contains("+there"));
+        let sc = ch.structural.as_ref().unwrap();
+        assert_eq!(sc.extra["after"], serde_json::json!("hi\nthere\n"));
+        assert!(!sc.extra.contains_key("before"));
+    }
+
+    #[test]
+    fn test_tool_use_multiedit_emits_per_hunk_diff() {
+        let mut turn = base_turn("t1", Role::Assistant);
+        turn.tool_uses = vec![fw_tool(
+            "MultiEdit",
+            "tu1",
+            serde_json::json!({
+                "file_path": "m.rs",
+                "edits": [
+                    {"old_string": "foo", "new_string": "bar"},
+                    {"old_string": "baz", "new_string": "qux"},
+                ],
+            }),
+        )];
+        let view = view_with(vec![turn]);
+        let path = derive_path(&view, &DeriveConfig::default());
+        let ch = &path.steps[0].change["m.rs"];
+        let raw = ch.raw.as_deref().expect("multiedit should emit diff");
+        assert!(raw.contains("# edit 1/2"));
+        assert!(raw.contains("# edit 2/2"));
+        assert!(raw.contains("-foo"));
+        assert!(raw.contains("+bar"));
+        assert!(raw.contains("-baz"));
+        assert!(raw.contains("+qux"));
     }
 
     #[test]
