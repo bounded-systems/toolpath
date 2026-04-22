@@ -126,6 +126,18 @@ export function update(msg: Msg, m: Model): [Model, Cmd | null] {
       return [m, null];
     }
 
+    // Kick off the Claude projects stream without changing route. Used when
+    // BrowseClaude is embedded inside Home — there's no NavigateTo to rely
+    // on. Idempotent: no-op if already loading or results are cached.
+    case "ClaudeEnsureProjects": {
+      if (m.claude.loadingProjects || m.claude.projects.length > 0 || m.claude.projectsDone) {
+        return [m, null];
+      }
+      return [
+        { ...m, claude: { ...m.claude, loadingProjects: true, projectsDone: false }, error: null },
+        null,
+      ];
+    }
     case "ClaudeProjectReceived":
       return [
         { ...m, claude: { ...m.claude, projects: [...m.claude.projects, msg.project] } },
@@ -213,6 +225,15 @@ export function update(msg: Msg, m: Model): [Model, Cmd | null] {
     }
 
     // --- Pi -------------------------------------------------------------
+    case "PiEnsureProjects": {
+      if (m.pi.loadingProjects || m.pi.projects.length > 0 || m.pi.projectsDone) {
+        return [m, null];
+      }
+      return [
+        { ...m, pi: { ...m.pi, loadingProjects: true, projectsDone: false }, error: null },
+        null,
+      ];
+    }
     case "PiProjectReceived":
       return [
         { ...m, pi: { ...m.pi, projects: [...m.pi.projects, msg.project] } },
@@ -354,6 +375,18 @@ export function update(msg: Msg, m: Model): [Model, Cmd | null] {
     }
 
     // --- GitHub ---------------------------------------------------------
+    case "GithubEnsureTokenStatus": {
+      if (m.github.hasToken !== null) return [m, null];
+      return [
+        m,
+        {
+          type: "invoke",
+          name: "github_has_token",
+          onOk: (b) => ({ t: "GithubTokenStatus", hasToken: !!b }),
+          onErr: (e) => ({ t: "Error", error: e }),
+        },
+      ];
+    }
     case "GithubSetUrl":
       return [{ ...m, github: { ...m.github, url: msg.value } }, null];
     case "GithubTokenStatus":

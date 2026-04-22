@@ -1,23 +1,34 @@
 <script lang="ts">
+  import { onMount } from "svelte";
   import { store } from "../lib/store.svelte";
+  let { embedded = false }: { embedded?: boolean } = $props();
+
+  // When embedded, there's no NavigateTo("browse-github") to probe the
+  // keychain. Do it on mount; idempotent.
+  onMount(() => {
+    store.dispatch({ t: "GithubEnsureTokenStatus" });
+  });
+
   const gh = $derived(store.m.github);
 </script>
 
-<div class="page">
-  <div class="row" style="margin-bottom:14px">
-    <button class="btn btn--ghost" onclick={() => store.dispatch({ t: "NavigateTo", screen: "home" })}>← Back</button>
-  </div>
-
-  <div class="page__header">
-    <div>
-      <div class="page__eyebrow">§1.4 · GITHUB · PULL REQUEST</div>
-      <h1 class="page__title">GitHub pull request</h1>
-      <p class="page__lede">
-        Paste a PR URL. We fetch commits, reviews, and CI checks, then render
-        the derived trace.
-      </p>
+<div class:page={!embedded}>
+  {#if !embedded}
+    <div class="row" style="margin-bottom:14px">
+      <button class="btn btn--ghost" onclick={() => store.dispatch({ t: "NavigateTo", screen: "home" })}>← Back</button>
     </div>
-  </div>
+
+    <div class="page__header">
+      <div>
+        <div class="page__eyebrow">§1.4 · GITHUB · PULL REQUEST</div>
+        <h1 class="page__title">GitHub pull request</h1>
+        <p class="page__lede">
+          Paste a PR URL. We fetch commits, reviews, and CI checks, then render
+          the derived trace.
+        </p>
+      </div>
+    </div>
+  {/if}
 
   <div class="section-label">
     <span class="section-label__num">§1.4.1 ·</span>

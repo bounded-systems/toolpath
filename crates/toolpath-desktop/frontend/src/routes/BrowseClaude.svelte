@@ -1,8 +1,17 @@
 <script lang="ts">
+  import { onMount } from "svelte";
   import { invoke, listen } from "../lib/ipc";
   import { store } from "../lib/store.svelte";
   import SourceLogo from "../lib/SourceLogo.svelte";
   import type { ClaudeProject, ClaudeSession } from "../lib/types";
+
+  let { embedded = false }: { embedded?: boolean } = $props();
+
+  // When embedded (e.g. in Home), there's no NavigateTo("browse-claude") to
+  // seed loadingProjects. Kick it off on mount; the msg is idempotent.
+  onMount(() => {
+    store.dispatch({ t: "ClaudeEnsureProjects" });
+  });
 
   let subscribed: Promise<void> | null = $state(null);
   $effect(() => {
@@ -78,25 +87,27 @@
   );
 </script>
 
-<div class="page">
-  <div class="row" style="margin-bottom:14px">
-    <button class="btn btn--ghost" onclick={() => store.dispatch({ t: "NavigateTo", screen: "home" })}>← Back</button>
-  </div>
-
-  <div class="page__header">
-    <div>
-      <div class="page__eyebrow">§1.1 · CLAUDE CODE · SESSIONS</div>
-      <h1 class="page__title">Claude Code</h1>
-      <p class="page__lede">
-        {#if projectCount === 0 && claude.loadingProjects}
-          Scanning <code>~/.claude/projects/</code> …
-        {:else}
-          {projectCount} project{projectCount === 1 ? "" : "s"}{claude.loadingProjects ? " — still scanning …" : ""}
-        {/if}
-        {#if claude.loadingProjects}<span class="spinner"></span>{/if}
-      </p>
+<div class:page={!embedded}>
+  {#if !embedded}
+    <div class="row" style="margin-bottom:14px">
+      <button class="btn btn--ghost" onclick={() => store.dispatch({ t: "NavigateTo", screen: "home" })}>← Back</button>
     </div>
-  </div>
+
+    <div class="page__header">
+      <div>
+        <div class="page__eyebrow">§1.1 · CLAUDE CODE · SESSIONS</div>
+        <h1 class="page__title">Claude Code</h1>
+        <p class="page__lede">
+          {#if projectCount === 0 && claude.loadingProjects}
+            Scanning <code>~/.claude/projects/</code> …
+          {:else}
+            {projectCount} project{projectCount === 1 ? "" : "s"}{claude.loadingProjects ? " — still scanning …" : ""}
+          {/if}
+          {#if claude.loadingProjects}<span class="spinner"></span>{/if}
+        </p>
+      </div>
+    </div>
+  {/if}
 
   {#if projectCount === 0 && claude.projectsDone}
     <div class="notice">No Claude projects found. Use Claude Code at least once and come back.</div>
