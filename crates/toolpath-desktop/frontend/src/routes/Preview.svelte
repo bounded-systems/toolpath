@@ -244,9 +244,11 @@
         >
           <!-- `zoom` (non-standard but supported in WebKit/Chromium → all
                Tauri runtimes) actually scales layout size, so the outer
-               scroll container sees correct content bounds. Transform:scale
-               would only rescale visuals and leave the scrollbars wrong. -->
-          <div class="graph-zoom" style="zoom: {zoom};" bind:this={canvasEl}></div>
+               scroll container sees correct content bounds. We fall back to
+               `transform: scale` with inverse-compensated width/height in
+               the stylesheet for engines that don't implement `zoom`
+               (e.g. Firefox), via an `@supports not (zoom: 2)` block. -->
+          <div class="graph-zoom" style="--pg-zoom: {zoom}" bind:this={canvasEl}></div>
         </div>
 
         <div style="margin-top:12px; font-family:var(--font-mono); font-size:10px; color:var(--ink-4); letter-spacing:0.08em; text-transform:uppercase; display:flex; gap:16px; align-items:center; border-top:0.5px solid var(--ink-5); padding-top:8px">
