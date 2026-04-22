@@ -36,6 +36,12 @@ pub enum ListSource {
     },
     /// List Codex CLI sessions (global, newest first)
     Codex {},
+    /// List opencode sessions (global, newest first)
+    Opencode {
+        /// Filter by project id (SHA of repo's first root commit)
+        #[arg(short, long)]
+        project: Option<String>,
+    },
     /// List Pi (pi.dev) projects or sessions
     Pi {
         /// Project path — if omitted, lists all projects
@@ -55,6 +61,7 @@ pub fn run(source: ListSource, json: bool) -> Result<()> {
         ListSource::Claude { project } => run_claude(project, json),
         ListSource::Gemini { project } => run_gemini(project, json),
         ListSource::Codex {} => run_codex(json),
+        ListSource::Opencode { project } => run_opencode(project, json),
         ListSource::Pi { project, base } => run_pi(project, base, json),
     }
 }
@@ -412,6 +419,76 @@ fn run_codex(json: bool) -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn run_opencode(project: Option<String>, json: bool) -> Result<()> {
+    #[cfg(target_os = "emscripten")]
+    {
+        let _ = (project, json);
+        anyhow::bail!(
+            "'path list opencode' requires a native environment (SQLite + git2 not available under wasm)"
+        );
+    }
+
+    #[cfg(not(target_os = "emscripten"))]
+    {
+        let manager = toolpath_opencode::OpencodeConvo::new();
+        let metas = manager
+            .io()
+            .list_session_metadata(project.as_deref())
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
+
+        if json {
+            let items: Vec<serde_json::Value> = metas
+                .iter()
+                .map(|m| {
+                    serde_json::json!({
+                        "id": m.id,
+                        "project_id": m.project_id,
+                        "directory": m.directory,
+                        "title": m.title,
+                        "version": m.version,
+                        "started_at": m.started_at.map(|t| t.to_rfc3339()),
+                        "last_activity": m.last_activity.map(|t| t.to_rfc3339()),
+                        "message_count": m.message_count,
+                        "first_user_message": m.first_user_message,
+                        "summary_additions": m.summary_additions,
+                        "summary_deletions": m.summary_deletions,
+                        "summary_files": m.summary_files,
+                    })
+                })
+                .collect();
+            let output = serde_json::json!({
+                "source": "opencode",
+                "project": project,
+                "sessions": items,
+            });
+            println!("{}", serde_json::to_string_pretty(&output)?);
+        } else if metas.is_empty() {
+            println!("No opencode sessions found in the database.");
+        } else {
+            println!("opencode sessions:");
+            println!();
+            for m in &metas {
+                let date = m
+                    .last_activity
+                    .map(|t| t.format("%Y-%m-%d %H:%M").to_string())
+                    .unwrap_or_else(|| "unknown".to_string());
+                let id_short: String = m.id.trim_start_matches("ses_").chars().take(10).collect();
+                let prompt = m
+                    .first_user_message
+                    .as_deref()
+                    .map(|s| truncate(s, 60))
+                    .unwrap_or_default();
+                let dir = m.directory.to_string_lossy();
+                println!(
+                    "  {} {:>4} msgs  {}  {}  {}",
+                    id_short, m.message_count, date, dir, prompt
+                );
+            }
+        }
+        Ok(())
+    }
 }
 
 fn run_pi(project: Option<String>, base: Option<PathBuf>, json: bool) -> Result<()> {

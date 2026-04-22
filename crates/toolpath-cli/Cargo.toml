@@ -30,6 +30,7 @@ rand = "0.9"
 toolpath-claude = { workspace = true, features = ["watcher"] }
 toolpath-gemini = { workspace = true, features = ["watcher"] }
 toolpath-codex = { workspace = true }
+toolpath-opencode = { workspace = true }
 toolpath-pi = { workspace = true }
 toolpath-convo = { workspace = true }
 toolpath-github = { workspace = true }
