@@ -701,6 +701,23 @@ html, body {
      small. viz.ts sets explicit px width/height on .path-graph below. */
   min-width: 100%;
   min-height: 100%;
+  /* Non-standard but supported across every WebKit/Chromium-based runtime
+     we ship against (macOS WebKit, WebView2). `zoom` rescales layout, so
+     the outer `.graph-scroll` sees correct content bounds. */
+  zoom: var(--pg-zoom, 1);
+}
+/* Fallback for engines without `zoom` (Firefox, anything non-WebKit/Chromium
+   we might hit via `bun run dev` in a plain browser). `transform: scale`
+   only rescales visuals, so we inverse-compensate width/height on this
+   wrapper; the inner `.path-graph` has explicit px dims from dagre, and
+   those dims flow back up through the scaled wrapper for correct scrollbars. */
+@supports not (zoom: 2) {
+  .graph-zoom {
+    transform: scale(var(--pg-zoom, 1));
+    transform-origin: 0 0;
+    width: calc(100% / var(--pg-zoom, 1));
+    height: calc(100% / var(--pg-zoom, 1));
+  }
 }
 
 /* Zoom toolbar */
