@@ -155,6 +155,9 @@ export interface GithubSlice {
   deriving: boolean;
 }
 
+export type TreeFilter = "all" | "head" | "dead";
+export type PreviewViewMode = "chat" | "graph";
+
 export interface PreviewSlice {
   doc: Document;
   source: string;
@@ -166,6 +169,11 @@ export interface PreviewSlice {
   showTs: boolean;
   showFiles: boolean;
   vizEpoch: number;
+  /** Step-tree sidebar: substring search across id, actor, intent. */
+  treeQuery: string;
+  treeFilter: TreeFilter;
+  /** Primary pane: chat-style transcript of HEAD path, or DAG graph. */
+  viewMode: PreviewViewMode;
   exporting: boolean;
   uploading: boolean;
 }
@@ -239,6 +247,9 @@ export type Msg =
   | { t: "PreviewToggle"; key: "showTs" | "showFiles" }
   | { t: "PreviewToggleBranch"; nodeId: string }
   | { t: "PreviewSelectStep"; step: StepRef; actors: Record<string, ActorDef> | null }
+  | { t: "PreviewSetTreeQuery"; value: string }
+  | { t: "PreviewSetTreeFilter"; value: TreeFilter }
+  | { t: "PreviewSetViewMode"; value: PreviewViewMode }
   | { t: "PreviewExport" }
   | { t: "PreviewExportDone" }
   | { t: "PreviewUpload" }

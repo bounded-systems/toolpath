@@ -12,6 +12,8 @@
 // `containerEl` from scratch.
 
 import * as dagre from "@dagrejs/dagre";
+import { classify } from "./classify";
+import { renderMarkdown } from "./markdown";
 import type { ActorDef, Document, StepRef } from "./types";
 
 export interface RenderOpts {
@@ -25,7 +27,7 @@ export interface RenderOpts {
 
 // ─── Document normalization ──────────────────────────────────────────────
 
-interface Normalized {
+export interface Normalized {
   steps: StepRef[];
   head: string | null;
   actors: Record<string, ActorDef> | null;
@@ -34,7 +36,7 @@ interface Normalized {
   headSet: Set<string>;
 }
 
-function normalize(doc: Document): Normalized {
+export function normalize(doc: Document): Normalized {
   let steps: StepRef[] = [];
   let head: string | null = null;
   let actors: Record<string, ActorDef> | null = null;
@@ -81,11 +83,11 @@ function normalize(doc: Document): Normalized {
 
 // ─── Visibility + helpers ────────────────────────────────────────────────
 
-function actorType(a: string): string {
+export function actorType(a: string): string {
   const i = a.indexOf(":");
   return i < 0 ? a : a.slice(0, i);
 }
-function actorName(
+export function actorName(
   a: string,
   actors: Record<string, ActorDef> | null,
 ): string {
@@ -163,9 +165,17 @@ function renderCard(
   const changeKeys = s.change ? Object.keys(s.change) : [];
   const hasHidden = flags.deadKids > 0 && !flags.isExpanded;
 
+  // Pull the same fields the chat view uses so card bodies mirror chat.
+  const classified = classify(s);
+  const bodyText = classified.text ?? s.meta?.intent ?? "";
+  const speaker =
+    classified.kind === "user" ? "You" : actorName(s.step.actor, flags.actors);
+  const kindClass = `pg-card--kind-${classified.kind}`;
+
   const classes = [
     "pg-card",
     `pg-card--role-${atype}`,
+    kindClass,
     flags.isHead ? "pg-card--head" : "",
     flags.isDead ? "pg-card--dead" : "",
     flags.isFocused ? "pg-card--focused" : "",
@@ -185,10 +195,9 @@ function renderCard(
       ? `<button class="pg-card__toggle${flags.isExpanded ? " pg-card__toggle--on" : ""}" data-toggle-branch="${esc(id)}">${flags.isExpanded ? "collapse" : "expand"}</button>`
       : "";
 
-  const intent = s.meta?.intent ? esc(s.meta.intent) : "";
-  const ts =
+  const tsText =
     flags.showTs && s.step.timestamp
-      ? `<div class="pg-card__ts">${esc(s.step.timestamp.replace("T", " ").replace("Z", " UTC"))}</div>`
+      ? esc(s.step.timestamp.replace("T", " ").replace("Z", " UTC"))
       : "";
   const files =
     flags.showFiles && changeKeys.length
@@ -197,15 +206,54 @@ function renderCard(
           .join(" · ")}</div>`
       : "";
 
+  // Tool-invoke: label + name, no body text.
+  if (classified.kind === "tool") {
+    return `
+      <div class="${classes}" id="pg-card-${cssSafeId(id)}" data-step-id="${esc(id)}">
+        <div class="pg-card__head">
+          <span class="pg-card__tool-name">${esc(classified.toolName ?? "tool")}</span>
+          <div class="pg-card__chips">${chips.join("")}</div>
+        </div>
+        <div class="pg-card__actor">${esc(actorName(s.step.actor, flags.actors))}${tsText ? " · " + tsText : ""}</div>
+        ${files}
+        ${toggle ? `<div class="pg-card__footer">${toggle}</div>` : ""}
+      </div>`;
+  }
+
+  // System/init/event: compact meta row only.
+  if (classified.kind === "system") {
+    const label = bodyText || classified.model || "system";
+    return `
+      <div class="${classes}" id="pg-card-${cssSafeId(id)}" data-step-id="${esc(id)}">
+        <div class="pg-card__head">
+          <span class="pg-card__sys-label">${esc(label)}</span>
+          <div class="pg-card__chips">${chips.join("")}</div>
+        </div>
+        <div class="pg-card__actor">${esc(actorName(s.step.actor, flags.actors))}${tsText ? " · " + tsText : ""}</div>
+        ${toggle ? `<div class="pg-card__footer">${toggle}</div>` : ""}
+      </div>`;
+  }
+
+  // Assistant / user: chat-shaped body.
+  const toolUses = classified.toolNames.length
+    ? `<div class="pg-card__tools">
+        <span class="pg-card__tools-label">Used</span>
+        ${classified.toolNames.map((n) => `<span class="pg-card__tool-chip">${esc(n)}</span>`).join("")}
+      </div>`
+    : "";
+
   return `
     <div class="${classes}" id="pg-card-${cssSafeId(id)}" data-step-id="${esc(id)}">
       <div class="pg-card__head">
-        <span class="pg-card__id">${esc(id)}</span>
+        <span class="pg-card__speaker">${esc(speaker)}</span>
+        ${classified.model ? `<span class="pg-card__model">${esc(classified.model)}</span>` : ""}
         <div class="pg-card__chips">${chips.join("")}</div>
       </div>
-      ${intent ? `<div class="pg-card__intent">${intent}</div>` : ""}
-      <div class="pg-card__actor">${esc(actorName(s.step.actor, flags.actors))}</div>
-      ${ts}
+      ${bodyText
+        ? `<div class="pg-card__body markdown markdown--compact">${renderMarkdown(bodyText)}</div>`
+        : `<div class="pg-card__body pg-card__body--empty">(no message text)</div>`}
+      ${toolUses}
+      ${tsText ? `<div class="pg-card__ts">${tsText}</div>` : ""}
       ${files}
       ${toggle ? `<div class="pg-card__footer">${toggle}</div>` : ""}
     </div>`;
