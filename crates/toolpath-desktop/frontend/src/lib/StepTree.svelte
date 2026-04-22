@@ -15,7 +15,8 @@
   ];
 
   const preview = $derived(store.m.preview);
-  const built = $derived(preview ? buildTree(preview.doc) : null);
+  const doc = $derived(preview?.doc ?? null);
+  const built = $derived(doc ? buildTree(doc) : null);
   const query = $derived((preview?.treeQuery ?? "").trim().toLowerCase());
   const filter = $derived<TreeFilter>(preview?.treeFilter ?? "all");
   const rows = $derived<FlatNode[]>(

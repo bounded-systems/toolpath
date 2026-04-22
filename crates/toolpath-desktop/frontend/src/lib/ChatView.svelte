@@ -19,7 +19,8 @@
   } from "./tree";
 
   const preview = $derived(store.m.preview);
-  const built = $derived(preview ? buildTree(preview.doc) : null);
+  const doc = $derived(preview?.doc ?? null);
+  const built = $derived(doc ? buildTree(doc) : null);
   const turns = $derived<ChatTurn[]>(built ? flattenChatHead(built.norm) : []);
   const selectedId = $derived(preview?.selectedStep?.step.id ?? null);
 
