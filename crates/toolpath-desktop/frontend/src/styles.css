@@ -43,6 +43,10 @@
   --warn:            var(--contour);
   --err:             var(--road);
 
+  /* Role-specific surface tokens (used by .pg-card states) */
+  --pg-card-dead-bg:   #fcfaf6;
+  --pg-card-toggle-bg: #faf6ee;
+
   --font-serif:      "Source Serif 4", "Source Serif Pro", "Times New Roman", Times, Georgia, serif;
   --font-display:    "Source Serif 4", Georgia, serif;
   --font-mono:       "JetBrains Mono", "IBM Plex Mono", ui-monospace, Menlo, monospace;
@@ -62,6 +66,51 @@
   --mono:            var(--font-mono);
   --sans:            var(--font-sans);
 }
+
+/* ==========================================================================
+   DARK MODE — "Soft graphite" night survey paper.
+   A first-class companion to light mode. Toggle via <html data-theme="dark">.
+   Moss-smudged paper, warm cream ink, muted territory hues.
+   ========================================================================== */
+:root[data-theme="dark"] {
+  --paper:           #2e3230;
+  --paper-2:         #353a37;
+  --paper-3:         #3d423e;
+  --paper-bright:    #373c39;
+  --paper-white:     #424742;
+
+  --ink:             #e8e5d6;
+  --ink-2:           #ccc9ba;
+  --ink-3:           #97968a;
+  --ink-4:           #6a6c62;
+  --ink-5:           #4c4f4a;
+
+  --contour:         #c8a76e;
+  --contour-2:       #d9b67c;
+  --contour-faint:   #7f6c4c;
+
+  --water:           #9ab3c4;
+  --water-wash:      #3e4c54;
+  --forest:          #b6c68e;
+  --forest-wash:     #3f4a36;
+  --road:            #d38c74;
+  --road-2:          #de9d86;
+  --road-wash:       #4a342c;
+  --boundary:        #bf8fab;
+
+  --pg-card-dead-bg:   var(--paper-2);
+  --pg-card-toggle-bg: var(--paper-2);
+
+  color-scheme: dark;
+}
+
+/* No lighter "frame" around the window in dark mode — let the paper run
+   edge-to-edge. Also sit the active tab a shade below the page so it
+   reads as pressed-in, not raised. */
+:root[data-theme="dark"] html,
+:root[data-theme="dark"] body { background: var(--paper); }
+:root[data-theme="dark"] .window { border-color: transparent; }
+:root[data-theme="dark"] .tabs__item--active { background: #24272a; }
 
 * { box-sizing: border-box; }
 html, body {
@@ -179,6 +228,42 @@ html, body {
   border: 0.5px solid var(--road);
   color: var(--road);
   margin-left: 4px;
+}
+
+/* ---------- Theme toggle (sits at the end of the tabs bar) ---------- */
+.theme-toggle {
+  margin-left: auto;
+  align-self: center;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  margin-right: 18px;
+  background: transparent;
+  border: 0.5px solid var(--ink-5);
+  color: var(--ink-3);
+  cursor: pointer;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  border-radius: 2px;
+  transition: all 120ms var(--ease);
+}
+.theme-toggle:hover {
+  border-color: var(--ink);
+  color: var(--ink);
+}
+.theme-toggle__glyph {
+  font-size: 13px;
+  color: var(--contour-2);
+  line-height: 1;
+}
+
+/* In dark mode, invert the subtle contour backdrop so it still reads. */
+:root[data-theme="dark"] .backdrop {
+  filter: invert(1);
+  opacity: 0.05;
 }
 
 /* ---------- Main scroll area ---------- */
@@ -842,7 +927,7 @@ dl.dl-grid dd {
 .pg-card--role-ci    { border-left-color: var(--text-muted); }
 .pg-card--dead {
   border-left-color: var(--danger);
-  background: #fcfaf6;
+  background: var(--pg-card-dead-bg);
 }
 .pg-card--head {
   border-color: var(--accent);
@@ -941,7 +1026,7 @@ dl.dl-grid dd {
   font-family: var(--mono);
   padding: 2px 8px;
   border: 1px solid var(--border);
-  background: #faf6ee;
+  background: var(--pg-card-toggle-bg);
   color: var(--text-muted);
   border-radius: 3px;
   cursor: pointer;

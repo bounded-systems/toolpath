@@ -27,6 +27,32 @@
         if (r.startsWith("browse-")) return "home";
         return r;
     }
+
+    // Theme — soft-graphite dark mode, persisted to localStorage and applied
+    // via <html data-theme="dark">. Mirrors the Pathbase design system.
+    type Theme = "light" | "dark";
+    const THEME_KEY = "toolpath.theme";
+
+    function readInitialTheme(): Theme {
+        if (typeof window === "undefined") return "light";
+        const saved = window.localStorage.getItem(THEME_KEY);
+        if (saved === "light" || saved === "dark") return saved;
+        return window.matchMedia?.("(prefers-color-scheme: dark)").matches
+            ? "dark"
+            : "light";
+    }
+
+    let theme = $state<Theme>(readInitialTheme());
+
+    $effect(() => {
+        if (typeof document === "undefined") return;
+        document.documentElement.setAttribute("data-theme", theme);
+        window.localStorage.setItem(THEME_KEY, theme);
+    });
+
+    function toggleTheme() {
+        theme = theme === "dark" ? "light" : "dark";
+    }
 </script>
 
 <div class="backdrop"></div>
@@ -51,6 +77,21 @@
                 <span>{t.label}</span>
             </button>
         {/each}
+        <button
+            type="button"
+            class="theme-toggle"
+            onclick={toggleTheme}
+            aria-label="Toggle theme"
+            aria-pressed={theme === "dark"}
+            title={theme === "dark"
+                ? "Switch to light mode"
+                : "Switch to dark mode"}
+        >
+            <span class="theme-toggle__glyph" aria-hidden="true"
+                >{theme === "dark" ? "◑" : "◐"}</span
+            >
+            <span>{theme === "dark" ? "Dark" : "Light"}</span>
+        </button>
     </nav>
 
     <!-- Main scroll area -->
