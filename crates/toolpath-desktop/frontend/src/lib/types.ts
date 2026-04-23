@@ -121,7 +121,6 @@ export interface ClaudeSlice {
   sessionsByPath: Record<string, ClaudeSession[]>;
   sessionsLoading: Record<string, boolean>;
   titles: Record<string, string>;        // `${path}|${sid}` → title
-  selected: Record<string, Record<string, true>>; // path → sid set
   deriving: boolean;
 }
 
@@ -132,7 +131,6 @@ export interface PiSlice {
   expanded: string | null;
   sessionsByPath: Record<string, PiSession[]>;
   sessionsLoading: Record<string, boolean>;
-  selected: Record<string, Record<string, true>>;
   deriving: boolean;
 }
 
@@ -202,9 +200,8 @@ export type Msg =
   | { t: "ClaudeExpandProject"; path: string }
   | { t: "ClaudeSessionReceived"; session: ClaudeSession }
   | { t: "ClaudeSessionsDone"; path: string }
-  | { t: "ClaudeToggleSession"; path: string; sid: string }
   | { t: "ClaudeTitleLoaded"; path: string; sid: string; title: string | null }
-  | { t: "ClaudeDerive" }
+  | { t: "ClaudeDerive"; path: string; sid: string }
 
   // Pi
   | { t: "PiEnsureProjects" }
@@ -214,8 +211,7 @@ export type Msg =
   | { t: "PiExpandProject"; path: string }
   | { t: "PiSessionReceived"; session: PiSession }
   | { t: "PiSessionsDone"; path: string }
-  | { t: "PiToggleSession"; path: string; sid: string }
-  | { t: "PiDerive" }
+  | { t: "PiDerive"; path: string; sid: string }
 
   // Git
   | { t: "GitSetRepoPath"; value: string }

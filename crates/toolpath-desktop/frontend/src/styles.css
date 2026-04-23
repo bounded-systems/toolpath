@@ -825,7 +825,7 @@ html, body {
   padding: 18px 28px 28px;
 }
 .preview-body--split {
-  grid-template-columns: 380px 1fr;
+  grid-template-columns: 380px minmax(0, 1fr);
   padding: 0;
 }
 .preview-body--split > .preview-body__left {

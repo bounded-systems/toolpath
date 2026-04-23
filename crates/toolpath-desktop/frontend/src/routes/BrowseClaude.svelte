@@ -82,9 +82,6 @@
 
   const claude = $derived(store.m.claude);
   const projectCount = $derived(claude.projects.length);
-  const selectedCount = $derived(
-    Object.values(claude.selected).reduce((acc, s) => acc + Object.keys(s || {}).length, 0),
-  );
 </script>
 
 <div class:page={!embedded}>
@@ -115,7 +112,6 @@
     <div style="border:0.5px solid var(--ink-5); background:var(--paper-bright)">
       {#each claude.projects as p (p.project_path)}
         {@const isExpanded = claude.expanded === p.project_path}
-        {@const selectedForProject = Object.keys(claude.selected[p.project_path] ?? {}).length}
         <div>
           <button
             class={"row-card" + (isExpanded ? " row-card--selected" : "")}
@@ -128,7 +124,6 @@
             </div>
             <div class="row-card__right">
               {p.session_count} session{p.session_count === 1 ? "" : "s"}
-              {#if selectedForProject > 0}<br/><span style="color:var(--road)">{selectedForProject} selected</span>{/if}
             </div>
           </button>
           {#if isExpanded}
@@ -143,25 +138,9 @@
                 <div style="padding:12px 18px"><div class="notice">No sessions in this project.</div></div>
               {:else}
                 {#each sessions as s (s.session_id)}
-                  {@const isChecked = !!(claude.selected[p.project_path] ?? {})[s.session_id]}
                   {@const title = claude.titles[`${p.project_path}|${s.session_id}`]}
-                  <label
-                    class={"row-card" + (isChecked ? " row-card--selected" : "")}
-                    style="padding-left:36px"
-                    onclick={(ev: MouseEvent) => {
-                      if ((ev.target as HTMLElement).tagName !== "INPUT") {
-                        ev.preventDefault();
-                        store.dispatch({ t: "ClaudeToggleSession", path: p.project_path, sid: s.session_id });
-                      }
-                    }}
-                  >
-                    <input
-                      type="checkbox"
-                      class="checkbox"
-                      checked={isChecked}
-                      onclick={(ev: MouseEvent) => ev.stopPropagation()}
-                      onchange={() => store.dispatch({ t: "ClaudeToggleSession", path: p.project_path, sid: s.session_id })}
-                    />
+                  <div class="row-card" style="padding-left:36px; cursor:default">
+                    <span class="row-card__marker"></span>
                     <div style="min-width:0">
                       <div class="row-card__title">
                         {#if title}{title}{:else}<span class="row-card__sub">loading title…</span>{/if}
@@ -172,8 +151,12 @@
                         <span>{s.session_id.slice(0, 8)}</span>
                       </div>
                     </div>
-                    <span class="row-card__right"></span>
-                  </label>
+                    <button
+                      class="btn btn--accent btn--sm"
+                      disabled={claude.deriving}
+                      onclick={() => store.dispatch({ t: "ClaudeDerive", path: p.project_path, sid: s.session_id })}
+                    >{claude.deriving ? "Deriving…" : "Select →"}</button>
+                  </div>
                 {/each}
                 {#if loading}
                   <div style="padding:10px 18px; font-family:var(--font-mono); font-size:11px; color:var(--ink-3)">
@@ -187,16 +170,4 @@
       {/each}
     </div>
   {/if}
-
-  <div class="row" style="margin-top:18px">
-    <span class="spacer"></span>
-    <span style="font-family:var(--font-mono); font-size:11px; color:var(--ink-3); letter-spacing:0.06em">
-      {selectedCount || "No"} session{selectedCount === 1 ? "" : "s"} selected
-    </span>
-    <button
-      class="btn btn--accent"
-      disabled={!selectedCount || claude.deriving}
-      onclick={() => store.dispatch({ t: "ClaudeDerive" })}
-    >{claude.deriving ? "Deriving…" : "Preview →"}</button>
-  </div>
 </div>

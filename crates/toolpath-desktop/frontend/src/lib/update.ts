@@ -18,7 +18,6 @@ export function initialModel(): Model {
       sessionsByPath: {},
       sessionsLoading: {},
       titles: {},
-      selected: {},
       deriving: false,
     },
     pi: {
@@ -28,7 +27,6 @@ export function initialModel(): Model {
       expanded: null,
       sessionsByPath: {},
       sessionsLoading: {},
-      selected: {},
       deriving: false,
     },
     git: {
@@ -190,34 +188,21 @@ export function update(msg: Msg, m: Model): [Model, Cmd | null] {
         { ...m, claude: { ...m.claude, sessionsLoading: { ...m.claude.sessionsLoading, [msg.path]: false } } },
         null,
       ];
-    case "ClaudeToggleSession": {
-      const sel = { ...(m.claude.selected[msg.path] ?? {}) };
-      if (sel[msg.sid]) delete sel[msg.sid];
-      else sel[msg.sid] = true;
-      return [
-        { ...m, claude: { ...m.claude, selected: { ...m.claude.selected, [msg.path]: sel } } },
-        null,
-      ];
-    }
     case "ClaudeTitleLoaded": {
       const titles = { ...m.claude.titles, [`${msg.path}|${msg.sid}`]: msg.title ?? "" };
       return [{ ...m, claude: { ...m.claude, titles } }, null];
     }
     case "ClaudeDerive": {
-      const path = Object.keys(m.claude.selected).find(
-        (p) => Object.keys(m.claude.selected[p] ?? {}).length > 0,
-      );
-      if (!path) return [m, null];
-      const sessionIds = Object.keys(m.claude.selected[path] ?? {});
+      const { path, sid } = msg;
       const displayName = path.split("/").filter(Boolean).pop() ?? "claude";
-      const shortId = sessionIds[0]?.slice(0, 8) ?? "";
-      const filename = `${displayName}${shortId ? `-${shortId}` : ""}.path.json`;
+      const shortId = sid.slice(0, 8);
+      const filename = `${displayName}-${shortId}.path.json`;
       return [
         { ...m, claude: { ...m.claude, deriving: true }, error: null },
         {
           type: "invoke",
           name: "derive_claude",
-          args: { projectPath: path, sessionIds, includeThinking: false },
+          args: { projectPath: path, sessionIds: [sid], includeThinking: false },
           onOk: (doc) => ({ t: "DeriveSucceeded", doc: doc as import("./types").Document, source: `Claude: ${displayName}`, filename }),
           onErr: (e) => ({ t: "DeriveFailed", error: e }),
         },
@@ -276,30 +261,17 @@ export function update(msg: Msg, m: Model): [Model, Cmd | null] {
         { ...m, pi: { ...m.pi, sessionsLoading: { ...m.pi.sessionsLoading, [msg.path]: false } } },
         null,
       ];
-    case "PiToggleSession": {
-      const sel = { ...(m.pi.selected[msg.path] ?? {}) };
-      if (sel[msg.sid]) delete sel[msg.sid];
-      else sel[msg.sid] = true;
-      return [
-        { ...m, pi: { ...m.pi, selected: { ...m.pi.selected, [msg.path]: sel } } },
-        null,
-      ];
-    }
     case "PiDerive": {
-      const path = Object.keys(m.pi.selected).find(
-        (p) => Object.keys(m.pi.selected[p] ?? {}).length > 0,
-      );
-      if (!path) return [m, null];
-      const sessionIds = Object.keys(m.pi.selected[path] ?? {});
+      const { path, sid } = msg;
       const displayName = path.split("/").filter(Boolean).pop() ?? "pi";
-      const shortId = sessionIds[0]?.slice(0, 8) ?? "";
-      const filename = `${displayName}${shortId ? `-${shortId}` : ""}.path.json`;
+      const shortId = sid.slice(0, 8);
+      const filename = `${displayName}-${shortId}.path.json`;
       return [
         { ...m, pi: { ...m.pi, deriving: true }, error: null },
         {
           type: "invoke",
           name: "derive_pi",
-          args: { projectPath: path, sessionIds, includeThinking: false },
+          args: { projectPath: path, sessionIds: [sid], includeThinking: false },
           onOk: (doc) => ({
             t: "DeriveSucceeded",
             doc: doc as import("./types").Document,
