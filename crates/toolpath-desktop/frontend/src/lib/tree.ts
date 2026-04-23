@@ -106,9 +106,27 @@ export function matchesFilter(
 }
 
 /** Convenience: normalize + flatten in one call. */
+/**
+ * `buildTree` is called from multiple `$derived` blocks (StepTree +
+ * ChatView), so without memoisation the same doc gets normalised + flattened
+ * twice on every preview open. Memo by doc identity — callers only ever pass
+ * `store.m.preview.doc` which is a stable reference between re-renders. A
+ * `WeakMap` keeps the cache GC-friendly: once the doc is replaced (new
+ * derive) the old entry is collectable.
+ */
+type BuiltTree = { norm: Normalized; nodes: FlatNode[] };
+const treeCache = new WeakMap<object, BuiltTree>();
+
 export function buildTree(
   doc: Parameters<typeof normalize>[0],
-): { norm: Normalized; nodes: FlatNode[] } {
+): BuiltTree {
+  // `doc` is a JSON object at the top level (Step/Path/Graph wrapper), so
+  // WeakMap can key on it directly.
+  const cached = treeCache.get(doc as object);
+  if (cached) {
+    perfMark(`buildTree cache-hit (${cached.norm.steps.length}st)`);
+    return cached;
+  }
   const t0 = performance.now();
   const norm = normalize(doc);
   const tNorm = performance.now() - t0;
@@ -117,7 +135,9 @@ export function buildTree(
   perfMark(
     `buildTree (${norm.steps.length}st ${tTotal.toFixed(0)}ms: norm ${tNorm.toFixed(0)} + flat ${(tTotal - tNorm).toFixed(0)})`,
   );
-  return { norm, nodes };
+  const built = { norm, nodes };
+  treeCache.set(doc as object, built);
+  return built;
 }
 
 // ─── Chat / transcript view ──────────────────────────────────────────────
@@ -193,7 +213,16 @@ function firstRawDiff(
  * advance HEAD), so a naive parent-walk would skip them and you'd see
  * "Used Edit" chips with no actual tool output in the transcript.
  */
+// Memo by norm identity. Same rationale as buildTree — ChatView's `$derived`
+// block calls this, and it's expensive (markdown rendering dominates).
+const flattenCache = new WeakMap<Normalized, ChatTurn[]>();
+
 export function flattenChatHead(norm: Normalized): ChatTurn[] {
+  const cached = flattenCache.get(norm);
+  if (cached) {
+    perfMark(`flattenChatHead cache-hit (${cached.length}t)`);
+    return cached;
+  }
   const { steps, head, actors, stepMap, childrenMap } = norm;
   const t0 = performance.now();
 
@@ -273,5 +302,6 @@ export function flattenChatHead(norm: Normalized): ChatTurn[] {
   perfMark(
     `flattenChatHead (${out.length}t ${total.toFixed(0)}ms: md ${mdMs.toFixed(0)}ms × ${mdCount})`,
   );
+  flattenCache.set(norm, out);
   return out;
 }
