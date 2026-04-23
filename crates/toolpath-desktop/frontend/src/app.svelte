@@ -1,5 +1,7 @@
 <script lang="ts">
     import { store } from "./lib/store.svelte";
+    import { listen } from "./lib/ipc";
+    import type { UnlistenFn } from "@tauri-apps/api/event";
     import Home from "./routes/Home.svelte";
     import BrowseAgents from "./routes/BrowseAgents.svelte";
     import BrowseClaude from "./routes/BrowseClaude.svelte";
@@ -8,7 +10,7 @@
     import BrowseGithub from "./routes/BrowseGithub.svelte";
     import Preview from "./routes/Preview.svelte";
     import Result from "./routes/Result.svelte";
-    import type { Route } from "./lib/types";
+    import type { Document, Route } from "./lib/types";
 
     const notInTauri =
         typeof window !== "undefined" &&
@@ -53,6 +55,28 @@
     function toggleTheme() {
         theme = theme === "dark" ? "light" : "dark";
     }
+
+    // Quick View menu-bar → main window: when the user clicks a recent
+    // session in the tray popover, the Rust side derives the doc and emits
+    // `trace:opened` here. We route it through the standard DeriveSucceeded
+    // flow so the reducer navigates to the preview route.
+    interface TraceOpenedPayload {
+        doc: Document;
+        source: string;
+        filename: string;
+    }
+    $effect(() => {
+        let unlisten: UnlistenFn | undefined;
+        listen<TraceOpenedPayload>("trace:opened", (payload) => {
+            store.dispatch({
+                t: "DeriveSucceeded",
+                doc: payload.doc,
+                source: payload.source,
+                filename: payload.filename,
+            });
+        }).then((fn) => (unlisten = fn));
+        return () => unlisten?.();
+    });
 </script>
 
 <div class="backdrop"></div>

@@ -1,5 +1,6 @@
 import { defineConfig } from "vite";
 import { svelte } from "@sveltejs/vite-plugin-svelte";
+import { resolve } from "node:path";
 
 // Tauri expects a fixed port; strictPort = fail if taken rather than pick
 // another one behind its back.
@@ -25,5 +26,13 @@ export default defineConfig({
     // panel readable and avoids weird code-splitting behaviour in the
     // webview.
     chunkSizeWarningLimit: 1500,
+    rollupOptions: {
+      // Two HTML entries: the main window (index.html) and the tray popover
+      // (popover.html). Both are bundled into frontend/dist by Tauri.
+      input: {
+        main: resolve(__dirname, "index.html"),
+        popover: resolve(__dirname, "popover.html"),
+      },
+    },
   },
 });

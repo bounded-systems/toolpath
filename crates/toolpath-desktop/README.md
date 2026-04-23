@@ -18,6 +18,14 @@ intended for people who won't open a terminal to run the `path` CLI.
 3. **Export** — save the document as a local `.path.json` file, **or** upload
    it to Pathbase. The Pathbase upload is stubbed in v0.1 and logs a mock
    response; the real API will be wired up in a follow-up.
+4. **Quick View (menu bar)** — a tray icon that sits alongside the regular
+   Dock-icon app. A background thread polls every 30s across all five agent
+   providers (`toolpath-claude`, `-gemini`, `-codex`, `-opencode`, `-pi`)
+   and updates the tray title with an activity count. Left-click opens a
+   small popover listing recent sessions; the menu has an "Open Toolpath"
+   item that brings up the main window, and clicking a recent session in
+   the popover opens its trace directly in the preview. See `src/tray.rs`
+   and `frontend/src/routes/Popover.svelte`.
 
 ## Architecture
 
