@@ -30,7 +30,6 @@ similar = { workspace = true }
 chrono = { workspace = true }
 tempfile = { workspace = true }
 rand = "0.9"
-reqwest = { workspace = true }
 
 [target.'cfg(not(target_os = "emscripten"))'.dependencies]
 toolpath-claude = { workspace = true, features = ["watcher"] }
@@ -41,6 +40,7 @@ toolpath-pi = { workspace = true }
 toolpath-convo = { workspace = true }
 toolpath-github = { workspace = true }
 git2 = { workspace = true }
+reqwest = { workspace = true }
 
 [target.'cfg(target_os = "emscripten")'.dependencies]
 toolpath-claude = { workspace = true }

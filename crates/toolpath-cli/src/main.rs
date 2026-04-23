@@ -1,3 +1,4 @@
+#[cfg(not(target_os = "emscripten"))]
 mod cmd_auth;
 mod cmd_derive;
 mod cmd_haiku;
@@ -86,6 +87,7 @@ enum Commands {
     /// Print a random Toolpath haiku
     Haiku,
     /// Manage Pathbase credentials for trace uploads
+    #[cfg(not(target_os = "emscripten"))]
     Auth {
         #[command(subcommand)]
         op: cmd_auth::AuthOp,
@@ -109,6 +111,7 @@ fn main() -> Result<()> {
             cmd_haiku::run();
             Ok(())
         }
+        #[cfg(not(target_os = "emscripten"))]
         Commands::Auth { op } => cmd_auth::run(op),
     }
 }
