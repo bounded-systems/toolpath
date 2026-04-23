@@ -5,6 +5,7 @@
 
 mod commands;
 mod error;
+mod tray;
 
 use commands::{derive, export, keychain, sources, upload};
 
@@ -12,6 +13,11 @@ fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_positioner::init())
+        .setup(|app| {
+            tray::install(app)?;
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             sources::list_agents,
             sources::list_claude_projects,
@@ -31,6 +37,9 @@ fn main() {
             keychain::github_set_token,
             keychain::github_has_token,
             keychain::github_clear_token,
+            tray::tray_stats_now,
+            tray::tray_open_main,
+            tray::tray_open_trace,
         ])
         .run(tauri::generate_context!())
         .expect("error while running toolpath-desktop");

@@ -27,6 +27,20 @@
         "minHeight": 640,
         "resizable": true,
         "fullscreen": false
+      },
+      {
+        "label": "popover",
+        "url": "popover.html",
+        "title": "Toolpath Quick View",
+        "width": 340,
+        "height": 420,
+        "resizable": false,
+        "decorations": false,
+        "transparent": false,
+        "alwaysOnTop": true,
+        "skipTaskbar": true,
+        "visible": false,
+        "focus": false
       }
     ],
     "security": {

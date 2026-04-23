@@ -112,7 +112,7 @@ Tests live alongside the code (`#[cfg(test)] mod tests`), plus `toolpath-cli` ha
 - `toolpath-pi`: ~88 unit tests (types, paths, error, reader, io, provider)
 - `toolpath-dot`: 30 unit + 2 doc tests (render, visual conventions, escaping)
 - `toolpath-cli`: 126 unit + 24 integration tests (all commands, track sessions, merge, validate, roundtrip, render-md snapshots)
-- `toolpath-desktop`: 13 unit tests (IPC command modules — source listing, derive validation, export round-trip, upload stub, keychain input checks)
+- `toolpath-desktop`: 17 unit tests (IPC command modules — source listing, derive validation, export round-trip, upload stub, keychain input checks; tray activity-window bucketing, stats-snapshot smoke, session-id/basename helpers)
 
 Validate example documents: `for f in examples/*.json; do cargo run -p toolpath-cli -- validate --input "$f"; done`
 
@@ -137,6 +137,10 @@ Layout:
   - `src/app.svelte` — top-level switch on `store.m.route`.
 
 Tauri dev loop: `cargo tauri dev` spawns `bun --cwd frontend run dev` (Vite on `http://localhost:1420`), then runs the Rust binary against that URL. Frontend edits hot-reload via Vite HMR without restarting Rust; Rust edits trigger `cargo run` to restart. Production: `cargo tauri build` runs `bun --cwd frontend run build` first, bundling to `frontend/dist/`.
+
+Menu-bar mode: the app runs as a normal GUI app (Dock icon + app-switcher entry) *and* installs a tray icon — the tray is an accessory, not a replacement for the main window. Accessory activation policy was tried and reverted because macOS tiling window managers (yabai, Amethyst) stop managing accessory windows. A tray icon is installed in `src/tray.rs`; a background thread polls every 30s across `toolpath-claude`, `-gemini`, `-codex`, `-opencode`, and `-pi`, classifies sessions as *active* (last activity in the last 2 min) or *recent* (last 24h), updates the tray title (`● N`), and emits a `tray:stats` event. The popover is a second Tauri window (`label = "popover"`, undecorated, hidden by default) with its own Vite entry (`frontend/popover.html` → `src/popover.ts` → `routes/Popover.svelte`); left-clicking the tray toggles it via `tauri-plugin-positioner`. For an on-demand snapshot (no waiting for the next poll) the popover invokes the `tray_stats_now` IPC command.
+
+Opening a trace from the popover: clicking a recent-session row invokes `tray_open_trace { provider, project, session_id }`. The Rust side calls back into the existing `derive_claude` / `derive_pi` commands, shows the main window, and emits a `trace:opened` event to the main window with the derived `{ doc, source, filename }`. `app.svelte` listens for it and dispatches `DeriveSucceeded`, which routes to the preview. Only `claude` and `pi` have derive commands today — rows for `gemini`, `codex`, `opencode` still appear in the list (so users can see activity) but are rendered disabled.
 
 Streaming pattern (Claude project/session lists): Rust command spawns a thread that emits `claude:project`, `claude:session`, `claude:projects-done`, `claude:sessions-done` events. The Svelte component subscribes with `$effect(() => { listen(...) ... return unlisten; })` — Svelte tears down listeners automatically when the effect's deps change or the component unmounts.
 
