@@ -13,8 +13,8 @@ use chrono::DateTime;
 use toolpath::v1::{Path, Step};
 
 use crate::{
-    ConversationEvent, ConversationView, EnvironmentSnapshot, Role, TokenUsage, ToolCategory,
-    ToolInvocation, ToolResult, Turn,
+    ConversationEvent, ConversationView, DelegatedWork, EnvironmentSnapshot, Role, TokenUsage,
+    ToolCategory, ToolInvocation, ToolResult, Turn,
 };
 
 /// Extract a [`ConversationView`] from a toolpath [`Path`] document.
@@ -53,6 +53,19 @@ pub fn extract_conversation(path: &Path) -> ConversationView {
                     handle_init(&mut view, artifact_key, &structural.extra);
                 }
                 "conversation.append" => {
+                    // The shared-derive path doesn't emit conversation.init;
+                    // it encodes provider + session in the artifact key of
+                    // each append step (e.g. `gemini-cli://<session>`).
+                    // Pick them up the first time we see one.
+                    if view.id.is_empty()
+                        && let Some((provider, session)) = artifact_key.split_once("://")
+                        && !provider.is_empty()
+                        && !session.is_empty()
+                    {
+                        view.provider_id = Some(provider.to_string());
+                        view.id = session.to_string();
+                    }
+
                     let turn = build_turn(step, &structural.extra);
                     let idx = view.turns.len();
                     step_to_turn.insert(&step.step.id, idx);
@@ -172,10 +185,16 @@ fn build_turn(step: &Step, extra: &HashMap<String, serde_json::Value>) -> Turn {
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
 
-    let model = extra
-        .get("model")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string());
+    // Model is attributed via the step actor (`agent:{model}`), matching
+    // the convention used across all derivers. The append-extras `model`
+    // key is recognized only as a fallback so older `.path` files keep
+    // decoding cleanly.
+    let model = model_from_actor(&step.step.actor).or_else(|| {
+        extra
+            .get("model")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+    });
 
     let stop_reason = extra
         .get("stop_reason")
@@ -184,50 +203,13 @@ fn build_turn(step: &Step, extra: &HashMap<String, serde_json::Value>) -> Turn {
 
     let token_usage = build_token_usage(extra);
 
-    let environment = {
-        let cwd = extra
-            .get("cwd")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
-        let branch = extra
-            .get("git_branch")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
-        if cwd.is_some() || branch.is_some() {
-            Some(EnvironmentSnapshot {
-                working_dir: cwd,
-                vcs_branch: branch,
-                vcs_revision: None,
-            })
-        } else {
-            None
-        }
-    };
+    let environment = build_environment(extra);
 
-    let turn_extra = {
-        let mut claude_data = serde_json::Map::new();
-        if let Some(v) = extra.get("version") {
-            claude_data.insert("version".to_string(), v.clone());
-        }
-        if let Some(v) = extra.get("user_type") {
-            claude_data.insert("user_type".to_string(), v.clone());
-        }
-        if let Some(v) = extra.get("request_id") {
-            claude_data.insert("request_id".to_string(), v.clone());
-        }
-        if let Some(entry_extra) = extra.get("entry_extra").and_then(|v| v.as_object()) {
-            for (k, v) in entry_extra {
-                claude_data.insert(k.clone(), v.clone());
-            }
-        }
-        if claude_data.is_empty() {
-            HashMap::new()
-        } else {
-            let mut map = HashMap::new();
-            map.insert("claude".to_string(), serde_json::Value::Object(claude_data));
-            map
-        }
-    };
+    let tool_uses = build_inline_tool_uses(extra);
+
+    let delegations = build_delegations(extra);
+
+    let turn_extra = build_turn_extra(extra);
 
     let parent_id = step.step.parents.first().cloned();
 
@@ -238,17 +220,144 @@ fn build_turn(step: &Step, extra: &HashMap<String, serde_json::Value>) -> Turn {
         timestamp: step.step.timestamp.clone(),
         text,
         thinking,
-        tool_uses: Vec::new(),
+        tool_uses,
         model,
         stop_reason,
         token_usage,
         environment,
-        delegations: Vec::new(),
+        delegations,
         extra: turn_extra,
     }
 }
 
+/// Build `Turn.environment` by preferring a nested `environment` object
+/// (shared-derive schema) and falling back to top-level `cwd`/`git_branch`
+/// (Claude's bespoke schema).
+fn build_environment(extra: &HashMap<String, serde_json::Value>) -> Option<EnvironmentSnapshot> {
+    if let Some(v) = extra.get("environment")
+        && let Ok(env) = serde_json::from_value::<EnvironmentSnapshot>(v.clone())
+    {
+        return Some(env);
+    }
+    let cwd = extra
+        .get("cwd")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let branch = extra
+        .get("git_branch")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    if cwd.is_some() || branch.is_some() {
+        Some(EnvironmentSnapshot {
+            working_dir: cwd,
+            vcs_branch: branch,
+            vcs_revision: None,
+        })
+    } else {
+        None
+    }
+}
+
+/// Rehydrate tool invocations stored inline on a `conversation.append` step
+/// by the shared derive pipeline. Each entry carries `id`, `name`, `input`,
+/// `category`, and optionally `result`.
+fn build_inline_tool_uses(extra: &HashMap<String, serde_json::Value>) -> Vec<ToolInvocation> {
+    let Some(arr) = extra.get("tool_uses").and_then(|v| v.as_array()) else {
+        return Vec::new();
+    };
+    arr.iter()
+        .filter_map(|entry| {
+            let obj = entry.as_object()?;
+            let id = obj.get("id")?.as_str()?.to_string();
+            let name = obj.get("name")?.as_str()?.to_string();
+            let input = obj
+                .get("input")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null);
+            let category = parse_category(obj.get("category"));
+            let result = obj
+                .get("result")
+                .and_then(|v| serde_json::from_value::<ToolResult>(v.clone()).ok());
+            Some(ToolInvocation {
+                id,
+                name,
+                input,
+                result,
+                category,
+            })
+        })
+        .collect()
+}
+
+/// Rehydrate `Turn.delegations` stored on a `conversation.append` step.
+fn build_delegations(extra: &HashMap<String, serde_json::Value>) -> Vec<DelegatedWork> {
+    extra
+        .get("delegations")
+        .and_then(|v| serde_json::from_value::<Vec<DelegatedWork>>(v.clone()).ok())
+        .unwrap_or_default()
+}
+
+/// Build `Turn.extra`. Merges:
+///   - the shared-derive `turn_extra` object (a map of provider-namespaced
+///     keys preserved verbatim);
+///   - Claude's bespoke `entry_extra` plus top-level `version`/`user_type`/
+///     `request_id` fields (packed under `extra["claude"]`).
+fn build_turn_extra(
+    extra: &HashMap<String, serde_json::Value>,
+) -> HashMap<String, serde_json::Value> {
+    let mut out: HashMap<String, serde_json::Value> = HashMap::new();
+
+    // Shared-derive path: verbatim map.
+    if let Some(obj) = extra.get("turn_extra").and_then(|v| v.as_object()) {
+        for (k, v) in obj {
+            out.insert(k.clone(), v.clone());
+        }
+    }
+
+    // Claude bespoke path: hoist known top-level fields under `"claude"`.
+    let mut claude_data = serde_json::Map::new();
+    if let Some(v) = extra.get("version") {
+        claude_data.insert("version".to_string(), v.clone());
+    }
+    if let Some(v) = extra.get("user_type") {
+        claude_data.insert("user_type".to_string(), v.clone());
+    }
+    if let Some(v) = extra.get("request_id") {
+        claude_data.insert("request_id".to_string(), v.clone());
+    }
+    if let Some(entry_extra) = extra.get("entry_extra").and_then(|v| v.as_object()) {
+        for (k, v) in entry_extra {
+            claude_data.insert(k.clone(), v.clone());
+        }
+    }
+    if !claude_data.is_empty() {
+        // Merge with any existing `"claude"` key from turn_extra so we
+        // don't clobber provider-supplied fields.
+        let merged = match out.remove("claude") {
+            Some(serde_json::Value::Object(existing)) => {
+                let mut m = existing;
+                for (k, v) in claude_data {
+                    m.entry(k).or_insert(v);
+                }
+                serde_json::Value::Object(m)
+            }
+            _ => serde_json::Value::Object(claude_data),
+        };
+        out.insert("claude".to_string(), merged);
+    }
+
+    out
+}
+
 fn build_token_usage(extra: &HashMap<String, serde_json::Value>) -> Option<TokenUsage> {
+    // Shared-derive schema: nested `token_usage` object.
+    if let Some(v) = extra.get("token_usage")
+        && let Ok(usage) = serde_json::from_value::<TokenUsage>(v.clone())
+    {
+        return Some(usage);
+    }
+
+    // Claude bespoke schema: fields live at the top level of the extras.
     let input = extra
         .get("input_tokens")
         .and_then(|v| v.as_u64())
@@ -333,6 +442,29 @@ fn parse_role(s: &str) -> Role {
     }
 }
 
+/// Pull the model name out of a step actor string like `agent:claude-opus-4-7`.
+///
+/// Conventions:
+/// - `agent:{model}` → `Some("{model}")` (the standard attribution shape)
+/// - `agent:{model}/tool:…` → model is the part before the `/` (Claude's
+///   sub-actor style; only appears on non-turn tool steps, but handled for
+///   robustness)
+/// - `agent:unknown` → `None` — "unknown" is the sentinel the deriver writes
+///   when the source has no model
+/// - anything else (`human:…`, `system:…`, empty) → `None`
+fn model_from_actor(actor: &str) -> Option<String> {
+    let rest = actor.strip_prefix("agent:")?;
+    let model = match rest.split_once('/') {
+        Some((m, _)) => m,
+        None => rest,
+    };
+    if model.is_empty() || model == "unknown" {
+        None
+    } else {
+        Some(model.to_string())
+    }
+}
+
 fn role_from_actor(actor: &str) -> Role {
     if actor.contains("/tool:") {
         // Tool step — shouldn't be a turn, but if it is, treat as Other.
@@ -362,6 +494,32 @@ mod tests {
     use super::*;
     use std::collections::HashMap;
     use toolpath::v1::{ArtifactChange, PathIdentity, StructuralChange};
+
+    #[test]
+    fn test_model_from_actor_variants() {
+        assert_eq!(
+            model_from_actor("agent:claude-opus-4-7"),
+            Some("claude-opus-4-7".to_string())
+        );
+        assert_eq!(
+            model_from_actor("agent:gemini-3-flash-preview"),
+            Some("gemini-3-flash-preview".to_string())
+        );
+        // Sub-actor form (Claude tool steps): model is the part before "/".
+        assert_eq!(
+            model_from_actor("agent:claude-code/tool:Write"),
+            Some("claude-code".to_string())
+        );
+        // `unknown` is the deriver's sentinel for "no model"; decode to None.
+        assert_eq!(model_from_actor("agent:unknown"), None);
+        // Non-agent actors carry no model.
+        assert_eq!(model_from_actor("human:user"), None);
+        assert_eq!(model_from_actor("system:gemini-cli"), None);
+        assert_eq!(model_from_actor("tool:rustfmt"), None);
+        // Malformed / empty.
+        assert_eq!(model_from_actor(""), None);
+        assert_eq!(model_from_actor("agent:"), None);
+    }
 
     fn make_path(steps: Vec<Step>) -> Path {
         let head = steps.last().map(|s| s.step.id.clone()).unwrap_or_default();
@@ -486,7 +644,6 @@ mod tests {
                     extras(&[
                         ("role", serde_json::json!("assistant")),
                         ("text", serde_json::json!("I'll fix that.")),
-                        ("model", serde_json::json!("claude-opus-4-6")),
                     ]),
                 )],
             ),
