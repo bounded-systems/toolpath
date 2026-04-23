@@ -40,26 +40,36 @@ function now(): number {
   return typeof performance !== "undefined" ? performance.now() : Date.now();
 }
 
+// `perf.latest` is `$state`, so any assignment inside a Svelte `$derived`
+// (e.g. `perfMark` from within `buildTree` reached via a `$derived` in
+// ChatView) throws `state_unsafe_mutation`. Defer writes to a microtask so
+// the mutation always happens outside derivation. The visible ordering is
+// unchanged — multiple marks in one task resolve in order, last write wins.
+function publish(trace: PerfTrace): void {
+  const snapshot = { ...trace, marks: trace.marks };
+  queueMicrotask(() => {
+    perf.latest = snapshot;
+  });
+}
+
 export function perfStart(label: string): void {
   const t = now();
   current = { label, startedAt: t, marks: [], durationMs: null };
-  // Make an early-visible copy so the overlay can show the label even before
-  // the first mark lands.
-  perf.latest = { ...current };
+  publish(current);
 }
 
 export function perfMark(name: string): void {
   if (!current) return;
   const t = now() - current.startedAt;
   current.marks = [...current.marks, { name, t }];
-  perf.latest = { ...current, marks: current.marks };
+  publish(current);
 }
 
 export function perfEnd(): void {
   if (!current) return;
   const dur = now() - current.startedAt;
   current.durationMs = dur;
-  perf.latest = { ...current, durationMs: dur };
+  publish(current);
 
   // Summary to console. Each mark shows absolute-from-start and delta from
   // the previous mark so the slow phase is easy to spot.

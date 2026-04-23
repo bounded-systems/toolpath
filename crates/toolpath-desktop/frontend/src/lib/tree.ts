@@ -8,6 +8,7 @@
 
 import { classify, type ChatTurnKind } from "./classify";
 import { renderMarkdown } from "./markdown";
+import { perfMark } from "./perf.svelte";
 import type { StepRef, TreeFilter } from "./types";
 import { actorName, actorType, normalize, type Normalized } from "./viz";
 
@@ -108,8 +109,15 @@ export function matchesFilter(
 export function buildTree(
   doc: Parameters<typeof normalize>[0],
 ): { norm: Normalized; nodes: FlatNode[] } {
+  const t0 = performance.now();
   const norm = normalize(doc);
-  return { norm, nodes: flattenTree(norm) };
+  const tNorm = performance.now() - t0;
+  const nodes = flattenTree(norm);
+  const tTotal = performance.now() - t0;
+  perfMark(
+    `buildTree (${norm.steps.length}st ${tTotal.toFixed(0)}ms: norm ${tNorm.toFixed(0)} + flat ${(tTotal - tNorm).toFixed(0)})`,
+  );
+  return { norm, nodes };
 }
 
 // ─── Chat / transcript view ──────────────────────────────────────────────
@@ -187,6 +195,7 @@ function firstRawDiff(
  */
 export function flattenChatHead(norm: Normalized): ChatTurn[] {
   const { steps, head, actors, stepMap, childrenMap } = norm;
+  const t0 = performance.now();
 
   let ordered: StepRef[];
   if (head && stepMap.has(head)) {
@@ -210,6 +219,16 @@ export function flattenChatHead(norm: Normalized): ChatTurn[] {
   // Build each turn. For assistant turns, also collect tool.invoke sibling
   // children so the renderer can fold them inline inside the bubble instead
   // of scattering them as separate cards in the transcript.
+  let mdMs = 0;
+  let mdCount = 0;
+  const timedMarkdown = (src: string | null | undefined): string => {
+    if (!src) return "";
+    const t = performance.now();
+    const out = renderMarkdown(src);
+    mdMs += performance.now() - t;
+    mdCount += 1;
+    return out;
+  };
   const turnFor = (s: StepRef): ChatTurn => {
     const c = classify(s);
     return {
@@ -224,10 +243,10 @@ export function flattenChatHead(norm: Normalized): ChatTurn[] {
       changeKeys: s.change ? Object.keys(s.change) : [],
       kind: c.kind,
       text: c.text,
-      textHtml: c.text ? renderMarkdown(c.text) : "",
+      textHtml: timedMarkdown(c.text),
       toolNames: c.toolNames,
       thinking: c.thinking,
-      thinkingHtml: c.thinking ? renderMarkdown(c.thinking) : "",
+      thinkingHtml: timedMarkdown(c.thinking),
       model: c.model,
       toolName: c.toolName,
       toolDiff: firstRawDiff(s),
@@ -236,7 +255,7 @@ export function flattenChatHead(norm: Normalized): ChatTurn[] {
   };
 
   const onChain = new Set(ordered.map((s) => s.step.id));
-  return ordered.map((s) => {
+  const out = ordered.map((s) => {
     const turn = turnFor(s);
     if (turn.kind === "assistant") {
       const kids = childrenMap.get(s.step.id) ?? [];
@@ -250,4 +269,9 @@ export function flattenChatHead(norm: Normalized): ChatTurn[] {
     }
     return turn;
   });
+  const total = performance.now() - t0;
+  perfMark(
+    `flattenChatHead (${out.length}t ${total.toFixed(0)}ms: md ${mdMs.toFixed(0)}ms × ${mdCount})`,
+  );
+  return out;
 }

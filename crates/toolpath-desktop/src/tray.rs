@@ -22,10 +22,8 @@ use chrono::{DateTime, Utc};
 use serde::Serialize;
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
-use tauri::{AppHandle, Emitter, Manager, State};
+use tauri::{AppHandle, Emitter, Manager};
 use tauri_plugin_positioner::{Position, WindowExt};
-
-use crate::cache::{CacheEntry, CacheKey, TraceCache};
 
 /// How often the background poller re-scans providers.
 const POLL_INTERVAL: Duration = Duration::from_secs(30);
@@ -38,14 +36,6 @@ const RECENT_WINDOW_SECS: i64 = 24 * 60 * 60;
 
 /// Maximum number of recent sessions to include in the popover payload.
 const MAX_RECENT_SESSIONS: usize = 20;
-
-/// Cap on simultaneous warm-up derive threads. Keeps the prewarm pass from
-/// saturating the CPU right after a poll cycle.
-const MAX_PREWARM_CONCURRENCY: usize = 2;
-
-/// Providers whose derive is wired up on the desktop backend. The popover
-/// disables rows for anything not in this set, so we don't prewarm them either.
-const PREWARM_PROVIDERS: &[&str] = &["claude", "pi"];
 
 /// Per-provider counts, emitted in [`TrayStats`].
 #[derive(Debug, Clone, Default, Serialize)]
@@ -352,38 +342,57 @@ pub struct TraceOpenedPayload {
 /// providers with a desktop-side derive command are supported (claude, pi).
 /// For gemini/codex/opencode the popover should disable the row instead of
 /// calling this.
-///
-/// Fast path: the tray poller pre-derives recent sessions into the
-/// [`TraceCache`], so this almost always resolves with a cache hit and the
-/// main window opens without any re-derive latency.
 #[tauri::command]
 pub fn tray_open_trace(
     app: AppHandle,
-    cache: State<'_, Arc<TraceCache>>,
     provider: String,
     project: String,
     session_id: String,
 ) -> Result<(), String> {
-    let doc = derive_via_cache(cache.inner(), &provider, &project, &session_id)
-        .map_err(|e| e.to_string())?;
-
-    let (source, filename) = match provider.as_str() {
-        "claude" => (
-            format!("Claude: {}", basename(&project)),
-            format!(
+    let (doc, source, filename) = match provider.as_str() {
+        "claude" => {
+            let value = crate::commands::derive::derive_claude(
+                project.clone(),
+                vec![session_id.clone()],
+                /* include_thinking */ false,
+            )
+            .map_err(|e| e.to_string())?;
+            let filename = format!(
                 "claude-{}-{}.path.json",
                 basename_slug(&project),
                 short(&session_id)
-            ),
-        ),
-        "pi" => (
-            format!("pi.dev: {}", basename(&project)),
-            format!(
+            );
+            (
+                value,
+                format!("Claude: {}", basename(&project)),
+                filename,
+            )
+        }
+        "pi" => {
+            let value = crate::commands::derive::derive_pi(
+                project.clone(),
+                vec![session_id.clone()],
+                /* include_thinking */ false,
+            )
+            .map_err(|e| e.to_string())?;
+            let filename = format!(
                 "pi-{}-{}.path.json",
                 basename_slug(&project),
                 short(&session_id)
-            ),
-        ),
+            );
+            (
+                value,
+                format!("pi.dev: {}", basename(&project)),
+                filename,
+            )
+        }
+        // Not wired up in the desktop backend yet. The popover disables
+        // rows for these, but we still reject politely if one slips through.
+        "gemini" | "codex" | "opencode" => {
+            return Err(format!(
+                "Opening {provider} traces from Quick View isn't wired up yet."
+            ));
+        }
         other => return Err(format!("unknown provider: {other}")),
     };
 
@@ -397,36 +406,6 @@ pub fn tray_open_trace(
     app.emit_to("main", "trace:opened", payload)
         .map_err(|e| e.to_string())?;
     Ok(())
-}
-
-/// Run derive through the shared cache-aware impls. Centralises the
-/// provider -> function dispatch and the "unsupported provider" error shape.
-fn derive_via_cache(
-    cache: &TraceCache,
-    provider: &str,
-    project: &str,
-    session_id: &str,
-) -> Result<serde_json::Value, crate::error::DesktopError> {
-    match provider {
-        "claude" => crate::commands::derive::derive_claude_impl(
-            cache,
-            project.to_string(),
-            vec![session_id.to_string()],
-            /* include_thinking */ false,
-        ),
-        "pi" => crate::commands::derive::derive_pi_impl(
-            cache,
-            project.to_string(),
-            vec![session_id.to_string()],
-            /* include_thinking */ false,
-        ),
-        "gemini" | "codex" | "opencode" => Err(crate::error::DesktopError::InvalidInput(format!(
-            "Opening {provider} traces from Quick View isn't wired up yet."
-        ))),
-        other => Err(crate::error::DesktopError::InvalidInput(format!(
-            "unknown provider: {other}"
-        ))),
-    }
 }
 
 fn basename(path: &str) -> String {
@@ -552,65 +531,7 @@ fn publish_stats(app: &AppHandle) {
         let _ = tray.set_tooltip(Some(&tooltip));
     }
 
-    prewarm_traces(app, &stats);
-
     let _ = app.emit("tray:stats", stats);
-}
-
-/// Kick off background derives for recent sessions so clicking one in the
-/// popover hits the cache instead of running derive on the UI path. Skips
-/// entries that are already fresh or have a warm-up in flight; caps the number
-/// of simultaneous derive threads at [`MAX_PREWARM_CONCURRENCY`].
-fn prewarm_traces(app: &AppHandle, stats: &TrayStats) {
-    let Some(cache) = app.try_state::<Arc<TraceCache>>() else {
-        return;
-    };
-    let cache: Arc<TraceCache> = cache.inner().clone();
-
-    for session in &stats.recent {
-        if !PREWARM_PROVIDERS.contains(&session.provider) {
-            continue;
-        }
-        if cache.in_flight_count() >= MAX_PREWARM_CONCURRENCY {
-            break;
-        }
-        let key = CacheKey {
-            provider: session.provider.to_string(),
-            project: session.project.clone(),
-            session_id: session.session_id.clone(),
-        };
-        if cache.is_fresh(&key, &session.last_activity) {
-            continue;
-        }
-        if !cache.try_claim(&key) {
-            continue;
-        }
-        spawn_prewarm(cache.clone(), key, session.last_activity.clone());
-    }
-}
-
-fn spawn_prewarm(cache: Arc<TraceCache>, key: CacheKey, last_activity: String) {
-    thread::spawn(move || {
-        // `derive_via_cache` performs the derive AND inserts the result into
-        // the cache (with `last_activity = ""`). We then overwrite that entry
-        // with one carrying the real `last_activity` so future `is_fresh`
-        // checks can short-circuit.
-        let result =
-            derive_via_cache(&cache, &key.provider, &key.project, &key.session_id);
-        if let Ok(doc) = result {
-            cache.insert(
-                key.clone(),
-                CacheEntry {
-                    doc,
-                    last_activity,
-                },
-            );
-        }
-        // Errors are swallowed — a broken session shouldn't poison the cache
-        // or spam logs every 30s. The click path will surface the error if
-        // the user actually picks this session.
-        cache.release(&key);
-    });
 }
 
 #[cfg(test)]
@@ -667,17 +588,5 @@ mod tests {
     fn short_truncates_session_ids() {
         assert_eq!(short("0123456789abcdef"), "01234567");
         assert_eq!(short("abc"), "abc");
-    }
-
-    #[test]
-    fn derive_via_cache_rejects_unsupported_providers() {
-        let cache = TraceCache::new();
-        for p in ["gemini", "codex", "opencode", "bogus"] {
-            let err = derive_via_cache(&cache, p, "/proj", "sess").unwrap_err();
-            assert!(
-                matches!(err, crate::error::DesktopError::InvalidInput(_)),
-                "expected InvalidInput for provider {p}, got {err:?}"
-            );
-        }
     }
 }

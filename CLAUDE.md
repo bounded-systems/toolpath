@@ -112,7 +112,7 @@ Tests live alongside the code (`#[cfg(test)] mod tests`), plus `toolpath-cli` ha
 - `toolpath-pi`: ~88 unit tests (types, paths, error, reader, io, provider)
 - `toolpath-dot`: 30 unit + 2 doc tests (render, visual conventions, escaping)
 - `toolpath-cli`: 126 unit + 24 integration tests (all commands, track sessions, merge, validate, roundtrip, render-md snapshots)
-- `toolpath-desktop`: 32 unit tests (IPC command modules — source listing, derive validation + cache-hit short-circuit for claude/pi, export round-trip, upload stub, keychain input checks; tray activity-window bucketing, stats-snapshot smoke, session-id/basename helpers, Quick View provider routing; trace cache memory-tier get/insert/freshness/LRU-eviction/in-flight slots plus disk-tier persistence-across-restart, freshness-across-restart, corrupt-file recovery, disk prune, disk-dir creation fallback)
+- `toolpath-desktop`: 17 unit tests (IPC command modules — source listing, derive validation, export round-trip, upload stub, keychain input checks; tray activity-window bucketing, stats-snapshot smoke, session-id/basename helpers)
 
 Validate example documents: `for f in examples/*.json; do cargo run -p toolpath-cli -- validate --input "$f"; done`
 

@@ -1,9 +1,5 @@
-use std::sync::Arc;
-
 use serde_json::Value;
-use tauri::State;
 
-use crate::cache::{CacheEntry, CacheKey, TraceCache};
 use crate::commands::keychain;
 use crate::error::{DesktopError, DesktopResult};
 
@@ -16,15 +12,8 @@ fn document_to_value(doc: &toolpath::v1::Document) -> DesktopResult<Value> {
     Ok(serde_json::from_str(&json)?)
 }
 
-/// Core claude-derive logic, cache-aware. Used by both the Tauri command
-/// wrapper and the tray's popover-open / prewarm paths — having a single
-/// implementation guarantees they all share the same cache behaviour.
-///
-/// Cache lookup/insert only happens for single-session, no-thinking derives
-/// (the shape the tray poller prewarms). Multi-session / thinking-on calls
-/// fall through to a fresh derive every time.
-pub fn derive_claude_impl(
-    cache: &TraceCache,
+#[tauri::command]
+pub fn derive_claude(
     project_path: String,
     session_ids: Vec<String>,
     include_thinking: bool,
@@ -33,18 +22,6 @@ pub fn derive_claude_impl(
         return Err(DesktopError::InvalidInput(
             "at least one session ID is required".into(),
         ));
-    }
-
-    let cacheable = session_ids.len() == 1 && !include_thinking;
-    if cacheable {
-        let key = CacheKey {
-            provider: "claude".into(),
-            project: project_path.clone(),
-            session_id: session_ids[0].clone(),
-        };
-        if let Some(hit) = cache.get(&key) {
-            return Ok(hit.doc);
-        }
     }
 
     let manager = toolpath_claude::ClaudeConvo::new();
@@ -81,41 +58,11 @@ pub fn derive_claude_impl(
         toolpath::v1::Document::Graph(graph)
     };
 
-    let value = document_to_value(&document)?;
-
-    if cacheable {
-        // Backfill the cache so a subsequent click (e.g. popover opening the
-        // same session) doesn't re-derive. `last_activity` is unknown here —
-        // leave it empty and let the next warmer pass replace it with a
-        // freshness-keyed entry.
-        cache.insert(
-            CacheKey {
-                provider: "claude".into(),
-                project: project_path,
-                session_id: session_ids.into_iter().next().unwrap(),
-            },
-            CacheEntry {
-                doc: value.clone(),
-                last_activity: String::new(),
-            },
-        );
-    }
-
-    Ok(value)
+    document_to_value(&document)
 }
 
 #[tauri::command]
-pub fn derive_claude(
-    cache: State<'_, Arc<TraceCache>>,
-    project_path: String,
-    session_ids: Vec<String>,
-    include_thinking: bool,
-) -> DesktopResult<Value> {
-    derive_claude_impl(cache.inner(), project_path, session_ids, include_thinking)
-}
-
-pub fn derive_pi_impl(
-    cache: &TraceCache,
+pub fn derive_pi(
     project_path: String,
     session_ids: Vec<String>,
     include_thinking: bool,
@@ -124,18 +71,6 @@ pub fn derive_pi_impl(
         return Err(DesktopError::InvalidInput(
             "at least one session ID is required".into(),
         ));
-    }
-
-    let cacheable = session_ids.len() == 1 && !include_thinking;
-    if cacheable {
-        let key = CacheKey {
-            provider: "pi".into(),
-            project: project_path.clone(),
-            session_id: session_ids[0].clone(),
-        };
-        if let Some(hit) = cache.get(&key) {
-            return Ok(hit.doc);
-        }
     }
 
     let manager = toolpath_pi::PiConvo::new();
@@ -171,33 +106,7 @@ pub fn derive_pi_impl(
         toolpath::v1::Document::Graph(graph)
     };
 
-    let value = document_to_value(&document)?;
-
-    if cacheable {
-        cache.insert(
-            CacheKey {
-                provider: "pi".into(),
-                project: project_path,
-                session_id: session_ids.into_iter().next().unwrap(),
-            },
-            CacheEntry {
-                doc: value.clone(),
-                last_activity: String::new(),
-            },
-        );
-    }
-
-    Ok(value)
-}
-
-#[tauri::command]
-pub fn derive_pi(
-    cache: State<'_, Arc<TraceCache>>,
-    project_path: String,
-    session_ids: Vec<String>,
-    include_thinking: bool,
-) -> DesktopResult<Value> {
-    derive_pi_impl(cache.inner(), project_path, session_ids, include_thinking)
+    document_to_value(&document)
 }
 
 #[tauri::command]
@@ -260,58 +169,8 @@ mod tests {
 
     #[test]
     fn derive_claude_rejects_empty_selection() {
-        let cache = TraceCache::new();
-        let err = derive_claude_impl(&cache, "/nowhere".into(), vec![], false).unwrap_err();
+        let err = derive_claude("/nowhere".into(), vec![], false).unwrap_err();
         assert!(matches!(err, DesktopError::InvalidInput(_)));
-    }
-
-    #[test]
-    fn derive_pi_rejects_empty_selection() {
-        let cache = TraceCache::new();
-        let err = derive_pi_impl(&cache, "/nowhere".into(), vec![], false).unwrap_err();
-        assert!(matches!(err, DesktopError::InvalidInput(_)));
-    }
-
-    #[test]
-    fn derive_claude_serves_cached_doc_without_running_derive() {
-        // Pre-populate the cache with a fake doc. A real derive against
-        // /nowhere would error; a cache hit must short-circuit before that.
-        let cache = TraceCache::new();
-        let expected = serde_json::json!({"marker": "cached"});
-        cache.insert(
-            CacheKey {
-                provider: "claude".into(),
-                project: "/nowhere".into(),
-                session_id: "sess".into(),
-            },
-            CacheEntry {
-                doc: expected.clone(),
-                last_activity: "2026-04-23T10:00:00Z".into(),
-            },
-        );
-        let got =
-            derive_claude_impl(&cache, "/nowhere".into(), vec!["sess".into()], false).unwrap();
-        assert_eq!(got, expected);
-    }
-
-    #[test]
-    fn derive_pi_serves_cached_doc_without_running_derive() {
-        let cache = TraceCache::new();
-        let expected = serde_json::json!({"marker": "pi-cached"});
-        cache.insert(
-            CacheKey {
-                provider: "pi".into(),
-                project: "/nowhere".into(),
-                session_id: "sess".into(),
-            },
-            CacheEntry {
-                doc: expected.clone(),
-                last_activity: String::new(),
-            },
-        );
-        let got =
-            derive_pi_impl(&cache, "/nowhere".into(), vec!["sess".into()], false).unwrap();
-        assert_eq!(got, expected);
     }
 
     #[test]

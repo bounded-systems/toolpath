@@ -3,14 +3,9 @@
     windows_subsystem = "windows"
 )]
 
-mod cache;
 mod commands;
 mod error;
 mod tray;
-
-use std::sync::Arc;
-
-use tauri::Manager;
 
 use commands::{derive, export, keychain, sources, upload};
 
@@ -20,12 +15,6 @@ fn main() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_positioner::init())
         .setup(|app| {
-            let cache_dir = std::env::temp_dir()
-                .join("toolpath-desktop")
-                .join("trace-cache");
-            let trace_cache = Arc::new(cache::TraceCache::with_disk_dir(cache_dir));
-            trace_cache.prune_disk(cache::DEFAULT_MAX_DISK_ENTRIES);
-            app.manage(trace_cache);
             tray::install(app)?;
             Ok(())
         })
