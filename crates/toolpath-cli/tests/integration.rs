@@ -313,3 +313,33 @@ fn merge_produces_graph() {
         .success()
         .stdout(predicate::str::contains("\"Graph\""));
 }
+
+// ── Auth ─────────────────────────────────────────────────────────────
+
+#[test]
+fn auth_help_lists_subcommands() {
+    cmd()
+        .arg("auth")
+        .arg("--help")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("login"))
+        .stdout(predicate::str::contains("logout"))
+        .stdout(predicate::str::contains("status"))
+        .stdout(predicate::str::contains("whoami"));
+}
+
+#[test]
+fn auth_login_against_unreachable_url_errors() {
+    // Port 1 is privileged and not bound to anything — connection refused.
+    cmd()
+        .arg("auth")
+        .arg("login")
+        .arg("--url")
+        .arg("http://127.0.0.1:1")
+        .arg("--code")
+        .arg("BCDFGHJK")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("127.0.0.1"));
+}

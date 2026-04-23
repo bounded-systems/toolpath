@@ -1,3 +1,4 @@
+mod cmd_auth;
 mod cmd_derive;
 mod cmd_haiku;
 mod cmd_incept;
@@ -84,6 +85,11 @@ enum Commands {
     },
     /// Print a random Toolpath haiku
     Haiku,
+    /// Manage Pathbase credentials for trace uploads
+    Auth {
+        #[command(subcommand)]
+        op: cmd_auth::AuthOp,
+    },
 }
 
 fn main() -> Result<()> {
@@ -103,5 +109,6 @@ fn main() -> Result<()> {
             cmd_haiku::run();
             Ok(())
         }
+        Commands::Auth { op } => cmd_auth::run(op),
     }
 }

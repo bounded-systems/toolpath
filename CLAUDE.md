@@ -87,7 +87,19 @@ cargo run -p toolpath-cli -- list pi
 cargo run -p toolpath-cli -- list pi --project /path/to/project
 cargo run -p toolpath-cli -- track init --file src/main.rs --actor "human:alex"
 cargo run -p toolpath-cli -- validate --input doc.json
+cargo run -p toolpath-cli -- auth login
+cargo run -p toolpath-cli -- auth status
+cargo run -p toolpath-cli -- auth whoami
+cargo run -p toolpath-cli -- auth logout
 ```
+
+`path auth login` prints `<base>/auth/cli`; the user opens it, logs in, and
+pastes the 8-character code back into the CLI. The CLI calls
+`POST /api/v1/auth/cli/redeem` to trade the code for a bearer token, which it
+writes to `~/.toolpath/credentials.json` (0600, parent dir 0700) and sends as
+`Authorization: Bearer <token>` on future requests. `$TOOLPATH_CONFIG_DIR`
+overrides the credentials directory. Server URL comes from `--url`, then
+`$PATHBASE_URL`, then `https://pathbase.dev`.
 
 ## Key conventions
 
