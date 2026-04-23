@@ -8,6 +8,7 @@
 
 import { classify, type ChatTurnKind } from "./classify";
 import { renderMarkdown } from "./markdown";
+import { perfMark } from "./perf.svelte";
 import type { StepRef, TreeFilter } from "./types";
 import { actorName, actorType, normalize, type Normalized } from "./viz";
 
@@ -105,11 +106,38 @@ export function matchesFilter(
 }
 
 /** Convenience: normalize + flatten in one call. */
+/**
+ * `buildTree` is called from multiple `$derived` blocks (StepTree +
+ * ChatView), so without memoisation the same doc gets normalised + flattened
+ * twice on every preview open. Memo by doc identity — callers only ever pass
+ * `store.m.preview.doc` which is a stable reference between re-renders. A
+ * `WeakMap` keeps the cache GC-friendly: once the doc is replaced (new
+ * derive) the old entry is collectable.
+ */
+type BuiltTree = { norm: Normalized; nodes: FlatNode[] };
+const treeCache = new WeakMap<object, BuiltTree>();
+
 export function buildTree(
   doc: Parameters<typeof normalize>[0],
-): { norm: Normalized; nodes: FlatNode[] } {
+): BuiltTree {
+  // `doc` is a JSON object at the top level (Step/Path/Graph wrapper), so
+  // WeakMap can key on it directly.
+  const cached = treeCache.get(doc as object);
+  if (cached) {
+    perfMark(`buildTree cache-hit (${cached.norm.steps.length}st)`);
+    return cached;
+  }
+  const t0 = performance.now();
   const norm = normalize(doc);
-  return { norm, nodes: flattenTree(norm) };
+  const tNorm = performance.now() - t0;
+  const nodes = flattenTree(norm);
+  const tTotal = performance.now() - t0;
+  perfMark(
+    `buildTree (${norm.steps.length}st ${tTotal.toFixed(0)}ms: norm ${tNorm.toFixed(0)} + flat ${(tTotal - tNorm).toFixed(0)})`,
+  );
+  const built = { norm, nodes };
+  treeCache.set(doc as object, built);
+  return built;
 }
 
 // ─── Chat / transcript view ──────────────────────────────────────────────
@@ -185,8 +213,18 @@ function firstRawDiff(
  * advance HEAD), so a naive parent-walk would skip them and you'd see
  * "Used Edit" chips with no actual tool output in the transcript.
  */
+// Memo by norm identity. Same rationale as buildTree — ChatView's `$derived`
+// block calls this, and it's expensive (markdown rendering dominates).
+const flattenCache = new WeakMap<Normalized, ChatTurn[]>();
+
 export function flattenChatHead(norm: Normalized): ChatTurn[] {
+  const cached = flattenCache.get(norm);
+  if (cached) {
+    perfMark(`flattenChatHead cache-hit (${cached.length}t)`);
+    return cached;
+  }
   const { steps, head, actors, stepMap, childrenMap } = norm;
+  const t0 = performance.now();
 
   let ordered: StepRef[];
   if (head && stepMap.has(head)) {
@@ -210,6 +248,16 @@ export function flattenChatHead(norm: Normalized): ChatTurn[] {
   // Build each turn. For assistant turns, also collect tool.invoke sibling
   // children so the renderer can fold them inline inside the bubble instead
   // of scattering them as separate cards in the transcript.
+  let mdMs = 0;
+  let mdCount = 0;
+  const timedMarkdown = (src: string | null | undefined): string => {
+    if (!src) return "";
+    const t = performance.now();
+    const out = renderMarkdown(src);
+    mdMs += performance.now() - t;
+    mdCount += 1;
+    return out;
+  };
   const turnFor = (s: StepRef): ChatTurn => {
     const c = classify(s);
     return {
@@ -224,10 +272,10 @@ export function flattenChatHead(norm: Normalized): ChatTurn[] {
       changeKeys: s.change ? Object.keys(s.change) : [],
       kind: c.kind,
       text: c.text,
-      textHtml: c.text ? renderMarkdown(c.text) : "",
+      textHtml: timedMarkdown(c.text),
       toolNames: c.toolNames,
       thinking: c.thinking,
-      thinkingHtml: c.thinking ? renderMarkdown(c.thinking) : "",
+      thinkingHtml: timedMarkdown(c.thinking),
       model: c.model,
       toolName: c.toolName,
       toolDiff: firstRawDiff(s),
@@ -236,7 +284,7 @@ export function flattenChatHead(norm: Normalized): ChatTurn[] {
   };
 
   const onChain = new Set(ordered.map((s) => s.step.id));
-  return ordered.map((s) => {
+  const out = ordered.map((s) => {
     const turn = turnFor(s);
     if (turn.kind === "assistant") {
       const kids = childrenMap.get(s.step.id) ?? [];
@@ -250,4 +298,10 @@ export function flattenChatHead(norm: Normalized): ChatTurn[] {
     }
     return turn;
   });
+  const total = performance.now() - t0;
+  perfMark(
+    `flattenChatHead (${out.length}t ${total.toFixed(0)}ms: md ${mdMs.toFixed(0)}ms × ${mdCount})`,
+  );
+  flattenCache.set(norm, out);
+  return out;
 }
