@@ -1,11 +1,35 @@
 <script lang="ts">
+  import { onMount, tick } from "svelte";
   import { render as renderViz } from "../lib/viz";
   import { store } from "../lib/store.svelte";
+  import { perfMark, perfEnd } from "../lib/perf.svelte";
   import StepTree from "../lib/StepTree.svelte";
   import ChatView from "../lib/ChatView.svelte";
   import type { StepRef } from "../lib/types";
 
   let canvasEl: HTMLDivElement | null = $state(null);
+
+  // Perf: mark the instant this component mounts after a derive. The first
+  // post-derive render is the most useful measurement — subsequent re-renders
+  // (toggles, zoom, selection) don't reset the trace.
+  let perfDone = $state(false);
+  onMount(() => {
+    perfMark("preview-mounted");
+    // Tick once so the initial render has committed before marking "first
+    // paint". This covers static markup + StepTree + (Chat OR the empty graph
+    // canvas). The viz $effect below marks again after dagre lays out.
+    void tick().then(() => {
+      if (!perfDone) {
+        perfMark("dom-painted");
+        // If we're in chat mode there's no separate viz step, so close the
+        // trace here. Graph mode closes it in the viz $effect.
+        if (store.m.preview?.viewMode === "chat") {
+          perfEnd();
+          perfDone = true;
+        }
+      }
+    });
+  });
 
   // Graph-view zoom. Wheel/pinch with ctrl/meta zooms; plain wheel pans via
   // the scroll container. Reset whenever the previewed doc changes.
@@ -51,6 +75,14 @@
       onToggleBranch: (nodeId) =>
         store.dispatch({ t: "PreviewToggleBranch", nodeId }),
     });
+    // Perf: only record the first post-derive viz render. Later re-renders
+    // (zoom, toggle, branch expand) happen frequently and would clobber the
+    // trace with noise.
+    if (!perfDone) {
+      perfMark("viz-rendered");
+      perfEnd();
+      perfDone = true;
+    }
   });
 
   function extractSteps(): StepRef[] {

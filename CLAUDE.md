@@ -146,6 +146,8 @@ Pre-derive cache: after each 30s poll the tray kicks off background derives for 
 
 Two tiers: (1) memory, a `HashMap` capped at 32 entries; (2) disk, under `<temp_dir>/toolpath-desktop/trace-cache/<fnv1a64-of-key>.json`, so caches survive app restarts (macOS/Linux eventually clean `/tmp` themselves). Disk is capped at 200 entries, pruned oldest-first by mtime at startup. Memory misses fall through to disk and promote the hit back into memory. Corrupt files are silently deleted on read so a bad write doesn't poison the cache forever.
 
+Perf tracer (`frontend/src/lib/perf.svelte.ts`, `PerfOverlay.svelte`): the store, Preview, and the `trace:opened` listener call `perfStart` / `perfMark` / `perfEnd` at each checkpoint of a click → derive → render flow (dispatch, invoke-start, invoke-end, model-updated, preview-mounted, viz-rendered). Every completed trace logs a summary to the devtools console; set `localStorage.perf = "1"` and reload to also show a phase-bar overlay in the bottom-right. Use this to tell whether perceived click latency is the Rust derive vs. the Svelte/dagre render.
+
 Streaming pattern (Claude project/session lists): Rust command spawns a thread that emits `claude:project`, `claude:session`, `claude:projects-done`, `claude:sessions-done` events. The Svelte component subscribes with `$effect(() => { listen(...) ... return unlisten; })` — Svelte tears down listeners automatically when the effect's deps change or the component unmounts.
 
 Package manager for the frontend is `bun` (installed at `~/.bun/bin/bun`). `bun install` to set up, `bun run check` for `svelte-check`, `bun run build` for a production Vite build. Never commit `node_modules/` or `dist/` — both are ignored.

@@ -10,6 +10,8 @@
     import BrowseGithub from "./routes/BrowseGithub.svelte";
     import Preview from "./routes/Preview.svelte";
     import Result from "./routes/Result.svelte";
+    import PerfOverlay from "./lib/PerfOverlay.svelte";
+    import { perfStart, perfMark } from "./lib/perf.svelte";
     import type { Document, Route } from "./lib/types";
 
     const notInTauri =
@@ -68,6 +70,12 @@
     $effect(() => {
         let unlisten: UnlistenFn | undefined;
         listen<TraceOpenedPayload>("trace:opened", (payload) => {
+            // Perf: this is the popover's post-derive delivery; Rust did the
+            // derive out-of-band so what's left is pure model + render time.
+            // Seeing this trace end at 20ms vs 600ms tells us whether perceived
+            // lag is the derive or the Svelte/dagre render.
+            perfStart("trace:opened → preview");
+            perfMark("event-received");
             store.dispatch({
                 t: "DeriveSucceeded",
                 doc: payload.doc,
@@ -161,3 +169,5 @@
         {/if}
     </main>
 </div>
+
+<PerfOverlay />
