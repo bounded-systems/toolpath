@@ -190,10 +190,32 @@ fn run_pathbase(input: String, url_flag: Option<String>) -> Result<()> {
             None => session.url.clone(),
         };
 
+        if host_of(&base_url) != host_of(&session.url) {
+            eprintln!(
+                "warning: uploading to {} with a token issued by {}; expect 401 unless this is the same deployment",
+                base_url, session.url
+            );
+        }
+
         let trace = traces_post(&base_url, &session.token, &body)?;
         println!("{}", trace.url);
         eprintln!("Uploaded {} → {} ({} bytes)", file.display(), trace.id, body.len());
         Ok(())
+    }
+}
+
+/// Extract `scheme://host[:port]` from a URL, dropping any path/query.
+/// Returns the input unchanged if it doesn't look like a URL.
+#[cfg(not(target_os = "emscripten"))]
+fn host_of(url: &str) -> &str {
+    let after_scheme = match url.find("://") {
+        Some(i) => i + 3,
+        None => return url,
+    };
+    // Find the next `/` after the scheme://; everything before it is host[:port].
+    match url[after_scheme..].find('/') {
+        Some(off) => &url[..after_scheme + off],
+        None => url,
     }
 }
 
@@ -262,6 +284,7 @@ mod tests {
                 id: "test-path".to_string(),
                 base: None,
                 head: "step-002".to_string(),
+                graph_ref: None,
             },
             steps: vec![init_step, append_step],
             meta: None,
@@ -324,20 +347,35 @@ mod tests {
     }
 
     #[test]
+    fn host_of_strips_path() {
+        assert_eq!(host_of("https://pathbase.dev"), "https://pathbase.dev");
+        assert_eq!(host_of("https://pathbase.dev/"), "https://pathbase.dev");
+        assert_eq!(
+            host_of("https://pathbase.dev/api/v1/traces"),
+            "https://pathbase.dev"
+        );
+        assert_eq!(
+            host_of("http://127.0.0.1:9000/foo"),
+            "http://127.0.0.1:9000"
+        );
+        assert_eq!(host_of("not-a-url"), "not-a-url");
+    }
+
+    #[test]
     fn pathbase_requires_login() {
         let temp = tempfile::tempdir().unwrap();
         let input_path = temp.path().join("input.json");
         std::fs::write(&input_path, serde_json::to_string(&make_path_doc()).unwrap()).unwrap();
 
-        let _g = crate::cmd_pathbase::TEST_ENV_LOCK
+        let _g = crate::config::TEST_ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         unsafe {
-            std::env::set_var(crate::cmd_pathbase::CONFIG_DIR_ENV, temp.path());
+            std::env::set_var(crate::config::CONFIG_DIR_ENV, temp.path());
         }
         let err = run_pathbase(input_path.to_string_lossy().to_string(), None).unwrap_err();
         unsafe {
-            std::env::remove_var(crate::cmd_pathbase::CONFIG_DIR_ENV);
+            std::env::remove_var(crate::config::CONFIG_DIR_ENV);
         }
         assert!(err.to_string().contains("Not logged in"));
     }

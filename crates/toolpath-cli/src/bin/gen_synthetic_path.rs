@@ -295,6 +295,7 @@ fn main() -> Result<()> {
                 ref_str: None,
             }),
             head,
+            graph_ref: None,
         },
         steps,
         meta: Some(PathMeta {

@@ -10,7 +10,7 @@ use clap::Subcommand;
 use std::path::PathBuf;
 use toolpath::v1::Document;
 
-use crate::cmd_pathbase::config_dir;
+use crate::config::config_dir;
 
 const DOCUMENTS_DIR: &str = "documents";
 
@@ -74,7 +74,13 @@ pub(crate) fn cache_path(id: &str) -> Result<PathBuf> {
 
 /// Write a toolpath document to the cache under `id`. Errors if the
 /// file already exists unless `force` is true.
+///
+/// Uses `O_CREAT | O_EXCL` (`create_new`) when `force == false` so the
+/// exists-check and the write are atomic — two concurrent `path import`
+/// invocations racing the same id can't silently stomp each other.
 pub(crate) fn write_cached(id: &str, doc: &Document, force: bool) -> Result<PathBuf> {
+    use std::io::Write;
+
     let dir = cache_dir()?;
     std::fs::create_dir_all(&dir)
         .with_context(|| format!("create {}", dir.display()))?;
@@ -85,15 +91,30 @@ pub(crate) fn write_cached(id: &str, doc: &Document, force: bool) -> Result<Path
     }
 
     let path = cache_path(id)?;
-    if path.exists() && !force {
-        bail!(
-            "cache entry {id} already exists at {}; pass --force to overwrite",
-            path.display()
-        );
+    let json = doc.to_json_pretty()?;
+
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).truncate(true);
+    if force {
+        opts.create(true);
+    } else {
+        opts.create_new(true);
     }
 
-    let json = doc.to_json_pretty()?;
-    std::fs::write(&path, json).with_context(|| format!("write {}", path.display()))?;
+    let mut file = match opts.open(&path) {
+        Ok(f) => f,
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            bail!(
+                "cache entry {id} already exists at {}; pass --force to overwrite",
+                path.display()
+            );
+        }
+        Err(e) => {
+            return Err(anyhow!("open {}: {e}", path.display()));
+        }
+    };
+    file.write_all(json.as_bytes())
+        .with_context(|| format!("write {}", path.display()))?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -110,7 +131,10 @@ pub(crate) fn cache_ref(s: &str) -> Result<PathBuf> {
     if s.contains('/') || s.contains('\\') || s.ends_with(".json") {
         let p = PathBuf::from(s);
         if !p.exists() {
-            bail!("file not found: {}", p.display());
+            bail!(
+                "file not found: {}; if you meant a cache id, drop the path/extension and run `path cache ls`",
+                p.display()
+            );
         }
         return Ok(p);
     }
@@ -166,9 +190,12 @@ pub(crate) fn remove_cached(id: &str) -> Result<()> {
 /// Build a cache id for a given source + inner id.
 ///
 /// Sanitizes `/` and other filesystem-unfriendly characters in the
-/// inner id to `_` so (e.g.) git branch names land cleanly.
+/// inner id to `_` so (e.g.) git branch names land cleanly. Also strips
+/// a trailing `.json` so the result never collides with the cache's
+/// file extension (see [`cache_path`]).
 pub(crate) fn make_id(source: &str, inner: &str) -> String {
-    let safe: String = inner
+    let trimmed = inner.trim_end_matches(".json");
+    let safe: String = trimmed
         .chars()
         .map(|c| match c {
             '/' | '\\' | ':' | ' ' | '\t' => '_',
@@ -181,7 +208,7 @@ pub(crate) fn make_id(source: &str, inner: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cmd_pathbase::{CONFIG_DIR_ENV, TEST_ENV_LOCK};
+    use crate::config::{CONFIG_DIR_ENV, TEST_ENV_LOCK};
 
     fn with_cfg<F: FnOnce(&std::path::Path) -> R, R>(f: F) -> R {
         let temp = tempfile::tempdir().unwrap();
@@ -307,5 +334,18 @@ mod tests {
         assert_eq!(make_id("git", "main"), "git-main");
         assert_eq!(make_id("git", "feature/x"), "git-feature_x");
         assert_eq!(make_id("pathbase", "trc_01H"), "pathbase-trc_01H");
+    }
+
+    #[test]
+    fn make_id_strips_trailing_json() {
+        assert_eq!(make_id("pathbase", "trc_01H.json"), "pathbase-trc_01H");
+        assert_eq!(make_id("git", "path-main.json"), "git-path-main");
+    }
+
+    #[test]
+    fn make_id_result_survives_cache_path() {
+        // Regression: make_id output must be accepted by cache_path.
+        let id = make_id("pathbase", "trc_01H.json");
+        assert!(cache_path(&id).is_ok());
     }
 }

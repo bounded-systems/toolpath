@@ -283,8 +283,32 @@ fn derive_git(
         };
 
         let doc = toolpath_git::derive(&repo, &branches, &config)?;
-        let cache_id = cache_id_for_doc("git", &doc);
+        // Fold a short hash of the canonical repo path into the cache id so
+        // two repos on the same branch (both `main`) don't collide.
+        let canonical = std::fs::canonicalize(&repo_path).unwrap_or(repo_path.clone());
+        let repo_tag = short_path_hash(&canonical.to_string_lossy());
+        let inner = doc_inner_id(&doc);
+        let cache_id = make_id("git", &format!("{repo_tag}-{inner}"));
         Ok(vec![DerivedDoc { cache_id, doc }])
+    }
+}
+
+/// 8-hex-char stable hash of a path string — used as a repo tag in
+/// cache ids so imports from different repos don't collide.
+fn short_path_hash(s: &str) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    s.hash(&mut h);
+    format!("{:08x}", h.finish() as u32)
+}
+
+/// Extract the inner identifier from a document (Path.path.id, Graph.graph.id, etc.)
+/// without source prefix.
+fn doc_inner_id(doc: &Document) -> String {
+    match doc {
+        Document::Graph(g) => g.graph.id.clone(),
+        Document::Path(p) => p.path.id.clone(),
+        Document::Step(s) => s.step.id.clone(),
     }
 }
 
@@ -592,7 +616,7 @@ fn derive_pi_with_manager(
         Document::Path(toolpath_pi::derive::derive_path(&session, &config))
     };
 
-    let cache_id = cache_id_for_doc("pi", &doc);
+    let cache_id = make_id("pi", &doc_inner_id(&doc));
     Ok(vec![DerivedDoc { cache_id, doc }])
 }
 
@@ -666,13 +690,6 @@ fn parse_pathbase_ref(target: &str, url_flag: Option<&str>) -> Result<(Option<St
     }
 }
 
-fn cache_id_for_doc(source: &str, doc: &Document) -> String {
-    match doc {
-        Document::Graph(g) => make_id(source, &g.graph.id),
-        Document::Path(p) => make_id(source, &p.path.id),
-        Document::Step(s) => make_id(source, &s.step.id),
-    }
-}
 
 #[cfg(all(test, not(target_os = "emscripten")))]
 mod tests {
@@ -739,5 +756,44 @@ mod tests {
         .unwrap();
         assert_eq!(out.len(), 1);
         assert!(out[0].cache_id.starts_with("claude-"));
+    }
+
+    fn setup_claude_manager_with_two_sessions()
+    -> (tempfile::TempDir, toolpath_claude::ClaudeConvo) {
+        let temp = tempfile::tempdir().unwrap();
+        let claude_dir = temp.path().join(".claude");
+        let project_dir = claude_dir.join("projects/-test-project");
+        std::fs::create_dir_all(&project_dir).unwrap();
+
+        // Use sufficiently distinct slugs so toolpath-claude's 8-char id
+        // prefix doesn't alias them into the same path.id.
+        for (slug, ts) in [
+            ("alpha-session-one", "2024-01-01"),
+            ("bravo-session-two", "2024-01-02"),
+        ] {
+            let u = format!(
+                r#"{{"type":"user","uuid":"u-{slug}","timestamp":"{ts}T00:00:00Z","cwd":"/test/project","message":{{"role":"user","content":"hi"}}}}"#
+            );
+            let a = format!(
+                r#"{{"type":"assistant","uuid":"a-{slug}","timestamp":"{ts}T00:00:01Z","message":{{"role":"assistant","content":"hello"}}}}"#
+            );
+            std::fs::write(project_dir.join(format!("{slug}.jsonl")), format!("{u}\n{a}\n"))
+                .unwrap();
+        }
+
+        let resolver = toolpath_claude::PathResolver::new().with_claude_dir(&claude_dir);
+        (temp, toolpath_claude::ClaudeConvo::with_resolver(resolver))
+    }
+
+    #[test]
+    fn derive_claude_all_emits_one_cache_entry_per_session() {
+        let (_t, mgr) = setup_claude_manager_with_two_sessions();
+        let out = derive_claude_with_manager(&mgr, "/test/project".to_string(), None, true).unwrap();
+        assert_eq!(out.len(), 2);
+        // Distinct cache ids so both can land in the cache without collision.
+        assert_ne!(out[0].cache_id, out[1].cache_id);
+        for d in &out {
+            assert!(d.cache_id.starts_with("claude-"));
+        }
     }
 }

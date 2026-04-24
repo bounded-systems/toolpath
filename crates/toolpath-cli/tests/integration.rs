@@ -547,7 +547,7 @@ fn export_pathbase_without_login_errors_clearly() {
     cmd()
         .env("TOOLPATH_CONFIG_DIR", cfg.path())
         .args(["export", "pathbase", "--input"])
-        .arg(examples_dir().join("path-01-pr.json"))
+        .arg(examples_dir().join("path-01-pr.path.json"))
         .assert()
         .failure()
         .stderr(predicate::str::contains("Not logged in"));
@@ -562,6 +562,69 @@ fn import_pathbase_without_login_errors_clearly() {
         .assert()
         .failure()
         .stderr(predicate::str::contains("Not logged in"));
+}
+
+#[test]
+fn import_git_no_cache_honors_global_pretty() {
+    let (dir, branch) = git_fixture();
+
+    let output = cmd()
+        .arg("--pretty")
+        .arg("import")
+        .arg("git")
+        .arg("--no-cache")
+        .arg("--repo")
+        .arg(dir.path())
+        .arg("--branch")
+        .arg(&branch)
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    // Pretty JSON always has multi-line indentation; compact JSON never does.
+    assert!(
+        stdout.contains("\n  "),
+        "expected pretty-printed JSON, got: {stdout}"
+    );
+}
+
+#[test]
+fn import_git_two_repos_on_same_branch_have_distinct_cache_ids() {
+    let (dir_a, branch) = git_fixture();
+    let (dir_b, _) = git_fixture();
+    let cfg = tempfile::tempdir().unwrap();
+
+    cmd()
+        .env("TOOLPATH_CONFIG_DIR", cfg.path())
+        .args(["import", "git", "--branch"])
+        .arg(&branch)
+        .arg("--repo")
+        .arg(dir_a.path())
+        .assert()
+        .success();
+
+    // Second import from a different repo on the same branch must NOT
+    // trigger the "cache entry already exists" collision.
+    cmd()
+        .env("TOOLPATH_CONFIG_DIR", cfg.path())
+        .args(["import", "git", "--branch"])
+        .arg(&branch)
+        .arg("--repo")
+        .arg(dir_b.path())
+        .assert()
+        .success();
+
+    let ls = cmd()
+        .env("TOOLPATH_CONFIG_DIR", cfg.path())
+        .args(["cache", "ls"])
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8(ls.stdout).unwrap();
+    let git_entries = stdout.lines().filter(|l| l.starts_with("git-")).count();
+    assert_eq!(
+        git_entries, 2,
+        "expected two distinct git- cache entries, got:\n{stdout}"
+    );
 }
 
 // ── Deprecation aliases ─────────────────────────────────────────────

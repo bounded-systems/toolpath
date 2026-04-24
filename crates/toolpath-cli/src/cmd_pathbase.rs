@@ -1,17 +1,17 @@
 //! Shared Pathbase client helpers.
 //!
-//! Hosts the HTTP client, URL / config-dir resolution, and session
-//! storage logic used by `cmd_auth`, `cmd_import`, `cmd_export`, and
-//! `cmd_cache`. All functions are `pub(crate)` — the outside world
-//! interacts with these through the relevant command modules.
+//! Hosts the HTTP client and session-storage logic used by `cmd_auth`,
+//! `cmd_import`, and `cmd_export`. Config-dir resolution lives in the
+//! sibling `config` module so `cmd_cache` (which doesn't depend on
+//! reqwest and must build on emscripten) can reuse it.
 
 use anyhow::{Context, Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
-pub(crate) const CONFIG_DIR_NAME: &str = ".toolpath";
+use crate::config::config_dir;
+
 pub(crate) const CREDENTIALS_FILE: &str = "credentials.json";
-pub(crate) const CONFIG_DIR_ENV: &str = "TOOLPATH_CONFIG_DIR";
 pub(crate) const DEFAULT_URL: &str = "https://pathbase.dev";
 pub(crate) const PATHBASE_URL_ENV: &str = "PATHBASE_URL";
 
@@ -198,17 +198,6 @@ pub(crate) fn traces_get(base_url: &str, token: &str, id: &str) -> Result<String
 
 // ── File storage ────────────────────────────────────────────────────────
 
-/// The configured toolpath config directory (default `~/.toolpath`,
-/// overridable via `$TOOLPATH_CONFIG_DIR`).
-pub(crate) fn config_dir() -> Result<PathBuf> {
-    if let Some(override_) = std::env::var_os(CONFIG_DIR_ENV) {
-        return Ok(PathBuf::from(override_));
-    }
-    let home = std::env::var_os("HOME")
-        .ok_or_else(|| anyhow!("$HOME is not set — cannot locate config directory"))?;
-    Ok(PathBuf::from(home).join(CONFIG_DIR_NAME))
-}
-
 pub(crate) fn credentials_path() -> Result<PathBuf> {
     Ok(config_dir()?.join(CREDENTIALS_FILE))
 }
@@ -260,13 +249,6 @@ pub(crate) fn require_session() -> Result<StoredSession> {
     let path = credentials_path()?;
     load_session(&path)?.ok_or_else(|| anyhow!("Not logged in. Run `path auth login`."))
 }
-
-/// Shared lock for tests that manipulate `$TOOLPATH_CONFIG_DIR`. Every
-/// test module that calls `set_var`/`remove_var` on this env var should
-/// grab this lock first, otherwise parallel tests race and clobber each
-/// other's directories.
-#[cfg(test)]
-pub(crate) static TEST_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 #[cfg(test)]
 mod tests {
@@ -337,16 +319,133 @@ mod tests {
         assert!(load_session(&path).unwrap().is_none());
     }
 
+    // ── Mock HTTP server ─────────────────────────────────────────────
+
+    /// A one-shot HTTP/1.1 responder. Binds to 127.0.0.1 on a free port,
+    /// reads one request (headers + body), writes a canned response, closes.
+    struct MockServer {
+        port: u16,
+        thread: Option<std::thread::JoinHandle<Vec<u8>>>,
+    }
+
+    impl MockServer {
+        fn start(status_line: &'static str, body: &'static str) -> Self {
+            use std::io::{BufRead, BufReader, Write};
+            use std::net::TcpListener;
+
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let thread = std::thread::spawn(move || {
+                let (mut stream, _addr) = listener.accept().unwrap();
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut req = Vec::new();
+                loop {
+                    let mut line = String::new();
+                    if reader.read_line(&mut line).unwrap() == 0 {
+                        break;
+                    }
+                    req.extend_from_slice(line.as_bytes());
+                    if line == "\r\n" {
+                        break;
+                    }
+                }
+                let content_length = req
+                    .split(|b| *b == b'\n')
+                    .find_map(|line| {
+                        let line = std::str::from_utf8(line).ok()?;
+                        let (name, value) = line.trim_end_matches('\r').split_once(':')?;
+                        if name.eq_ignore_ascii_case("content-length") {
+                            value.trim().parse::<usize>().ok()
+                        } else {
+                            None
+                        }
+                    })
+                    .unwrap_or(0);
+                if content_length > 0 {
+                    use std::io::Read;
+                    let mut body_buf = vec![0u8; content_length];
+                    reader.read_exact(&mut body_buf).ok();
+                    req.extend_from_slice(&body_buf);
+                }
+
+                let response = format!(
+                    "{status_line}\r\nContent-Length: {}\r\nContent-Type: application/json\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = stream.write_all(response.as_bytes());
+                let _ = stream.flush();
+                req
+            });
+            MockServer {
+                port,
+                thread: Some(thread),
+            }
+        }
+
+        fn base(&self) -> String {
+            format!("http://127.0.0.1:{}", self.port)
+        }
+
+        fn request(mut self) -> Vec<u8> {
+            self.thread.take().unwrap().join().unwrap()
+        }
+    }
+
     #[test]
-    fn config_dir_honors_override() {
-        let _g = TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        unsafe {
-            std::env::set_var(CONFIG_DIR_ENV, "/tmp/test-toolpath");
-        }
-        let dir = config_dir().unwrap();
-        unsafe {
-            std::env::remove_var(CONFIG_DIR_ENV);
-        }
-        assert_eq!(dir, PathBuf::from("/tmp/test-toolpath"));
+    fn traces_post_returns_id_and_url_on_success() {
+        let server = MockServer::start(
+            "HTTP/1.1 200 OK",
+            r#"{"id":"trc_01H","url":"https://pathbase.dev/traces/trc_01H"}"#,
+        );
+        let trace = traces_post(&server.base(), "tok", r#"{"Step":{}}"#).unwrap();
+        assert_eq!(trace.id, "trc_01H");
+        assert_eq!(trace.url, "https://pathbase.dev/traces/trc_01H");
+
+        let req = String::from_utf8(server.request()).unwrap();
+        assert!(req.starts_with("POST /api/v1/traces "), "got: {req}");
+        assert!(
+            req.to_lowercase().contains("authorization: bearer tok"),
+            "got: {req}"
+        );
+        assert!(req.contains(r#"{"Step":{}}"#));
+    }
+
+    #[test]
+    fn traces_post_401_surfaces_relogin_message() {
+        let server = MockServer::start("HTTP/1.1 401 Unauthorized", r#"{"error":"bad"}"#);
+        let err = traces_post(&server.base(), "tok", "{}").unwrap_err();
+        assert!(err.to_string().contains("run `path auth login`"));
+    }
+
+    #[test]
+    fn traces_post_5xx_includes_server_message() {
+        let server = MockServer::start(
+            "HTTP/1.1 500 Internal Server Error",
+            r#"{"error":"database is on fire"}"#,
+        );
+        let err = traces_post(&server.base(), "tok", "{}").unwrap_err();
+        assert!(err.to_string().contains("database is on fire"), "{err}");
+    }
+
+    #[test]
+    fn traces_get_returns_body_on_success() {
+        let body = r#"{"Step":{"step":{"id":"s1","actor":"human:x","timestamp":"2024-01-01T00:00:00Z"},"change":{}}}"#;
+        let server = MockServer::start("HTTP/1.1 200 OK", body);
+        let got = traces_get(&server.base(), "tok", "trc_01H").unwrap();
+        assert_eq!(got, body);
+
+        let req = String::from_utf8(server.request()).unwrap();
+        assert!(req.starts_with("GET /api/v1/traces/trc_01H "), "got: {req}");
+        assert!(
+            req.to_lowercase().contains("authorization: bearer tok"),
+            "got: {req}"
+        );
+    }
+
+    #[test]
+    fn traces_get_404_says_not_found() {
+        let server = MockServer::start("HTTP/1.1 404 Not Found", "");
+        let err = traces_get(&server.base(), "tok", "trc_nope").unwrap_err();
+        assert!(err.to_string().contains("not found"));
     }
 }

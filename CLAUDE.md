@@ -139,7 +139,7 @@ Tests live alongside the code (`#[cfg(test)] mod tests`), plus `toolpath-cli` ha
 - `toolpath-opencode`: 43 unit + 1 doc test (SQLite reader, JSON payload serde, provider assembly, snapshot-based derive, tool-input fallback for gitignored paths)
 - `toolpath-pi`: ~88 unit tests (types, paths, error, reader, io, provider)
 - `toolpath-dot`: 30 unit + 2 doc tests (render, visual conventions, escaping)
-- `toolpath-cli`: 156 unit + 24 integration tests (import/export/cache, track sessions, merge, validate, roundtrip, render-md snapshots, deprecation aliases)
+- `toolpath-cli`: 165 unit + 26 integration tests (import/export/cache, track sessions, merge, validate, roundtrip, render-md snapshots, deprecation aliases, pathbase HTTP mock-server tests)
 
 Validate example documents: `for f in examples/*.json; do cargo run -p toolpath-cli -- validate --input "$f"; done`
 

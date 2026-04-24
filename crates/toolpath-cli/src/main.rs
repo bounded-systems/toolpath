@@ -15,6 +15,7 @@ mod cmd_query;
 mod cmd_render;
 mod cmd_track;
 mod cmd_validate;
+mod config;
 mod io;
 
 use anyhow::Result;
