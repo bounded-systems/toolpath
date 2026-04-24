@@ -26,6 +26,7 @@ export interface ClaudeProject {
   project_path: string;
   display_name: string;
   session_count: number;
+  last_activity: string | null;
 }
 
 export interface ClaudeSession {
@@ -121,6 +122,8 @@ export interface ClaudeSlice {
   sessionsByPath: Record<string, ClaudeSession[]>;
   sessionsLoading: Record<string, boolean>;
   titles: Record<string, string>;        // `${path}|${sid}` → title
+  /** project_path → title of its most-recent session (fills in lazily). */
+  projectTitles: Record<string, string>;
   deriving: boolean;
 }
 
@@ -131,6 +134,8 @@ export interface PiSlice {
   expanded: string | null;
   sessionsByPath: Record<string, PiSession[]>;
   sessionsLoading: Record<string, boolean>;
+  /** Max session `timestamp` seen per project_path. Drives project-list sort. */
+  maxTimestampByProject: Record<string, string>;
   deriving: boolean;
 }
 
@@ -201,6 +206,7 @@ export type Msg =
   | { t: "ClaudeSessionReceived"; session: ClaudeSession }
   | { t: "ClaudeSessionsDone"; path: string }
   | { t: "ClaudeTitleLoaded"; path: string; sid: string; title: string | null }
+  | { t: "ClaudeProjectTitleLoaded"; path: string; title: string | null }
   | { t: "ClaudeDerive"; path: string; sid: string }
 
   // Pi

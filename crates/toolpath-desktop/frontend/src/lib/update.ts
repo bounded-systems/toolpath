@@ -5,6 +5,15 @@
 import { invoke } from "./ipc";
 import type { Cmd, Model, Msg } from "./types";
 
+// Most-recent-first. Nullish values sort last. ISO-8601 strings compare
+// lexicographically, so plain string compare works for RFC3339 timestamps.
+const byRecencyDesc = (a: string | null | undefined, b: string | null | undefined): number => {
+  const aKey = a ?? "";
+  const bKey = b ?? "";
+  if (aKey === bKey) return 0;
+  return bKey < aKey ? -1 : 1;
+};
+
 export function initialModel(): Model {
   return {
     route: "home",
@@ -18,6 +27,7 @@ export function initialModel(): Model {
       sessionsByPath: {},
       sessionsLoading: {},
       titles: {},
+      projectTitles: {},
       deriving: false,
     },
     pi: {
@@ -27,6 +37,7 @@ export function initialModel(): Model {
       expanded: null,
       sessionsByPath: {},
       sessionsLoading: {},
+      maxTimestampByProject: {},
       deriving: false,
     },
     git: {
@@ -136,11 +147,25 @@ export function update(msg: Msg, m: Model): [Model, Cmd | null] {
         null,
       ];
     }
-    case "ClaudeProjectReceived":
+    case "ClaudeProjectReceived": {
+      const projects = [...m.claude.projects, msg.project].sort((a, b) =>
+        byRecencyDesc(a.last_activity, b.last_activity),
+      );
+      const path = msg.project.project_path;
       return [
-        { ...m, claude: { ...m.claude, projects: [...m.claude.projects, msg.project] } },
-        null,
+        { ...m, claude: { ...m.claude, projects } },
+        {
+          type: "invoke",
+          name: "claude_project_latest_title",
+          args: { projectPath: path },
+          onOk: (title) => ({
+            t: "ClaudeProjectTitleLoaded",
+            path,
+            title: (title ?? null) as string | null,
+          }),
+        },
       ];
+    }
     case "ClaudeProjectsDone":
       return [{ ...m, claude: { ...m.claude, loadingProjects: false, projectsDone: true } }, null];
     case "ClaudeProjectsError":
@@ -164,9 +189,12 @@ export function update(msg: Msg, m: Model): [Model, Cmd | null] {
     case "ClaudeSessionReceived": {
       const path = msg.session.project_path;
       const existing = m.claude.sessionsByPath[path] ?? [];
+      const sessions = [...existing, msg.session].sort((a, b) =>
+        byRecencyDesc(a.last_activity ?? a.started_at, b.last_activity ?? b.started_at),
+      );
       const claude = {
         ...m.claude,
-        sessionsByPath: { ...m.claude.sessionsByPath, [path]: [...existing, msg.session] },
+        sessionsByPath: { ...m.claude.sessionsByPath, [path]: sessions },
       };
       return [
         { ...m, claude },
@@ -191,6 +219,12 @@ export function update(msg: Msg, m: Model): [Model, Cmd | null] {
     case "ClaudeTitleLoaded": {
       const titles = { ...m.claude.titles, [`${msg.path}|${msg.sid}`]: msg.title ?? "" };
       return [{ ...m, claude: { ...m.claude, titles } }, null];
+    }
+    case "ClaudeProjectTitleLoaded": {
+      const title = msg.title?.trim();
+      if (!title) return [m, null];
+      const projectTitles = { ...m.claude.projectTitles, [msg.path]: title };
+      return [{ ...m, claude: { ...m.claude, projectTitles } }, null];
     }
     case "ClaudeDerive": {
       const { path, sid } = msg;
@@ -219,11 +253,13 @@ export function update(msg: Msg, m: Model): [Model, Cmd | null] {
         null,
       ];
     }
-    case "PiProjectReceived":
-      return [
-        { ...m, pi: { ...m.pi, projects: [...m.pi.projects, msg.project] } },
-        null,
-      ];
+    case "PiProjectReceived": {
+      const map = m.pi.maxTimestampByProject;
+      const projects = [...m.pi.projects, msg.project].sort((a, b) =>
+        byRecencyDesc(map[a.project_path], map[b.project_path]),
+      );
+      return [{ ...m, pi: { ...m.pi, projects } }, null];
+    }
     case "PiProjectsDone":
       return [{ ...m, pi: { ...m.pi, loadingProjects: false, projectsDone: true } }, null];
     case "PiProjectsError":
@@ -245,12 +281,23 @@ export function update(msg: Msg, m: Model): [Model, Cmd | null] {
     case "PiSessionReceived": {
       const path = msg.session.project_path;
       const existing = m.pi.sessionsByPath[path] ?? [];
+      const sessions = [...existing, msg.session].sort((a, b) =>
+        byRecencyDesc(a.timestamp, b.timestamp),
+      );
+      const prevMax = m.pi.maxTimestampByProject[path];
+      const nextMax = prevMax && prevMax > msg.session.timestamp ? prevMax : msg.session.timestamp;
+      const maxTimestampByProject = { ...m.pi.maxTimestampByProject, [path]: nextMax };
+      const projects = [...m.pi.projects].sort((a, b) =>
+        byRecencyDesc(maxTimestampByProject[a.project_path], maxTimestampByProject[b.project_path]),
+      );
       return [
         {
           ...m,
           pi: {
             ...m.pi,
-            sessionsByPath: { ...m.pi.sessionsByPath, [path]: [...existing, msg.session] },
+            sessionsByPath: { ...m.pi.sessionsByPath, [path]: sessions },
+            maxTimestampByProject,
+            projects,
           },
         },
         null,
@@ -319,8 +366,9 @@ export function update(msg: Msg, m: Model): [Model, Cmd | null] {
       ];
     }
     case "GitBranchesLoaded": {
-      const selected = msg.list.length ? msg.list[0].name : null;
-      return [{ ...m, git: { ...m.git, loading: false, branches: msg.list, selected } }, null];
+      const branches = [...msg.list].sort((a, b) => byRecencyDesc(a.timestamp, b.timestamp));
+      const selected = branches.length ? branches[0].name : null;
+      return [{ ...m, git: { ...m.git, loading: false, branches, selected } }, null];
     }
     case "GitSelectBranch":
       return [{ ...m, git: { ...m.git, selected: msg.name } }, null];

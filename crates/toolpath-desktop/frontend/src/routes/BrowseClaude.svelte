@@ -112,6 +112,7 @@
     <div style="border:0.5px solid var(--ink-5); background:var(--paper-bright)">
       {#each claude.projects as p (p.project_path)}
         {@const isExpanded = claude.expanded === p.project_path}
+        {@const projectTitle = claude.projectTitles[p.project_path]}
         <div>
           <button
             class={"row-card" + (isExpanded ? " row-card--selected" : "")}
@@ -119,7 +120,7 @@
           >
             <span class="row-card__marker"><SourceLogo kind="claude" size={14} /></span>
             <div style="min-width:0">
-              <div class="row-card__title">{p.display_name}</div>
+              <div class="row-card__title">{projectTitle ?? p.display_name}</div>
               <div class="row-card__sub">{p.project_path}</div>
             </div>
             <div class="row-card__right">

@@ -25,6 +25,7 @@ fn main() {
             sources::list_claude_sessions,
             sources::list_claude_sessions_stream,
             sources::claude_session_title,
+            sources::claude_project_latest_title,
             sources::list_pi_projects_stream,
             sources::list_pi_sessions_stream,
             sources::list_git_branches,
