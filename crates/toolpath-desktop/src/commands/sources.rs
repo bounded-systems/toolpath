@@ -46,6 +46,29 @@ fn claude_manager() -> toolpath_claude::ClaudeConvo {
     toolpath_claude::ClaudeConvo::new()
 }
 
+/// Cheap recency hint for a Claude project: max mtime across its `.jsonl`
+/// files, formatted RFC3339. Stat-only — no JSONL parsing.
+fn newest_jsonl_mtime(
+    manager: &toolpath_claude::ClaudeConvo,
+    project_path: &str,
+) -> Option<String> {
+    let dir = manager.resolver().project_dir(project_path).ok()?;
+    let entries = std::fs::read_dir(&dir).ok()?;
+    let mut newest: Option<std::time::SystemTime> = None;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
+            continue;
+        }
+        if let Ok(modified) = entry.metadata().and_then(|m| m.modified()) {
+            if newest.is_none_or(|prev| modified > prev) {
+                newest = Some(modified);
+            }
+        }
+    }
+    newest.map(|t| chrono::DateTime::<chrono::Utc>::from(t).to_rfc3339())
+}
+
 #[tauri::command]
 pub fn list_claude_projects() -> DesktopResult<Vec<ClaudeProjectSummary>> {
     let manager = claude_manager();
@@ -214,14 +237,15 @@ pub fn list_agents() -> DesktopResult<Vec<AgentSummary>> {
 
 /// Minimal per-project payload emitted from [`list_claude_projects_stream`].
 ///
-/// Only cheap-to-compute fields: display name and a file-count proxy for
-/// session count. `last_activity` is deliberately omitted — fetching it would
-/// re-introduce the same per-session metadata reads we want to avoid.
+/// Only cheap-to-compute fields: display name, a file-count proxy for session
+/// count, and a stat-based recency hint (max mtime across the project's JSONL
+/// files). Avoids per-session JSONL parsing.
 #[derive(Debug, Clone, Serialize)]
 pub struct ClaudeProjectQuick {
     pub project_path: String,
     pub display_name: String,
     pub session_count: usize,
+    pub last_activity: Option<String>,
 }
 
 /// Streaming variant of [`list_claude_projects`].
@@ -262,12 +286,15 @@ pub fn list_claude_projects_stream(app: AppHandle) -> DesktopResult<()> {
             .map(|v| v.len())
             .unwrap_or(0);
 
+        let last_activity = newest_jsonl_mtime(&manager, &path);
+
         let _ = app.emit(
             "claude:project",
             ClaudeProjectQuick {
                 project_path: path,
                 display_name,
                 session_count,
+                last_activity,
             },
         );
     }
@@ -336,6 +363,24 @@ pub fn claude_session_title(
     let convo = manager
         .read_conversation(&project_path, &session_id)
         .map_err(|e| DesktopError::Source(format!("read {session_id}: {e}")))?;
+    Ok(convo.title(80))
+}
+
+/// Fetch a human-readable label for a project: the title of its most-recent
+/// session. Called lazily per-project after [`list_claude_projects_stream`]
+/// emits, so the project list paints fast and the titles fill in after.
+#[tauri::command]
+pub fn claude_project_latest_title(project_path: String) -> DesktopResult<Option<String>> {
+    let manager = claude_manager();
+    let metadata = manager
+        .list_conversation_metadata(&project_path)
+        .map_err(|e| DesktopError::Source(format!("list sessions: {e}")))?;
+    let Some(head) = metadata.into_iter().next() else {
+        return Ok(None);
+    };
+    let convo = manager
+        .read_conversation(&project_path, &head.session_id)
+        .map_err(|e| DesktopError::Source(format!("read {}: {e}", head.session_id)))?;
     Ok(convo.title(80))
 }
 
