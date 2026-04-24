@@ -65,13 +65,27 @@ Requires Rust 1.85+ (edition 2024). Pinned to 1.94.0 via `rust-toolchain.toml`.
 The binary is called `path` (package: `toolpath-cli`):
 
 ```bash
-cargo run -p toolpath-cli -- derive git --repo . --branch main --pretty
-cargo run -p toolpath-cli -- derive github --repo owner/repo --pr 42 --pretty
-cargo run -p toolpath-cli -- derive claude --project /path/to/project
-cargo run -p toolpath-cli -- derive gemini --project /path/to/project
-cargo run -p toolpath-cli -- derive codex --session <uuid>
-cargo run -p toolpath-cli -- derive opencode --session ses_<id>
-cargo run -p toolpath-cli -- derive pi --project /path/to/project
+# Import from external formats into the local toolpath cache (~/.toolpath/documents/)
+cargo run -p toolpath-cli -- import git --repo . --branch main
+cargo run -p toolpath-cli -- import github https://github.com/owner/repo/pull/42
+cargo run -p toolpath-cli -- import claude --project /path/to/project
+cargo run -p toolpath-cli -- import gemini --project /path/to/project
+cargo run -p toolpath-cli -- import codex --session <uuid>
+cargo run -p toolpath-cli -- import opencode --session ses_<id>
+cargo run -p toolpath-cli -- import pi --project /path/to/project
+cargo run -p toolpath-cli -- import pathbase <trace-id-or-url>
+cargo run -p toolpath-cli -- import claude --project . --no-cache | path render md --input -
+
+# Export toolpath documents into external formats. <ref> is a cache id or a file path.
+cargo run -p toolpath-cli -- export claude --input <ref> --project /tmp/sandbox
+cargo run -p toolpath-cli -- export claude --input <ref> --output conv.jsonl
+cargo run -p toolpath-cli -- export pathbase --input <ref>
+
+# Manage the cache
+cargo run -p toolpath-cli -- cache ls
+cargo run -p toolpath-cli -- cache rm <cache-id>
+
+# Inspect / analyze
 cargo run -p toolpath-cli -- render dot --input doc.json
 cargo run -p toolpath-cli -- render md --input doc.json --detail full
 cargo run -p toolpath-cli -- query dead-ends --input doc.json
@@ -90,6 +104,10 @@ cargo run -p toolpath-cli -- auth status
 cargo run -p toolpath-cli -- auth whoami
 cargo run -p toolpath-cli -- auth logout
 ```
+
+`path derive`, `path incept`, and `path project` are deprecated aliases for `path import` / `path export claude` and print a deprecation warning to stderr. They will be removed in the release after next.
+
+The **cache** at `~/.toolpath/documents/<cache-id>.json` is the single landing zone for every `import` (and for `import pathbase` downloads). Cache id is `<source>-<inner-id>` — e.g. `claude-abc123`, `git-main`, `pathbase-trc_01H…`. Files are `0600`, parent directory `0700`. `$TOOLPATH_CONFIG_DIR` overrides the root. Default behavior: error on cache hit; pass `--force` to overwrite. `--no-cache` sends the JSON to stdout for shell composition.
 
 `path auth login` prints `<base>/auth/cli`; the user opens it, logs in, and
 pastes the 8-character code back into the CLI. The CLI calls
@@ -121,7 +139,7 @@ Tests live alongside the code (`#[cfg(test)] mod tests`), plus `toolpath-cli` ha
 - `toolpath-opencode`: 43 unit + 1 doc test (SQLite reader, JSON payload serde, provider assembly, snapshot-based derive, tool-input fallback for gitignored paths)
 - `toolpath-pi`: ~88 unit tests (types, paths, error, reader, io, provider)
 - `toolpath-dot`: 30 unit + 2 doc tests (render, visual conventions, escaping)
-- `toolpath-cli`: 126 unit + 24 integration tests (all commands, track sessions, merge, validate, roundtrip, render-md snapshots)
+- `toolpath-cli`: 156 unit + 24 integration tests (import/export/cache, track sessions, merge, validate, roundtrip, render-md snapshots, deprecation aliases)
 
 Validate example documents: `for f in examples/*.json; do cargo run -p toolpath-cli -- validate --input "$f"; done`
 

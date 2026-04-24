@@ -1,10 +1,15 @@
 #[cfg(not(target_os = "emscripten"))]
 mod cmd_auth;
+mod cmd_cache;
 mod cmd_derive;
+mod cmd_export;
 mod cmd_haiku;
+mod cmd_import;
 mod cmd_incept;
 mod cmd_list;
 mod cmd_merge;
+#[cfg(not(target_os = "emscripten"))]
+mod cmd_pathbase;
 mod cmd_project;
 mod cmd_query;
 mod cmd_render;
@@ -39,10 +44,20 @@ enum Commands {
         #[arg(long, global = true)]
         json: bool,
     },
-    /// Derive Toolpath documents from source systems
-    Derive {
+    /// Import from external formats into the toolpath cache
+    Import {
+        #[command(flatten)]
+        args: cmd_import::ImportArgs,
+    },
+    /// Export toolpath documents into external formats
+    Export {
         #[command(subcommand)]
-        source: cmd_derive::DeriveSource,
+        target: cmd_export::ExportTarget,
+    },
+    /// Manage the on-disk document cache (~/.toolpath/documents/)
+    Cache {
+        #[command(subcommand)]
+        op: cmd_cache::CacheOp,
     },
     /// Query Toolpath documents
     Query {
@@ -69,16 +84,6 @@ enum Commands {
         #[command(subcommand)]
         op: cmd_track::TrackOp,
     },
-    /// Project a toolpath document into a provider's conversation format
-    Project {
-        #[command(subcommand)]
-        target: cmd_project::ProjectTarget,
-    },
-    /// Project a toolpath document into a Claude session that Claude Code can resume
-    Incept {
-        #[command(flatten)]
-        args: cmd_incept::InceptArgs,
-    },
     /// Validate a Toolpath document
     Validate {
         /// Input file
@@ -93,6 +98,23 @@ enum Commands {
         #[command(subcommand)]
         op: cmd_auth::AuthOp,
     },
+
+    // ── Deprecated aliases ────────────────────────────────────────────
+    #[command(hide = true, about = "[deprecated] Use `path import`")]
+    Derive {
+        #[command(subcommand)]
+        source: cmd_derive::DeriveSource,
+    },
+    #[command(hide = true, about = "[deprecated] Use `path export claude`")]
+    Incept {
+        #[command(flatten)]
+        args: cmd_incept::InceptArgs,
+    },
+    #[command(hide = true, about = "[deprecated] Use `path export`")]
+    Project {
+        #[command(subcommand)]
+        target: cmd_project::ProjectTarget,
+    },
 }
 
 fn main() -> Result<()> {
@@ -100,13 +122,13 @@ fn main() -> Result<()> {
 
     match cli.command {
         Commands::List { source, json } => cmd_list::run(source, json),
-        Commands::Derive { source } => cmd_derive::run(source, cli.pretty),
+        Commands::Import { args } => cmd_import::run(args, cli.pretty),
+        Commands::Export { target } => cmd_export::run(target),
+        Commands::Cache { op } => cmd_cache::run(op),
         Commands::Query { op } => cmd_query::run(op, cli.pretty),
         Commands::Render { format } => cmd_render::run(format),
         Commands::Merge { inputs, title } => cmd_merge::run(inputs, title, cli.pretty),
         Commands::Track { op } => cmd_track::run(op, cli.pretty),
-        Commands::Project { target } => cmd_project::run(target),
-        Commands::Incept { args } => cmd_incept::run(args),
         Commands::Validate { input } => cmd_validate::run(input),
         Commands::Haiku => {
             cmd_haiku::run();
@@ -114,5 +136,9 @@ fn main() -> Result<()> {
         }
         #[cfg(not(target_os = "emscripten"))]
         Commands::Auth { op } => cmd_auth::run(op),
+
+        Commands::Derive { source } => cmd_derive::run(source, cli.pretty),
+        Commands::Incept { args } => cmd_incept::run(args),
+        Commands::Project { target } => cmd_project::run(target),
     }
 }

@@ -410,3 +410,174 @@ fn auth_login_against_unreachable_url_errors() {
         .failure()
         .stderr(predicate::str::contains("127.0.0.1"));
 }
+
+// ── Import / export / cache ─────────────────────────────────────────
+
+#[test]
+fn import_help_lists_sources_including_pathbase() {
+    cmd()
+        .arg("import")
+        .arg("--help")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("git"))
+        .stdout(predicate::str::contains("github"))
+        .stdout(predicate::str::contains("claude"))
+        .stdout(predicate::str::contains("pathbase"));
+}
+
+#[test]
+fn export_help_lists_claude_and_pathbase() {
+    cmd()
+        .arg("export")
+        .arg("--help")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("claude"))
+        .stdout(predicate::str::contains("pathbase"));
+}
+
+#[test]
+fn import_git_no_cache_emits_stdout_json() {
+    let (dir, branch) = git_fixture();
+
+    cmd()
+        .arg("import")
+        .arg("git")
+        .arg("--no-cache")
+        .arg("--repo")
+        .arg(dir.path())
+        .arg("--branch")
+        .arg(&branch)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"Path\""))
+        .stdout(predicate::str::contains("\"steps\""));
+}
+
+#[test]
+fn import_git_writes_cache_and_prints_path() {
+    let (dir, branch) = git_fixture();
+    let cfg = tempfile::tempdir().unwrap();
+
+    cmd()
+        .env("TOOLPATH_CONFIG_DIR", cfg.path())
+        .arg("import")
+        .arg("git")
+        .arg("--repo")
+        .arg(dir.path())
+        .arg("--branch")
+        .arg(&branch)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(".json"))
+        .stderr(predicate::str::contains("Imported"));
+}
+
+#[test]
+fn import_git_errors_on_existing_cache_without_force() {
+    let (dir, branch) = git_fixture();
+    let cfg = tempfile::tempdir().unwrap();
+
+    cmd()
+        .env("TOOLPATH_CONFIG_DIR", cfg.path())
+        .args(["import", "git", "--branch"])
+        .arg(&branch)
+        .arg("--repo")
+        .arg(dir.path())
+        .assert()
+        .success();
+
+    cmd()
+        .env("TOOLPATH_CONFIG_DIR", cfg.path())
+        .args(["import", "git", "--branch"])
+        .arg(&branch)
+        .arg("--repo")
+        .arg(dir.path())
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("already exists"));
+
+    cmd()
+        .env("TOOLPATH_CONFIG_DIR", cfg.path())
+        .args(["import", "git", "--force", "--branch"])
+        .arg(&branch)
+        .arg("--repo")
+        .arg(dir.path())
+        .assert()
+        .success();
+}
+
+#[test]
+fn cache_ls_on_empty_directory_prints_hint() {
+    let cfg = tempfile::tempdir().unwrap();
+    cmd()
+        .env("TOOLPATH_CONFIG_DIR", cfg.path())
+        .args(["cache", "ls"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("No cached"));
+}
+
+#[test]
+fn cache_ls_after_import_lists_entry() {
+    let (dir, branch) = git_fixture();
+    let cfg = tempfile::tempdir().unwrap();
+
+    cmd()
+        .env("TOOLPATH_CONFIG_DIR", cfg.path())
+        .args(["import", "git", "--branch"])
+        .arg(&branch)
+        .arg("--repo")
+        .arg(dir.path())
+        .assert()
+        .success();
+
+    cmd()
+        .env("TOOLPATH_CONFIG_DIR", cfg.path())
+        .args(["cache", "ls"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("git-"));
+}
+
+#[test]
+fn export_pathbase_without_login_errors_clearly() {
+    let cfg = tempfile::tempdir().unwrap();
+    cmd()
+        .env("TOOLPATH_CONFIG_DIR", cfg.path())
+        .args(["export", "pathbase", "--input"])
+        .arg(examples_dir().join("path-01-pr.json"))
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("Not logged in"));
+}
+
+#[test]
+fn import_pathbase_without_login_errors_clearly() {
+    let cfg = tempfile::tempdir().unwrap();
+    cmd()
+        .env("TOOLPATH_CONFIG_DIR", cfg.path())
+        .args(["import", "pathbase", "trc_nonexistent"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("Not logged in"));
+}
+
+// ── Deprecation aliases ─────────────────────────────────────────────
+
+#[test]
+fn derive_alias_still_works_with_warning() {
+    let (dir, branch) = git_fixture();
+    cmd()
+        .arg("derive")
+        .arg("git")
+        .arg("--repo")
+        .arg(dir.path())
+        .arg("--branch")
+        .arg(&branch)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"Path\""))
+        .stderr(predicate::str::contains("deprecated"));
+}

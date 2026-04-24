@@ -62,29 +62,42 @@ See each crate's README for library-level documentation.
 # Build everything
 cargo build --workspace
 
-# Derive a Toolpath document from this repo's git history
-path derive git --repo . --branch main --pretty
+# Import a Toolpath document from this repo's git history (cached under ~/.toolpath/documents/)
+path import git --repo . --branch main
 
 # Visualize it
-path derive git --repo . --branch main | path render dot | dot -Tpng -o graph.png
+path import git --repo . --branch main --no-cache | path render dot | dot -Tpng -o graph.png
 
 # Render as Markdown for an LLM
-path derive git --repo . --branch main | path render md
+path import git --repo . --branch main --no-cache | path render md
 
-# Derive from a GitHub pull request
-path derive github --repo owner/repo --pr 42 --pretty
+# Import from a GitHub pull request
+path import github https://github.com/owner/repo/pull/42
 
-# Derive from Claude conversation logs
-path derive claude --project /path/to/project --pretty
+# Import from Claude conversation logs
+path import claude --project /path/to/project
 
-# Derive from Gemini CLI conversation logs
-path derive gemini --project /path/to/project --pretty
+# Import from Gemini CLI conversation logs
+path import gemini --project /path/to/project
 
-# Derive from Codex CLI rollout files (most recent session by default)
-path derive codex --pretty
+# Import from Codex CLI rollout files (most recent session by default)
+path import codex
 
-# Derive from opencode session database (most recent session by default)
-path derive opencode --pretty
+# Import from opencode session database (most recent session by default)
+path import opencode
+
+# List what's in the cache
+path cache ls
+
+# Export a cached document back into a Claude Code session
+path export claude --input claude-<session-id> --project /path/to/resume
+
+# Push a cached document to Pathbase
+path auth login
+path export pathbase --input claude-<session-id>
+
+# Pull a trace from Pathbase back into the local cache
+path import pathbase <trace-id-or-url>
 
 # Query for dead ends (abandoned approaches)
 path query dead-ends --input doc.json
