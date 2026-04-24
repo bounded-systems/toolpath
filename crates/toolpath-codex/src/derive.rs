@@ -203,14 +203,14 @@ fn build_step(
     let mut convo_extra: HashMap<String, Value> = HashMap::new();
     convo_extra.insert("role".into(), json!(role_str));
     if !turn.text.is_empty() {
-        convo_extra.insert("text".into(), json!(truncate(&turn.text, 2000)));
+        convo_extra.insert("text".into(), json!(turn.text));
     }
     // Plaintext reasoning summaries land here automatically; encrypted
     // ciphertext never does (lives under turn.extra["codex"]).
     if let Some(th) = turn.thinking.as_deref()
         && !th.is_empty()
     {
-        convo_extra.insert("thinking".into(), json!(truncate(th, 2000)));
+        convo_extra.insert("thinking".into(), json!(th));
     }
     if !turn.tool_uses.is_empty() {
         let calls: Vec<Value> = turn
@@ -382,7 +382,7 @@ fn tool_call_summary(tu: &toolpath_convo::ToolInvocation) -> String {
         "spawn_agent" | "task" | "activate_skill" => pick("prompt").or_else(|| pick("task")),
         _ => None,
     };
-    summary.map(|s| truncate(&s, 500)).unwrap_or_default()
+    summary.unwrap_or_default()
 }
 
 /// Pull `patch_apply_end.changes` off a turn's extras and turn each into
@@ -517,16 +517,6 @@ fn synth_delete_diff(_path: &str, original: &str) -> String {
         buf.push('\n');
     }
     buf
-}
-
-fn truncate(s: &str, max: usize) -> String {
-    let char_count = s.chars().count();
-    if char_count <= max {
-        s.to_string()
-    } else {
-        let truncated: String = s.chars().take(max - 3).collect();
-        format!("{}...", truncated)
-    }
 }
 
 #[cfg(test)]

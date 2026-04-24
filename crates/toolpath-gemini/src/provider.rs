@@ -146,8 +146,9 @@ fn build_gemini_extra(msg: &GeminiMessage) -> Map<String, Value> {
         map.insert("tokens".to_string(), v);
     }
 
-    // Thought metadata (subject + timestamp only; the text lives in
-    // Turn.thinking already).
+    // Full thought structs preserved verbatim. The flattened text also
+    // lands in Turn.thinking; this map is what the reverse projector uses
+    // to rebuild Gemini's `thoughts[]` array losslessly.
     if !msg.thoughts().is_empty() {
         let meta: Vec<Value> = msg
             .thoughts()
@@ -155,6 +156,7 @@ fn build_gemini_extra(msg: &GeminiMessage) -> Map<String, Value> {
             .map(|t| {
                 serde_json::json!({
                     "subject": t.subject,
+                    "description": t.description,
                     "timestamp": t.timestamp,
                 })
             })

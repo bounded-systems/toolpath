@@ -203,7 +203,7 @@ fn build_step(
     convo_extra.insert("role".to_string(), json!(role_str));
     if !text_parts.is_empty() {
         let combined = text_parts.join("\n\n");
-        convo_extra.insert("text".to_string(), json!(truncate(&combined, 2000)));
+        convo_extra.insert("text".to_string(), json!(combined));
     }
     if !tool_calls_meta.is_empty() {
         convo_extra.insert("tool_calls".to_string(), json!(tool_calls_meta));
@@ -273,7 +273,7 @@ fn tool_call_summary(call: &ToolCall) -> String {
         "get_internal_docs" => pick("path").map(str::to_string),
         _ => None,
     };
-    summary.map(|s| truncate(&s, 500)).unwrap_or_default()
+    summary.unwrap_or_default()
 }
 
 fn structural_extra_for(call: &ToolCall) -> HashMap<String, serde_json::Value> {
@@ -306,10 +306,10 @@ fn structural_extra_for(call: &ToolCall) -> HashMap<String, serde_json::Value> {
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
             extra.insert("operation".into(), json!("replace"));
-            extra.insert("old_string".into(), json!(truncate(old_s, 2000)));
-            extra.insert("new_string".into(), json!(truncate(new_s, 2000)));
+            extra.insert("old_string".into(), json!(old_s));
+            extra.insert("new_string".into(), json!(new_s));
             if !instruction.is_empty() {
-                extra.insert("instruction".into(), json!(truncate(instruction, 500)));
+                extra.insert("instruction".into(), json!(instruction));
             }
         }
         "edit" => {
@@ -457,16 +457,6 @@ fn convo_artifact_uri(chat: &ChatFile) -> String {
         chat.session_id.clone()
     };
     format!("gemini://{}", sid)
-}
-
-fn truncate(s: &str, max: usize) -> String {
-    let char_count = s.chars().count();
-    if char_count <= max {
-        s.to_string()
-    } else {
-        let truncated: String = s.chars().take(max - 3).collect();
-        format!("{}...", truncated)
-    }
 }
 
 fn safe_prefix(s: &str, n: usize) -> String {
@@ -779,17 +769,6 @@ mod tests {
         assert_eq!(paths.len(), 2);
         assert!(paths[0].path.id.contains("sess1"));
         assert!(paths[1].path.id.contains("sess2"));
-    }
-
-    #[test]
-    fn test_truncate_behaviour() {
-        assert_eq!(truncate("hello", 10), "hello");
-        let s = "x".repeat(100);
-        assert_eq!(truncate(&s, 10).chars().count(), 10);
-        // Multibyte safe
-        let multi = "日本語テスト";
-        let out = truncate(multi, 3);
-        assert_eq!(out.chars().count(), 3);
     }
 
     #[test]
