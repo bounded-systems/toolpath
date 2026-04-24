@@ -23,7 +23,6 @@ crates/
   toolpath-dot/                 # Graphviz DOT rendering
   toolpath-md/                  # Markdown rendering for LLM consumption
   toolpath-cli/                 # unified CLI (binary: path)
-  toolpath-desktop/             # Tauri 2 GUI (binary: toolpath-desktop)
 schema/toolpath.schema.json     # JSON Schema for the format
 examples/*.json                 # 12 example documents (step, path, graph)
 RFC.md                          # full format specification
@@ -45,12 +44,11 @@ toolpath-cli (binary: path)
  ├── toolpath-pi      → toolpath, toolpath-convo
  ├── toolpath-dot     → toolpath
  └── toolpath-md      → toolpath
-
-toolpath-desktop (binary: toolpath-desktop, Tauri 2 app)
- ├── toolpath, toolpath-claude, toolpath-git, toolpath-github
 ```
 
-Cross-dependencies between satellite crates: `toolpath-claude → toolpath-convo`, `toolpath-gemini → toolpath-convo`, `toolpath-codex → toolpath-convo`, `toolpath-opencode → toolpath-convo`, `toolpath-pi → toolpath-convo`. `toolpath-desktop` is a leaf — nothing depends on it.
+Cross-dependencies between satellite crates: `toolpath-claude → toolpath-convo`, `toolpath-gemini → toolpath-convo`, `toolpath-codex → toolpath-convo`, `toolpath-opencode → toolpath-convo`, `toolpath-pi → toolpath-convo`.
+
+The desktop GUI lives in the private [pathbase](https://github.com/empathic/pathbase) repo as `pathbase-app` — it consumes the toolpath crates via git or crates.io.
 
 ## Build and test
 
@@ -124,7 +122,6 @@ Tests live alongside the code (`#[cfg(test)] mod tests`), plus `toolpath-cli` ha
 - `toolpath-pi`: ~88 unit tests (types, paths, error, reader, io, provider)
 - `toolpath-dot`: 30 unit + 2 doc tests (render, visual conventions, escaping)
 - `toolpath-cli`: 126 unit + 24 integration tests (all commands, track sessions, merge, validate, roundtrip, render-md snapshots)
-- `toolpath-desktop`: 17 unit tests (IPC command modules — source listing, derive validation, export round-trip, upload stub, keychain input checks; tray activity-window bucketing, stats-snapshot smoke, session-id/basename helpers)
 
 Validate example documents: `for f in examples/*.json; do cargo run -p toolpath-cli -- validate --input "$f"; done`
 
@@ -133,38 +130,9 @@ Validate example documents: `for f in examples/*.json; do cargo run -p toolpath-
 - `toolpath-claude` has a `watcher` feature (default: on) gating `notify`/`tokio` dependencies for filesystem watching
 - `toolpath-gemini` has a `watcher` feature (default: on) gating the polling-based `ConversationWatcher` module
 
-## toolpath-desktop
+## Desktop app
 
-Tauri 2 app. Rust backend links `toolpath`, `toolpath-claude`, `toolpath-git`, `toolpath-github` directly (no CLI subprocess). Frontend is Svelte 5 + TypeScript + Vite, in the Elm-architecture (TEA) shape.
-
-Layout:
-- `crates/toolpath-desktop/src/` — Rust backend (Tauri IPC commands).
-- `crates/toolpath-desktop/frontend/` — Svelte app (bundled by Vite; managed with `bun`).
-  - `src/lib/types.ts` — `Model`, `Msg`, `Cmd`, IPC payload types (mirror Rust serde).
-  - `src/lib/update.ts` — pure `update(msg, model) -> [model, cmd]` reducer + `initialModel()`.
-  - `src/lib/store.svelte.ts` — reactive Svelte 5 store wrapping `update`, runs `Cmd`s (invoke / batch / emitMsg / fn).
-  - `src/lib/ipc.ts` — typed `invoke()` + `listen()` wrappers around `@tauri-apps/api`.
-  - `src/lib/viz.ts` — dagre-d3 DAG renderer.
-  - `src/routes/*.svelte` — one component per route, pure views over `store.m`.
-  - `src/app.svelte` — top-level switch on `store.m.route`.
-
-Tauri dev loop: `cargo tauri dev` spawns `bun --cwd frontend run dev` (Vite on `http://localhost:1420`), then runs the Rust binary against that URL. Frontend edits hot-reload via Vite HMR without restarting Rust; Rust edits trigger `cargo run` to restart. Production: `cargo tauri build` runs `bun --cwd frontend run build` first, bundling to `frontend/dist/`.
-
-Menu-bar mode: the app runs as a normal GUI app (Dock icon + app-switcher entry) *and* installs a tray icon — the tray is an accessory, not a replacement for the main window. Accessory activation policy was tried and reverted because macOS tiling window managers (yabai, Amethyst) stop managing accessory windows. A tray icon is installed in `src/tray.rs`; a background thread polls every 30s across `toolpath-claude`, `-gemini`, `-codex`, `-opencode`, and `-pi`, classifies sessions as *active* (last activity in the last 2 min) or *recent* (last 24h), updates the tray title (`● N`), and emits a `tray:stats` event. The popover is a second Tauri window (`label = "popover"`, undecorated, hidden by default) with its own Vite entry (`frontend/popover.html` → `src/popover.ts` → `routes/Popover.svelte`); left-clicking the tray toggles it via `tauri-plugin-positioner`. For an on-demand snapshot (no waiting for the next poll) the popover invokes the `tray_stats_now` IPC command.
-
-Opening a trace from the popover: clicking a recent-session row invokes `tray_open_trace { provider, project, session_id }`. The Rust side calls back into the existing `derive_claude` / `derive_pi` commands, shows the main window, and emits a `trace:opened` event to the main window with the derived `{ doc, source, filename }`. `app.svelte` listens for it and dispatches `DeriveSucceeded`, which routes to the preview. Only `claude` and `pi` have derive commands today — rows for `gemini`, `codex`, `opencode` still appear in the list (so users can see activity) but are rendered disabled.
-
-Pre-derive cache: after each 30s poll the tray kicks off background derives for every recent claude/pi session and stashes the result in `src/cache.rs`'s `TraceCache` (shared via `app.manage(Arc<TraceCache>)`). Both the popover's `tray_open_trace` and the main-window's `derive_claude` / `derive_pi` commands route through the same cache (via `derive_claude_impl` / `derive_pi_impl` in `commands/derive.rs`), so clicking a session — whether from Quick View or the Browse view's "Select →" button — usually resolves instantly. Cache freshness keys on the source's `last_activity`; when a session gets new turns its cached entry is replaced on the next poll. Cacheable calls are limited to single-session, `include_thinking=false` derives (the shape the poller prewarms). Warm-up runs with at most 2 concurrent threads.
-
-Two tiers: (1) memory, a `HashMap` capped at 32 entries; (2) disk, under `<temp_dir>/toolpath-desktop/trace-cache/<fnv1a64-of-key>.json`, so caches survive app restarts (macOS/Linux eventually clean `/tmp` themselves). Disk is capped at 200 entries, pruned oldest-first by mtime at startup. Memory misses fall through to disk and promote the hit back into memory. Corrupt files are silently deleted on read so a bad write doesn't poison the cache forever.
-
-Perf tracer (`frontend/src/lib/perf.svelte.ts`, `PerfOverlay.svelte`): the store, Preview, and the `trace:opened` listener call `perfStart` / `perfMark` / `perfEnd` at each checkpoint of a click → derive → render flow (dispatch, invoke-start, invoke-end, model-updated, preview-mounted, viz-rendered). Every completed trace logs a summary to the devtools console; set `localStorage.perf = "1"` and reload to also show a phase-bar overlay in the bottom-right. Use this to tell whether perceived click latency is the Rust derive vs. the Svelte/dagre render.
-
-Streaming pattern (Claude project/session lists): Rust command spawns a thread that emits `claude:project`, `claude:session`, `claude:projects-done`, `claude:sessions-done` events. The Svelte component subscribes with `$effect(() => { listen(...) ... return unlisten; })` — Svelte tears down listeners automatically when the effect's deps change or the component unmounts.
-
-Package manager for the frontend is `bun` (installed at `~/.bun/bin/bun`). `bun install` to set up, `bun run check` for `svelte-check`, `bun run build` for a production Vite build. Never commit `node_modules/` or `dist/` — both are ignored.
-
-Dev: `cargo tauri dev` from the crate directory. Build: `cargo tauri build`. GitHub PAT is stored in the OS keychain under service `dev.pathbase.toolpath-desktop`. Pathbase upload is a stub as of 0.1.0 — it validates the payload and returns a mock URL.
+The Tauri 2 desktop GUI lives in the private [pathbase](https://github.com/empathic/pathbase) repo as `pathbase-app`. It consumes `toolpath`, `toolpath-claude`, `toolpath-git`, `toolpath-github`, `toolpath-gemini`, `toolpath-codex`, `toolpath-opencode`, and `toolpath-pi` via git/crates.io deps. Don't look for it in this workspace — it was moved out when Pathbase went closed-source.
 
 ## Versioning and release checklist
 

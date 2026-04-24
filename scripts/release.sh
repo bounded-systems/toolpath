@@ -21,9 +21,8 @@ set -euo pipefail
 #       toolpath-opencode (depends on toolpath, toolpath-convo)
 #       toolpath-pi       (depends on toolpath, toolpath-convo)
 #   3. toolpath-cli       (depends on all of the above)
-#      toolpath-desktop   (depends on toolpath, toolpath-claude, toolpath-git, toolpath-github)
 
-ALL_CRATES=(toolpath toolpath-convo toolpath-git toolpath-github toolpath-dot toolpath-md toolpath-claude toolpath-gemini toolpath-codex toolpath-opencode toolpath-pi toolpath-cli toolpath-desktop)
+ALL_CRATES=(toolpath toolpath-convo toolpath-git toolpath-github toolpath-dot toolpath-md toolpath-claude toolpath-gemini toolpath-codex toolpath-opencode toolpath-pi toolpath-cli)
 
 DRY_RUN=""
 AUTO_YES=""
@@ -218,8 +217,7 @@ for crate in toolpath-git toolpath-github toolpath-dot toolpath-md toolpath-clau
     fi
 done
 
-# Tier 3: CLI binary + desktop app (depend on everything above)
+# Tier 3: CLI binary (depends on everything above)
 publish toolpath-cli
-publish toolpath-desktop
 
 echo "=== done ==="

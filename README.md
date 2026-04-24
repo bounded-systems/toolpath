@@ -52,7 +52,6 @@ crates/
   toolpath-dot/       Graphviz DOT visualization
   toolpath-md/        Markdown rendering for LLM consumption
   toolpath-cli/       Unified CLI (binary: path)
-  toolpath-desktop/   Tauri 2 desktop app (binary: toolpath-desktop)
 ```
 
 See each crate's README for library-level documentation.
