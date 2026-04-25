@@ -94,13 +94,5 @@
     "docs": "https://docs.rs/toolpath-cli",
     "crate": "https://crates.io/crates/toolpath-cli",
     "role": "One binary called `path` that ties everything together: derive, query, render, merge, track, validate."
-  },
-  {
-    "name": "toolpath-desktop",
-    "version": "0.1.0",
-    "description": "Desktop app for selecting, previewing, and exporting traces",
-    "docs": "https://docs.rs/toolpath-desktop",
-    "crate": "https://crates.io/crates/toolpath-desktop",
-    "role": "Tauri 2 app that wraps the derive/preview/export flow for non-technical users. Companion to Pathbase — users pick Claude sessions, git branches, or PRs, preview the DAG, and export locally or upload."
   }
 ]

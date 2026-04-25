@@ -1,5 +1,0 @@
-# Tauri CLI file-watcher ignore list (gitignore syntax).
-# `cargo tauri dev` watches the crate root and restarts the Rust binary on
-# any change. Vite already hot-reloads the Svelte frontend, so we don't
-# want the frontend tree to trigger a Rust restart.
-frontend/

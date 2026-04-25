@@ -22,12 +22,9 @@ toolpath-cli (binary: path)
  +-- toolpath-pi      -> toolpath, toolpath-convo
  +-- toolpath-dot     -> toolpath
  +-- toolpath-md      -> toolpath
-
-toolpath-desktop (Tauri 2 app)
- +-- toolpath, toolpath-claude, toolpath-git, toolpath-github
 ```
 
-Cross-dependencies between satellite crates: `toolpath-claude -> toolpath-convo`, `toolpath-gemini -> toolpath-convo`, `toolpath-codex -> toolpath-convo`, `toolpath-opencode -> toolpath-convo`, `toolpath-pi -> toolpath-convo`. `toolpath-desktop` is a leaf — nothing depends on it.
+Cross-dependencies between satellite crates: `toolpath-claude -> toolpath-convo`, `toolpath-gemini -> toolpath-convo`, `toolpath-codex -> toolpath-convo`, `toolpath-opencode -> toolpath-convo`, `toolpath-pi -> toolpath-convo`.
 
 {% for crate in crates %}
 

@@ -4,6 +4,10 @@ All notable changes to the Toolpath workspace are documented here.
 
 ## [Unreleased]
 
+### Removed
+
+- `toolpath-desktop` moved out of the workspace. The Tauri 2 desktop GUI now lives in the private [pathbase](https://github.com/empathic/pathbase) repo as `pathbase-app`. The toolpath derive/render crates remain open-source and are consumed by `pathbase-app` via git/crates.io deps.
+
 ### Changed
 
 - `toolpath-convo` 0.7.0: **breaking** — `file_write_diff` gains a `before_state: Option<&str>` parameter. For the `Write { content }` shape, callers can now supply the prior file contents (e.g. resolved from `git show HEAD:<path>`) so the resulting diff shows `-` lines for replaced content instead of an addition-only hunk. `None` preserves the old behaviour (diff against `""`). `Edit` / `MultiEdit` shapes are unaffected — they carry their own `old_string`. `toolpath-claude`'s Claude-JSONL deriver wires a best-effort git-HEAD lookup for `Write` tool invocations; falls back silently to additions-only when the project isn't a git repo, the file isn't tracked, or `git` isn't on `PATH`. (#35)
@@ -19,7 +23,6 @@ All notable changes to the Toolpath workspace are documented here.
 - `toolpath-opencode` 0.1.0: new crate — reads opencode's `~/.local/share/opencode/opencode.db` SQLite database (opened read-only via `rusqlite` with `SQLITE_OPEN_READ_ONLY` so it never interferes with a live opencode process), implements `ConversationProvider`, and derives Toolpath `Path` documents. Strongly types all 12 `part.data` variants (text, reasoning, tool, step-start/-finish, snapshot, patch, file, agent, subtask, retry, compaction) with `#[serde(other)]` catch-alls so new upstream variants round-trip. Each message becomes a step with tool invocations attached; reasoning folds onto `Turn.thinking`. Real unified diffs come from opencode's sibling bare git snapshot repositories via `git2` tree↔tree comparisons, honoring both the current `snapshot/<project-id>/<sha1(worktree)>/` layout and the older `snapshot/<project-id>/` flat layout. Files under `.gitignore`d paths (which opencode never captures in its snapshot store) fall back to tool-input-derived structural changes with `source: "tool_input_gitignored"` labeling. Project id is the SHA of the repo's first root commit (stable across clones and renames). 43 unit + 1 doc test.
 - `toolpath-cli` 0.4.0: adds `gen_synthetic_path` binary for generating synthetic `Path` fixtures at configurable step counts (bench support for toolpath-desktop Preview, see issue #41).
 - `toolpath-cli` 0.3.1: `path project claude` and `path incept` commands for projecting toolpath documents into Claude sessions; `derive gemini`/`list gemini`, `derive codex`/`list codex`, and `derive opencode [--session ID] [--all] [--project ID] [--no-snapshot-diffs]` / `list opencode [--project ID] [--json]` subcommands.
-- `toolpath-desktop` 0.1.0: new crate — Tauri 2 desktop app for non-technical users. Source discovery for Claude Code + Pi + local git + GitHub PRs; interactive DAG preview (d3 + dagre-d3, Svelte 5 + TypeScript frontend); local `.path.json` export; stubbed Pathbase upload. GitHub PAT stored in the OS keychain under `dev.pathbase.toolpath-desktop`. Hot-reloading dev loop via `cargo tauri dev` (spawns Vite on port 1420).
 
 ## 0.3.0 — toolpath-cli
 
