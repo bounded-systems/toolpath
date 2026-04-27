@@ -6,6 +6,7 @@ fn examples_dir() -> PathBuf {
 }
 
 fn render_md(example: &str) -> String {
+    #[allow(deprecated)]
     let output = Command::cargo_bin("path")
         .unwrap()
         .args(["render", "md", "--input"])

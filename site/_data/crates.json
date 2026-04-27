@@ -89,10 +89,10 @@
   },
   {
     "name": "toolpath-cli",
-    "version": "0.4.0",
+    "version": "0.5.0",
     "description": "Unified CLI (binary: path)",
     "docs": "https://docs.rs/toolpath-cli",
     "crate": "https://crates.io/crates/toolpath-cli",
-    "role": "One binary called `path` that ties everything together: derive, query, render, merge, track, validate."
+    "role": "One binary called `path` that ties everything together: import, export, cache, query, render, merge, track, validate. Pathbase round-trip via `import pathbase` / `export pathbase`."
   }
 ]

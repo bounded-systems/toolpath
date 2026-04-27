@@ -1023,7 +1023,7 @@ mod tests {
     fn test_conversation_view_old_format_no_events() {
         // Old-format JSON without events field should deserialize with empty vec
         let json = r#"{"id":"s1","started_at":null,"last_activity":null,"turns":[]}"#;
-        let view: ConversationView = serde_json::from_str(&json).unwrap();
+        let view: ConversationView = serde_json::from_str(json).unwrap();
         assert!(view.events.is_empty());
     }
 }
