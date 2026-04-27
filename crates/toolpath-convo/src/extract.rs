@@ -185,16 +185,8 @@ fn build_turn(step: &Step, extra: &HashMap<String, serde_json::Value>) -> Turn {
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
 
-    // Model is attributed via the step actor (`agent:{model}`), matching
-    // the convention used across all derivers. The append-extras `model`
-    // key is recognized only as a fallback so older `.path` files keep
-    // decoding cleanly.
-    let model = model_from_actor(&step.step.actor).or_else(|| {
-        extra
-            .get("model")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string())
-    });
+    // Model is attributed via the step actor (`agent:{model}`).
+    let model = model_from_actor(&step.step.actor);
 
     let stop_reason = extra
         .get("stop_reason")
