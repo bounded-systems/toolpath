@@ -76,6 +76,10 @@ pub struct DeriveConfig {
 }
 
 /// Map a Claude tool name to a category string.
+///
+/// Keep in sync with [`crate::provider::tool_category`] — same table,
+/// different return type (string for path-doc serialization vs
+/// [`toolpath_convo::ToolCategory`] for in-memory views).
 fn tool_category_str(name: &str) -> &'static str {
     match name {
         "Read" => "file_read",
@@ -83,7 +87,7 @@ fn tool_category_str(name: &str) -> &'static str {
         "Write" | "Edit" | "MultiEdit" | "NotebookEdit" => "file_write",
         "Bash" => "shell",
         "WebFetch" | "WebSearch" => "network",
-        "Task" => "delegation",
+        "Task" | "Agent" => "delegation",
         _ => "unknown",
     }
 }

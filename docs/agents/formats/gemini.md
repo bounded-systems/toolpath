@@ -7,7 +7,7 @@ on disk plus cross-checking with Gemini's own internal documentation
 (`cli/session-management.md`, `cli/checkpointing.md`,
 `cli/settings.md`, and the tool reference). The Gemini team does not
 publish a stable schema, so treat this as observed behaviour as of
-**2026-04-17** — forward-compat guards matter.
+**2026-04-24** — forward-compat guards matter.
 
 ## Storage root
 
@@ -75,6 +75,14 @@ chats/
 - **Main file name**: `session-YYYY-MM-DDTHH-MM-<first-8-chars-of-uuid>.json`.
   Gemini uses `T` as the date/time separator and `-` instead of `:` in
   timestamps to produce a filesystem-safe name.
+
+  **The `session-` prefix is mandatory.** `gemini --list-sessions` and
+  `--resume` enumerate only files whose stem starts with `session-`;
+  anything else in `chats/` is invisible to the CLI, even if the file's
+  internal structure is otherwise valid. A writer that emits, say,
+  `chats/<uuid>.json` will get silently skipped and the session cannot
+  be resumed. Discovered empirically 2026-04-24 while implementing
+  `path incept gemini`.
 - **Sub-agent dir name**: the **full** `sessionId` UUID from the main
   file's inner content. E.g. main file carries
   `sessionId: "b26d7f99-0116-4d1d-b125-98c228a4b933"`, so its
@@ -85,6 +93,28 @@ chats/
 An orphan `<uuid>/` directory without a matching main file is
 possible (e.g. if the user deleted the main file); consumers should
 gracefully treat the first non-subagent file inside as the main.
+
+### Session resolution (`--resume <id>`)
+
+Gemini CLI accepts **two** identifier forms for `<id>` and resolves them
+in this order:
+
+1. **On-disk filename stem.** `<id>` directly matches `chats/<id>.json`.
+   So `--resume session-2026-04-17T18-09-b26d7f99` works without ever
+   reading a file.
+2. **Inner `sessionId` UUID.** If the stem-match misses, the CLI scans
+   `chats/session-*.json`, reads each file's top-level `sessionId`
+   field, and uses the first file whose value matches `<id>`. This is
+   why `--resume b26d7f99-0116-4d1d-b125-98c228a4b933` works even
+   though no file is named `b26d7f99-….json` on disk.
+
+The interactive `/resume` browser shows UUIDs in brackets (e.g.
+`[b26d7f99-0116-4d1d-b125-98c228a4b933]`); users typically know a
+session by its UUID, not its stem. Writers should therefore ensure the
+inner `sessionId` field is the full UUID they want `--resume` to accept.
+
+A reader that wants parity with the CLI must implement both resolution
+paths — stem match first, then scan-and-match on inner `sessionId`.
 
 ## Chat file schema
 
@@ -456,6 +486,16 @@ These behaviours matter for anyone parsing and re-emitting the JSON:
 6. **Nulls are meaningful on `Option` fields.** A field explicitly
    set to `null` is different from absence; if your serializer drops
    `null` on re-emit, you lose that signal.
+7. **Main chat files MUST be named `session-*.json`.** See "Session
+   resolution" above — the CLI filters `chats/*.json` by stem prefix
+   before even opening files, so a mis-named main is silently
+   unreachable from `--list-sessions` / `--resume`. This is the single
+   most load-bearing filename convention in the format.
+8. **Inner `sessionId` is load-bearing for `--resume`.** Because
+   `--resume <uuid>` matches against the file's inner `sessionId`
+   field (not the stem), writers targeting a specific resume identity
+   must set `sessionId` to the intended UUID. A mismatched
+   `sessionId` makes the session resumable by stem only.
 
 ## Feature-dependent fields
 

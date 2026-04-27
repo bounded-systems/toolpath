@@ -34,10 +34,10 @@ fn tool_category(name: &str) -> Option<ToolCategory> {
     match name {
         "Read" => Some(ToolCategory::FileRead),
         "Glob" | "Grep" => Some(ToolCategory::FileSearch),
-        "Write" | "Edit" | "NotebookEdit" => Some(ToolCategory::FileWrite),
+        "Write" | "Edit" | "MultiEdit" | "NotebookEdit" => Some(ToolCategory::FileWrite),
         "Bash" => Some(ToolCategory::Shell),
         "WebFetch" | "WebSearch" => Some(ToolCategory::Network),
-        "Task" => Some(ToolCategory::Delegation),
+        "Task" | "Agent" => Some(ToolCategory::Delegation),
         _ => None,
     }
 }

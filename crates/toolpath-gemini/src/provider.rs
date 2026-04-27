@@ -47,6 +47,52 @@ pub fn tool_category(name: &str) -> Option<ToolCategory> {
     }
 }
 
+/// Reverse of [`tool_category`]: pick Gemini's preferred native tool name
+/// for a generic [`ToolCategory`], using the call's `args` to disambiguate
+/// when multiple Gemini tools share the same category.
+///
+/// Used by [`crate::project::GeminiProjector`] when projecting tool calls
+/// from foreign harnesses (Claude, Codex, etc.) — we know the category
+/// from the source harness's classifier and need to pick a Gemini name
+/// whose arg shape best matches the call's actual args. Returns `None`
+/// for categories with no obvious Gemini analog.
+pub fn native_name(category: ToolCategory, args: &Value) -> Option<&'static str> {
+    match category {
+        ToolCategory::Shell => Some("run_shell_command"),
+        ToolCategory::FileRead => Some(if args.get("file_paths").is_some() {
+            "read_many_files"
+        } else if args.get("path").is_some() && args.get("file_path").is_none() {
+            // `path` (no `file_path`) matches list_directory's arg shape
+            "list_directory"
+        } else {
+            "read_file"
+        }),
+        ToolCategory::FileSearch => Some(if args.get("pattern").is_some() {
+            "grep_search"
+        } else {
+            "glob"
+        }),
+        ToolCategory::FileWrite => Some(
+            // Edit-family calls carry old_string + new_string; whole-file
+            // writes carry content. Multi-edit shapes (Claude's MultiEdit
+            // edits[]) collapse to `replace` — Gemini has no direct
+            // multi-edit equivalent, but `replace` accepts the args
+            // schema closely enough that the call is still intelligible.
+            if args.get("old_string").is_some() || args.get("edits").is_some() {
+                "replace"
+            } else {
+                "write_file"
+            },
+        ),
+        ToolCategory::Network => Some(if args.get("url").is_some() {
+            "web_fetch"
+        } else {
+            "google_web_search"
+        }),
+        ToolCategory::Delegation => Some("task"),
+    }
+}
+
 // ── Message → Turn ────────────────────────────────────────────────────
 
 fn message_to_turn(msg: &GeminiMessage, working_dir: Option<&str>) -> Turn {
