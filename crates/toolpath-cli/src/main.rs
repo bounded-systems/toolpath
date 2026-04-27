@@ -13,9 +13,13 @@ mod cmd_pathbase;
 mod cmd_project;
 mod cmd_query;
 mod cmd_render;
+#[cfg(not(target_os = "emscripten"))]
+mod cmd_show;
 mod cmd_track;
 mod cmd_validate;
 mod config;
+#[cfg(not(target_os = "emscripten"))]
+mod fzf;
 mod io;
 
 use anyhow::Result;
@@ -41,7 +45,11 @@ enum Commands {
         #[command(subcommand)]
         source: cmd_list::ListSource,
 
-        /// Output as JSON
+        /// Output format (default: pretty when stdout is a TTY, tsv when piped)
+        #[arg(long, global = true, value_enum)]
+        format: Option<cmd_list::ListFormat>,
+
+        /// Output as JSON (deprecated alias for --format json)
         #[arg(long, global = true)]
         json: bool,
     },
@@ -69,6 +77,12 @@ enum Commands {
     Render {
         #[command(subcommand)]
         format: cmd_render::RenderFormat,
+    },
+    /// Show a single session as a markdown summary (used by fzf preview)
+    #[cfg(not(target_os = "emscripten"))]
+    Show {
+        #[command(subcommand)]
+        source: cmd_show::ShowSource,
     },
     /// Merge multiple Toolpath documents into a single Graph
     Merge {
@@ -122,12 +136,18 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::List { source, json } => cmd_list::run(source, json),
+        Commands::List {
+            source,
+            format,
+            json,
+        } => cmd_list::run(source, format, json),
         Commands::Import { args } => cmd_import::run(args, cli.pretty),
         Commands::Export { target } => cmd_export::run(target),
         Commands::Cache { op } => cmd_cache::run(op),
         Commands::Query { op } => cmd_query::run(op, cli.pretty),
         Commands::Render { format } => cmd_render::run(format),
+        #[cfg(not(target_os = "emscripten"))]
+        Commands::Show { source } => cmd_show::run(source),
         Commands::Merge { inputs, title } => cmd_merge::run(inputs, title, cli.pretty),
         Commands::Track { op } => cmd_track::run(op, cli.pretty),
         Commands::Validate { input } => cmd_validate::run(input),

@@ -68,6 +68,17 @@ let convo = manager.read_conversation(
 
 // Most recent conversation
 let latest = manager.most_recent_conversation("/Users/alex/project")?;
+
+// Lightweight metadata, including the first user-prompt text as a
+// human-readable title for picker UIs.
+for meta in manager.list_conversation_metadata("/Users/alex/project")? {
+    println!(
+        "{} ({}msgs): {}",
+        meta.session_uuid,
+        meta.message_count,
+        meta.first_user_message.as_deref().unwrap_or("(no prompt)"),
+    );
+}
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
 

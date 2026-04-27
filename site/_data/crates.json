@@ -33,7 +33,7 @@
   },
   {
     "name": "toolpath-claude",
-    "version": "0.7.0",
+    "version": "0.8.0",
     "description": "Derive from Claude conversation logs",
     "docs": "https://docs.rs/toolpath-claude",
     "crate": "https://crates.io/crates/toolpath-claude",
@@ -41,7 +41,7 @@
   },
   {
     "name": "toolpath-gemini",
-    "version": "0.1.0",
+    "version": "0.2.0",
     "description": "Derive from Gemini CLI conversation logs",
     "docs": "https://docs.rs/toolpath-gemini",
     "crate": "https://crates.io/crates/toolpath-gemini",
@@ -65,7 +65,7 @@
   },
   {
     "name": "toolpath-pi",
-    "version": "0.1.0",
+    "version": "0.2.0",
     "description": "Derive Toolpath provenance documents from Pi (pi.dev) agent session logs",
     "docs": "https://docs.rs/toolpath-pi",
     "crate": "https://crates.io/crates/toolpath-pi",

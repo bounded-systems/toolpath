@@ -18,6 +18,10 @@ pub struct SessionMeta {
     pub timestamp: String,
     pub file_path: PathBuf,
     pub entry_count: usize,
+    /// First non-empty user-prompt text in the session. Useful as a
+    /// human-readable title for picker UIs (e.g. `path list pi --format tsv`
+    /// piped into fzf). `None` if the session has no parseable user message.
+    pub first_user_message: Option<String>,
 }
 
 /// In-memory representation of a Pi session file (plus optional parent).

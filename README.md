@@ -120,19 +120,34 @@ path validate --input examples/step-01-minimal.json
 ```
 path
   list
-    git       [--repo PATH] [--remote NAME] [--json]
-    github    --repo OWNER/REPO [--json]
-    claude    [--project PATH] [--json]
-    gemini    [--project PATH] [--json]
-    codex     [--json]
-    opencode  [--project ID] [--json]
-  derive
+    git       [--repo PATH] [--remote NAME] [--format pretty|json|tsv]
+    github    --repo OWNER/REPO [--format ...]
+    claude    [--project PATH] [--format ...]
+    gemini    [--project PATH] [--format ...]
+    codex     [--format ...]
+    opencode  [--project ID] [--format ...]
+    pi        [--project PATH] [--base DIR] [--format ...]
+  import                                            # writes to ~/.toolpath/documents/ by default
     git       --repo PATH --branch NAME[:START] [--base COMMIT] [--remote NAME] [--title TEXT]
     github    --repo OWNER/REPO --pr NUMBER [--no-ci] [--no-comments]
-    claude    --project PATH [--session ID] [--all]
-    gemini    --project PATH [--session UUID] [--all] [--include-thinking]
+    claude    [--project PATH] [--session ID] [--all]
+    gemini    [--project PATH] [--session UUID] [--all] [--include-thinking]
     codex     [--session UUID|STEM] [--all]
     opencode  [--session ID] [--all] [--project ID] [--no-snapshot-diffs]
+    pi        [--project PATH] [--session ID] [--all] [--base DIR]
+    pathbase  TRACE-ID-OR-URL [--url URL]
+                                                    # global: [--force] [--no-cache]
+  export
+    claude    --input REF [--project DIR | --output FILE]
+    pathbase  --input REF [--url URL]
+  cache
+    ls | rm CACHE-ID
+  show          # markdown summary for a single session (used as fzf preview)
+    claude    --project PATH --session ID
+    gemini    --project PATH --session UUID
+    codex     --session ID
+    opencode  --session ID
+    pi        --project PATH --session ID [--base DIR]
   query
     ancestors --input FILE --step-id ID
     dead-ends --input FILE
@@ -150,10 +165,52 @@ path
     close     --session FILE
     list
   validate    --input FILE
+  auth        login | status | whoami | logout [--url URL]
   haiku
 ```
 
 Global: `--pretty` for formatted JSON output.
+
+`path derive`, `path incept`, and `path project` are still accepted as
+deprecated aliases for `path import` / `path export claude` / `path export`
+and print a deprecation warning to stderr.
+
+## Interactive selection (fzf)
+
+When `path import <provider>` is run with no `--session` and `fzf` is on
+`$PATH` (with stdin and stderr as TTYs), the CLI launches `fzf` so you can
+pick a session by topic. TAB selects multiple — the result is a `Graph`.
+
+The picker leans on two machine-readable surfaces you can also use yourself:
+
+- `path list <provider> --format tsv` — one session per line, tab-delimited.
+  For project-keyed providers (claude, gemini, pi) the columns are
+  `<project>\t<session>\t<iso8601 last_activity>\t<count>\t<first_user_message>`.
+  For single-keyed providers (codex, opencode):
+  `<session>\t<iso8601 last_activity>\t<count>\t<cwd>\t<first_user_message>`.
+  `--format` defaults to `pretty` on a TTY and `tsv` when piped.
+- `path show <provider> --…` — markdown summary for one session (the
+  picker's `--preview` command).
+
+Manual recipe (project-keyed; substitute `claude` for `gemini` or `pi`):
+
+```bash
+path list claude --format tsv \
+  | fzf --delimiter=$'\t' --with-nth=5,3 \
+        --preview 'path show claude --project {1} --session {2}' \
+  | awk -F'\t' '{print $1; print $2}' \
+  | xargs -L2 sh -c 'path import claude --project "$1" --session "$2"' --
+```
+
+Single-keyed (codex/opencode):
+
+```bash
+path list codex --format tsv \
+  | fzf --delimiter=$'\t' --with-nth=5,2 \
+        --preview 'path show codex --session {1}' \
+  | cut -f1 \
+  | xargs -I{} path import codex --session {}
+```
 
 ## Using the libraries
 

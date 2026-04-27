@@ -108,8 +108,10 @@ impl PathResolver {
 }
 
 fn sanitize_project_path(path: &str) -> String {
-    // Claude Code converts both '/' and '_' to '-' when creating project directories
-    path.replace(['/', '_'], "-")
+    // Claude Code maps '/', '_', and '.' to '-' when creating project
+    // directories. Notably, paths under dotdirs like `.claude/worktrees/…`
+    // double-up the dash (the leading `/.` becomes `--`).
+    path.replace(['/', '_', '.'], "-")
 }
 
 fn unsanitize_project_path(sanitized: &str) -> String {
@@ -158,6 +160,16 @@ mod tests {
         assert_eq!(
             unsanitize_project_path("-Users-alex-project"),
             "/Users/alex/project"
+        );
+    }
+
+    #[test]
+    fn test_project_path_sanitization_with_dots() {
+        // Paths under dotted directories (.claude/worktrees, github.com/…) must
+        // be encoded the same way Claude Code does — every '.' becomes '-'.
+        assert_eq!(
+            sanitize_project_path("/Users/alex/code/github.com/x/repo/.claude/worktrees/foo"),
+            "-Users-alex-code-github-com-x-repo--claude-worktrees-foo"
         );
     }
 

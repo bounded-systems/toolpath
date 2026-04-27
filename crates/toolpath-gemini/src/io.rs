@@ -3,8 +3,24 @@
 use crate::error::Result;
 use crate::paths::PathResolver;
 use crate::reader::ConversationReader;
-use crate::types::{ChatFile, Conversation, ConversationMetadata, LogEntry};
+use crate::types::{ChatFile, Conversation, ConversationMetadata, GeminiRole, LogEntry};
 use std::path::PathBuf;
+
+/// First non-empty `"user"` prompt in a chat file, used as a session "title".
+fn first_user_text(chat: &ChatFile) -> Option<String> {
+    chat.messages
+        .iter()
+        .filter(|m| m.role == GeminiRole::User)
+        .find_map(|m| {
+            let text = m.content.text();
+            let trimmed = text.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            }
+        })
+}
 
 #[derive(Debug, Clone)]
 pub struct ConvoIO {
@@ -235,6 +251,7 @@ impl ConvoIO {
                 .first()
                 .map(|p| p.to_string_lossy().to_string())
                 .unwrap_or_else(|| project_path.to_string());
+            let first_user_message = first_user_text(&main);
             return Ok(ConversationMetadata {
                 session_uuid: session_id.to_string(),
                 project_path: project_root,
@@ -243,6 +260,7 @@ impl ConvoIO {
                 started_at,
                 last_activity,
                 sub_agent_count,
+                first_user_message,
             });
         }
 
@@ -276,6 +294,8 @@ impl ConvoIO {
             .map(|p| p.to_string_lossy().to_string())
             .unwrap_or_else(|| project_path.to_string());
 
+        let first_user_message = first_user_text(&main.1);
+
         Ok(ConversationMetadata {
             session_uuid: session_id.to_string(),
             project_path: project_root,
@@ -284,6 +304,7 @@ impl ConvoIO {
             started_at,
             last_activity,
             sub_agent_count,
+            first_user_message,
         })
     }
 

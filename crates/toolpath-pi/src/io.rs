@@ -99,12 +99,25 @@ pub fn list_sessions(resolver: &PathResolver, project: &str) -> Result<Vec<Sessi
             .and_then(|m| m.modified())
             .unwrap_or(SystemTime::UNIX_EPOCH);
 
+        let first_user_message = match extract_first_user_message(&path) {
+            Ok(s) => s,
+            Err(err) => {
+                eprintln!(
+                    "warning: skipping first-user-message extraction for {}: {}",
+                    path.display(),
+                    err
+                );
+                None
+            }
+        };
+
         metas.push((
             SessionMeta {
                 id,
                 timestamp,
                 file_path: path,
                 entry_count,
+                first_user_message,
             },
             mtime,
         ));
@@ -168,6 +181,62 @@ fn count_nonempty_lines(path: &Path) -> std::io::Result<usize> {
         }
     }
     Ok(n)
+}
+
+/// Walk the JSONL until we find a `{"type":"message"}` entry whose
+/// `message.role == "user"` and whose content has non-empty text. Returns
+/// `None` if no user prompt is present.
+///
+/// We don't deserialize into the full `Entry` enum here — Pi messages have
+/// a varied schema and partial JSON parsing is enough for a "title" hint.
+fn extract_first_user_message(path: &Path) -> std::io::Result<Option<String>> {
+    let file = File::open(path)?;
+    let reader = BufReader::new(file);
+    for line in reader.lines() {
+        let line = line?;
+        if line.trim().is_empty() {
+            continue;
+        }
+        let v: serde_json::Value = match serde_json::from_str(&line) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        let obj = match v.as_object() {
+            Some(o) => o,
+            None => continue,
+        };
+        if obj.get("type").and_then(|t| t.as_str()) != Some("message") {
+            continue;
+        }
+        let msg = match obj.get("message").and_then(|m| m.as_object()) {
+            Some(m) => m,
+            None => continue,
+        };
+        if msg.get("role").and_then(|r| r.as_str()) != Some("user") {
+            continue;
+        }
+        let text = match msg.get("content") {
+            Some(serde_json::Value::String(s)) => s.clone(),
+            Some(serde_json::Value::Array(blocks)) => blocks
+                .iter()
+                .filter_map(|b| {
+                    let bo = b.as_object()?;
+                    if bo.get("type").and_then(|t| t.as_str()) == Some("text") {
+                        bo.get("text").and_then(|t| t.as_str()).map(str::to_string)
+                    } else {
+                        None
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("\n"),
+            _ => continue,
+        };
+        let trimmed = text.trim();
+        if !trimmed.is_empty() {
+            return Ok(Some(trimmed.to_string()));
+        }
+    }
+    Ok(None)
 }
 
 /// Return the mtime of `path` formatted as RFC 3339, if it can be read.

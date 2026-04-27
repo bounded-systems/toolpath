@@ -97,6 +97,8 @@ cargo run -p toolpath-cli -- list github --repo owner/repo
 cargo run -p toolpath-cli -- list opencode
 cargo run -p toolpath-cli -- list pi
 cargo run -p toolpath-cli -- list pi --project /path/to/project
+cargo run -p toolpath-cli -- list claude --format tsv  # one session per line, fzf-friendly
+cargo run -p toolpath-cli -- show claude --project /path/to/project --session <session-id>  # markdown summary; used by fzf preview
 cargo run -p toolpath-cli -- track init --file src/main.rs --actor "human:alex"
 cargo run -p toolpath-cli -- validate --input doc.json
 cargo run -p toolpath-cli -- auth login
@@ -133,13 +135,13 @@ Tests live alongside the code (`#[cfg(test)] mod tests`), plus `toolpath-cli` ha
 - `toolpath-convo`: 58 unit + 1 doc test (types, enrichment, display, ConversationView -> Path derivation)
 - `toolpath-git`: 33 unit + 3 doc tests (derive, branch detection, diffstat)
 - `toolpath-github`: 28 unit + 2 doc tests (mapping, DAG construction, fixtures)
-- `toolpath-claude`: 216 unit + 5 doc tests (path resolution, conversation reading, query, chaining, watcher, derive)
+- `toolpath-claude`: 278 unit + 6 doc tests (path resolution, conversation reading, query, chaining, watcher, derive, metadata first-user-message)
 - `toolpath-gemini`: 163 unit + 12 integration + 4 doc tests (path resolution, chat-file parsing, query, watcher, derive, provider, round-trip fidelity)
 - `toolpath-codex`: 69 unit + 33 integration + 1 doc test (rollout parsing, provider assembly, patch-fidelity derive, real-session fixture, source→path fidelity invariants, JSON wire-level round-trip)
 - `toolpath-opencode`: 43 unit + 1 doc test (SQLite reader, JSON payload serde, provider assembly, snapshot-based derive, tool-input fallback for gitignored paths)
-- `toolpath-pi`: ~88 unit tests (types, paths, error, reader, io, provider)
+- `toolpath-pi`: 123 unit + 4 doc tests (types, paths, error, reader, io, provider)
 - `toolpath-dot`: 30 unit + 2 doc tests (render, visual conventions, escaping)
-- `toolpath-cli`: 165 unit + 26 integration tests (import/export/cache, track sessions, merge, validate, roundtrip, render-md snapshots, deprecation aliases, pathbase HTTP mock-server tests)
+- `toolpath-cli`: 174 unit + 26 integration tests (import/export/cache, track sessions, merge, validate, roundtrip, render-md snapshots, deprecation aliases, pathbase HTTP mock-server tests, fzf-friendly TSV output)
 
 Validate example documents: `for f in examples/*.json; do cargo run -p toolpath-cli -- validate --input "$f"; done`
 
@@ -195,3 +197,5 @@ Build the site after changes: `cd site && pnpm run build` (should produce 7 page
 - Codex provider: `toolpath-codex` reads Codex CLI rollout files from `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl`. Sessions are date-bucketed (not project-keyed). File-change fidelity is excellent — Codex's `patch_apply_end` events carry either the unified diff (for updates) or the full file content (for adds), so the derived `Path` gets a real `raw` perspective on every file artifact. See `docs/agents/formats/codex.md` for the full format reference.
 - opencode provider: `toolpath-opencode` reads a SQLite database at `~/.local/share/opencode/opencode.db` (opened read-only). Each session's messages and 12 typed part variants (text, reasoning, tool, step-start/-finish, snapshot, patch, file, agent, subtask, retry, compaction) land as one step per message with tool invocations attached. File diffs come from a sibling bare git repo at `snapshot/<project-id>/[<sha1(worktree)>]/` via `git2` tree↔tree diffs — opencode respects the user's `.gitignore`, so changes under gitignored paths fall back to tool-input-derived structural changes with no `raw` perspective. Project id is the SHA of the repo's first root commit. See `docs/agents/formats/opencode.md` for the full format reference.
 - Format references for the agent on-disk formats we derive from live at `docs/agents/formats/`. The Claude Code format (`~/.claude/projects/…` JSONL) gets the deepest treatment — twelve focused docs at `docs/agents/formats/claude-code/` covering envelope, entry types, tools, session chains, compaction, writing-compatible JSONL, a linear walkthrough, and a version-keyed changelog. Sibling single-file references: `codex.md`, `gemini.md`, `opencode.md`. Keep them in sync with their derive crates when fields or behaviors change.
+- Interactive session selection: `path import <provider>` (claude / gemini / pi / codex / opencode) auto-launches `fzf` when stdin and stderr are TTYs, `fzf` is on `$PATH`, and no `--session` was given. Multi-select (TAB) produces a `Graph` document; single-select produces a `Path`. The picker uses `path show <provider> --…` as its `--preview` command. When fzf isn't available, it falls back to most-recent (with `--project`) or prints the manual recipe (without). `path list <provider> --format tsv` is the documented machine-readable surface — column 1 is the project (for claude/gemini/pi) or session id (for codex/opencode), and the trailing column carries `first_user_message` so consumers can fuzzy-match by topic.
+- Conversation metadata title field: `toolpath-claude::ConversationMetadata`, `toolpath-gemini::ConversationMetadata`, and `toolpath-pi::SessionMeta` all expose `first_user_message: Option<String>` — the first non-empty user-prompt text. Populated cheaply during the metadata pass (single-pass for Claude/Gemini; one extra short read for Pi). Used by the picker UI but useful for any "list sessions by topic" surface.

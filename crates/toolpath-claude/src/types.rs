@@ -537,6 +537,12 @@ pub struct ConversationMetadata {
     pub message_count: usize,
     pub started_at: Option<DateTime<Utc>>,
     pub last_activity: Option<DateTime<Utc>>,
+    /// The first non-empty user-prompt text in the conversation. Useful as a
+    /// human-readable title — populated cheaply during the metadata pass and
+    /// surfaced by `path list claude --format tsv` so that picking sessions
+    /// by topic (rather than by UUID/timestamp) is practical.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first_user_message: Option<String>,
 }
 
 #[cfg(test)]

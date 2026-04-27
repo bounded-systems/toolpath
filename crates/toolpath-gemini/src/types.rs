@@ -361,6 +361,10 @@ pub struct ConversationMetadata {
     pub last_activity: Option<DateTime<Utc>>,
     /// Number of sub-agent chat files detected alongside the main chat.
     pub sub_agent_count: usize,
+    /// The first non-empty user-prompt text in the main chat. Useful as a
+    /// human-readable title for picker UIs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first_user_message: Option<String>,
 }
 
 /// A fully-loaded session: the main chat plus every sub-agent file in the

@@ -1,7 +1,8 @@
 #[cfg(not(target_os = "emscripten"))]
 use anyhow::Context;
 use anyhow::Result;
-use clap::Subcommand;
+use clap::{Subcommand, ValueEnum};
+use std::io::IsTerminal;
 use std::path::PathBuf;
 
 #[derive(Subcommand, Debug)]
@@ -24,13 +25,15 @@ pub enum ListSource {
     },
     /// List Claude projects or sessions
     Claude {
-        /// Project path — if omitted, lists all projects
+        /// Project path — if omitted, lists all projects (pretty) or all
+        /// sessions across all projects (tsv/json).
         #[arg(short, long)]
         project: Option<String>,
     },
     /// List Gemini CLI projects or sessions
     Gemini {
-        /// Project path — if omitted, lists all projects
+        /// Project path — if omitted, lists all projects (pretty) or all
+        /// sessions across all projects (tsv/json).
         #[arg(short, long)]
         project: Option<String>,
     },
@@ -44,7 +47,8 @@ pub enum ListSource {
     },
     /// List Pi (pi.dev) projects or sessions
     Pi {
-        /// Project path — if omitted, lists all projects
+        /// Project path — if omitted, lists all projects (pretty) or all
+        /// sessions across all projects (tsv/json).
         #[arg(short, long)]
         project: Option<String>,
 
@@ -54,22 +58,54 @@ pub enum ListSource {
     },
 }
 
-pub fn run(source: ListSource, json: bool) -> Result<()> {
-    match source {
-        ListSource::Git { repo, remote } => run_git(repo, remote, json),
-        ListSource::Github { repo } => run_github(repo, json),
-        ListSource::Claude { project } => run_claude(project, json),
-        ListSource::Gemini { project } => run_gemini(project, json),
-        ListSource::Codex {} => run_codex(json),
-        ListSource::Opencode { project } => run_opencode(project, json),
-        ListSource::Pi { project, base } => run_pi(project, base, json),
+/// Output format selector. When neither `--format` nor `--json` is set, the
+/// CLI picks `pretty` for a TTY and `tsv` when stdout is piped — that way
+/// `path list claude | fzf …` and `path list claude` both do the right thing.
+#[derive(Copy, Clone, Debug, ValueEnum)]
+pub enum ListFormat {
+    /// Human-readable, with section headers and aligned columns.
+    Pretty,
+    /// One JSON object per call.
+    Json,
+    /// One session per line, tab-delimited. See README for column layout.
+    Tsv,
+}
+
+/// Resolve the effective format. `--format` wins; `--json` is the deprecated
+/// alias; otherwise auto-detect by stdout TTY.
+pub fn resolve_format(format: Option<ListFormat>, json_flag: bool) -> ListFormat {
+    if let Some(f) = format {
+        return f;
+    }
+    if json_flag {
+        return ListFormat::Json;
+    }
+    if std::io::stdout().is_terminal() {
+        ListFormat::Pretty
+    } else {
+        ListFormat::Tsv
     }
 }
 
-fn run_git(repo_path: PathBuf, remote: String, json: bool) -> Result<()> {
+pub fn run(source: ListSource, format: Option<ListFormat>, json_flag: bool) -> Result<()> {
+    let fmt = resolve_format(format, json_flag);
+    match source {
+        ListSource::Git { repo, remote } => run_git(repo, remote, fmt),
+        ListSource::Github { repo } => run_github(repo, fmt),
+        ListSource::Claude { project } => run_claude(project, fmt),
+        ListSource::Gemini { project } => run_gemini(project, fmt),
+        ListSource::Codex {} => run_codex(fmt),
+        ListSource::Opencode { project } => run_opencode(project, fmt),
+        ListSource::Pi { project, base } => run_pi(project, base, fmt),
+    }
+}
+
+// ── Git ─────────────────────────────────────────────────────────────────────
+
+fn run_git(repo_path: PathBuf, remote: String, fmt: ListFormat) -> Result<()> {
     #[cfg(target_os = "emscripten")]
     {
-        let _ = (repo_path, remote, json);
+        let _ = (repo_path, remote, fmt);
         anyhow::bail!(
             "'path list git' requires a native environment with access to a git repository"
         );
@@ -89,33 +125,48 @@ fn run_git(repo_path: PathBuf, remote: String, json: bool) -> Result<()> {
         let uri = toolpath_git::get_repo_uri(&repo, &remote)?;
         let branches = toolpath_git::list_branches(&repo)?;
 
-        if json {
-            let items: Vec<serde_json::Value> = branches
-                .iter()
-                .map(|b| {
-                    serde_json::json!({
-                        "name": b.name,
-                        "head": b.head,
-                        "subject": b.subject,
-                        "author": b.author,
-                        "timestamp": b.timestamp,
+        match fmt {
+            ListFormat::Json => {
+                let items: Vec<serde_json::Value> = branches
+                    .iter()
+                    .map(|b| {
+                        serde_json::json!({
+                            "name": b.name,
+                            "head": b.head,
+                            "subject": b.subject,
+                            "author": b.author,
+                            "timestamp": b.timestamp,
+                        })
                     })
-                })
-                .collect();
-            let output = serde_json::json!({
-                "source": "git",
-                "uri": uri,
-                "branches": items,
-            });
-            println!("{}", serde_json::to_string_pretty(&output)?);
-        } else {
-            println!("Repository: {}", uri);
-            println!();
-            if branches.is_empty() {
-                println!("  (no local branches)");
-            } else {
+                    .collect();
+                let output = serde_json::json!({
+                    "source": "git",
+                    "uri": uri,
+                    "branches": items,
+                });
+                println!("{}", serde_json::to_string_pretty(&output)?);
+            }
+            ListFormat::Tsv => {
                 for b in &branches {
-                    println!("  {} {} {}", b.head_short, b.name, truncate(&b.subject, 60));
+                    println!(
+                        "{}\t{}\t{}\t{}\t{}",
+                        sanitize_tsv(&b.name),
+                        sanitize_tsv(&b.head),
+                        sanitize_tsv(&b.timestamp),
+                        sanitize_tsv(&b.author),
+                        sanitize_tsv(&b.subject),
+                    );
+                }
+            }
+            ListFormat::Pretty => {
+                println!("Repository: {}", uri);
+                println!();
+                if branches.is_empty() {
+                    println!("  (no local branches)");
+                } else {
+                    for b in &branches {
+                        println!("  {} {} {}", b.head_short, b.name, truncate(&b.subject, 60));
+                    }
                 }
             }
         }
@@ -123,10 +174,12 @@ fn run_git(repo_path: PathBuf, remote: String, json: bool) -> Result<()> {
     }
 }
 
-fn run_github(repo: String, json: bool) -> Result<()> {
+// ── GitHub ──────────────────────────────────────────────────────────────────
+
+fn run_github(repo: String, fmt: ListFormat) -> Result<()> {
     #[cfg(target_os = "emscripten")]
     {
-        let _ = (repo, json);
+        let _ = (repo, fmt);
         anyhow::bail!("'path list github' requires a native environment with network access");
     }
 
@@ -144,42 +197,57 @@ fn run_github(repo: String, json: bool) -> Result<()> {
 
         let prs = toolpath_github::list_pull_requests(owner, repo_name, &config)?;
 
-        if json {
-            let items: Vec<serde_json::Value> = prs
-                .iter()
-                .map(|pr| {
-                    serde_json::json!({
-                        "number": pr.number,
-                        "title": pr.title,
-                        "state": pr.state,
-                        "author": pr.author,
-                        "head_branch": pr.head_branch,
-                        "base_branch": pr.base_branch,
-                        "created_at": pr.created_at,
-                        "updated_at": pr.updated_at,
+        match fmt {
+            ListFormat::Json => {
+                let items: Vec<serde_json::Value> = prs
+                    .iter()
+                    .map(|pr| {
+                        serde_json::json!({
+                            "number": pr.number,
+                            "title": pr.title,
+                            "state": pr.state,
+                            "author": pr.author,
+                            "head_branch": pr.head_branch,
+                            "base_branch": pr.base_branch,
+                            "created_at": pr.created_at,
+                            "updated_at": pr.updated_at,
+                        })
                     })
-                })
-                .collect();
-            let output = serde_json::json!({
-                "source": "github",
-                "repo": format!("{}/{}", owner, repo_name),
-                "pull_requests": items,
-            });
-            println!("{}", serde_json::to_string_pretty(&output)?);
-        } else {
-            println!("Pull requests for {}/{}:", owner, repo_name);
-            println!();
-            if prs.is_empty() {
-                println!("  (none)");
-            } else {
+                    .collect();
+                let output = serde_json::json!({
+                    "source": "github",
+                    "repo": format!("{}/{}", owner, repo_name),
+                    "pull_requests": items,
+                });
+                println!("{}", serde_json::to_string_pretty(&output)?);
+            }
+            ListFormat::Tsv => {
                 for pr in &prs {
                     println!(
-                        "  #{:<5} {:>8} {}  {}",
+                        "{}\t{}\t{}\t{}\t{}",
                         pr.number,
-                        pr.state,
-                        pr.author,
-                        truncate(&pr.title, 50),
+                        sanitize_tsv(&pr.updated_at),
+                        sanitize_tsv(&pr.state),
+                        sanitize_tsv(&pr.author),
+                        sanitize_tsv(&pr.title),
                     );
+                }
+            }
+            ListFormat::Pretty => {
+                println!("Pull requests for {}/{}:", owner, repo_name);
+                println!();
+                if prs.is_empty() {
+                    println!("  (none)");
+                } else {
+                    for pr in &prs {
+                        println!(
+                            "  #{:<5} {:>8} {}  {}",
+                            pr.number,
+                            pr.state,
+                            pr.author,
+                            truncate(&pr.title, 50),
+                        );
+                    }
                 }
             }
         }
@@ -187,38 +255,52 @@ fn run_github(repo: String, json: bool) -> Result<()> {
     }
 }
 
-fn run_claude(project: Option<String>, json: bool) -> Result<()> {
+// ── Claude ──────────────────────────────────────────────────────────────────
+
+fn run_claude(project: Option<String>, fmt: ListFormat) -> Result<()> {
     let manager = toolpath_claude::ClaudeConvo::new();
 
-    match project {
-        None => list_claude_projects(&manager, json),
-        Some(project_path) => list_claude_sessions(&manager, &project_path, json),
+    match (project, fmt) {
+        // TSV/JSON without --project: emit sessions across every project so
+        // that fzf can pick one without the user pre-selecting a project.
+        (None, ListFormat::Tsv) => list_claude_sessions_all(&manager, ListFormat::Tsv),
+        (None, ListFormat::Json) => list_claude_sessions_all(&manager, ListFormat::Json),
+        (None, ListFormat::Pretty) => list_claude_projects(&manager, ListFormat::Pretty),
+        (Some(p), f) => list_claude_sessions(&manager, &p, f),
     }
 }
 
-fn list_claude_projects(manager: &toolpath_claude::ClaudeConvo, json: bool) -> Result<()> {
+fn list_claude_projects(manager: &toolpath_claude::ClaudeConvo, fmt: ListFormat) -> Result<()> {
     let projects = manager
         .list_projects()
         .map_err(|e| anyhow::anyhow!("{}", e))?;
 
-    if json {
-        let items: Vec<serde_json::Value> = projects
-            .iter()
-            .map(|p| serde_json::json!({ "path": p }))
-            .collect();
-        let output = serde_json::json!({
-            "source": "claude",
-            "projects": items,
-        });
-        println!("{}", serde_json::to_string_pretty(&output)?);
-    } else {
-        println!("Claude projects:");
-        println!();
-        if projects.is_empty() {
-            println!("  (none)");
-        } else {
+    match fmt {
+        ListFormat::Json => {
+            let items: Vec<serde_json::Value> = projects
+                .iter()
+                .map(|p| serde_json::json!({ "path": p }))
+                .collect();
+            let output = serde_json::json!({
+                "source": "claude",
+                "projects": items,
+            });
+            println!("{}", serde_json::to_string_pretty(&output)?);
+        }
+        ListFormat::Tsv => {
             for p in &projects {
-                println!("  {}", p);
+                println!("{}", sanitize_tsv(p));
+            }
+        }
+        ListFormat::Pretty => {
+            println!("Claude projects:");
+            println!();
+            if projects.is_empty() {
+                println!("  (none)");
+            } else {
+                for p in &projects {
+                    println!("  {}", p);
+                }
             }
         }
     }
@@ -228,80 +310,166 @@ fn list_claude_projects(manager: &toolpath_claude::ClaudeConvo, json: bool) -> R
 fn list_claude_sessions(
     manager: &toolpath_claude::ClaudeConvo,
     project_path: &str,
-    json: bool,
+    fmt: ListFormat,
 ) -> Result<()> {
     let metadata = manager
         .list_conversation_metadata(project_path)
         .map_err(|e| anyhow::anyhow!("{}", e))?;
 
-    if json {
-        let items: Vec<serde_json::Value> = metadata
-            .iter()
-            .map(|m| {
-                serde_json::json!({
-                    "session_id": m.session_id,
-                    "messages": m.message_count,
-                    "started_at": m.started_at.map(|t| t.to_rfc3339()),
-                    "last_activity": m.last_activity.map(|t| t.to_rfc3339()),
+    match fmt {
+        ListFormat::Json => {
+            let items: Vec<serde_json::Value> = metadata
+                .iter()
+                .map(|m| {
+                    serde_json::json!({
+                        "session_id": m.session_id,
+                        "project_path": m.project_path,
+                        "messages": m.message_count,
+                        "started_at": m.started_at.map(|t| t.to_rfc3339()),
+                        "last_activity": m.last_activity.map(|t| t.to_rfc3339()),
+                        "first_user_message": m.first_user_message,
+                    })
                 })
-            })
-            .collect();
-        let output = serde_json::json!({
-            "source": "claude",
-            "project": project_path,
-            "sessions": items,
-        });
-        println!("{}", serde_json::to_string_pretty(&output)?);
-    } else {
-        println!("Sessions for {}:", project_path);
-        println!();
-        if metadata.is_empty() {
-            println!("  (none)");
-        } else {
+                .collect();
+            let output = serde_json::json!({
+                "source": "claude",
+                "project": project_path,
+                "sessions": items,
+            });
+            println!("{}", serde_json::to_string_pretty(&output)?);
+        }
+        ListFormat::Tsv => {
             for m in &metadata {
-                let date = m
-                    .last_activity
-                    .map(|t| t.format("%Y-%m-%d %H:%M").to_string())
-                    .unwrap_or_else(|| "unknown".to_string());
-                println!("  {} {:>4} msgs  {}", &m.session_id, m.message_count, date);
+                emit_claude_tsv(m);
+            }
+        }
+        ListFormat::Pretty => {
+            println!("Sessions for {}:", project_path);
+            println!();
+            if metadata.is_empty() {
+                println!("  (none)");
+            } else {
+                for m in &metadata {
+                    let date = m
+                        .last_activity
+                        .map(|t| t.format("%Y-%m-%d %H:%M").to_string())
+                        .unwrap_or_else(|| "unknown".to_string());
+                    println!("  {} {:>4} msgs  {}", &m.session_id, m.message_count, date);
+                }
             }
         }
     }
     Ok(())
 }
 
-fn run_gemini(project: Option<String>, json: bool) -> Result<()> {
-    let manager = toolpath_gemini::GeminiConvo::new();
-
-    match project {
-        None => list_gemini_projects(&manager, json),
-        Some(project_path) => list_gemini_sessions(&manager, &project_path, json),
-    }
-}
-
-fn list_gemini_projects(manager: &toolpath_gemini::GeminiConvo, json: bool) -> Result<()> {
+fn list_claude_sessions_all(
+    manager: &toolpath_claude::ClaudeConvo,
+    fmt: ListFormat,
+) -> Result<()> {
     let projects = manager
         .list_projects()
         .map_err(|e| anyhow::anyhow!("{}", e))?;
 
-    if json {
-        let items: Vec<serde_json::Value> = projects
-            .iter()
-            .map(|p| serde_json::json!({ "path": p }))
-            .collect();
-        let output = serde_json::json!({
-            "source": "gemini",
-            "projects": items,
-        });
-        println!("{}", serde_json::to_string_pretty(&output)?);
-    } else {
-        println!("Gemini projects:");
-        println!();
-        if projects.is_empty() {
-            println!("  (none)");
-        } else {
+    let mut all: Vec<toolpath_claude::ConversationMetadata> = Vec::new();
+    for project in &projects {
+        match manager.list_conversation_metadata(project) {
+            Ok(metas) => all.extend(metas),
+            Err(_) => continue, // skip unreadable projects rather than aborting
+        }
+    }
+    all.sort_by(|a, b| b.last_activity.cmp(&a.last_activity));
+
+    match fmt {
+        ListFormat::Json => {
+            let items: Vec<serde_json::Value> = all
+                .iter()
+                .map(|m| {
+                    serde_json::json!({
+                        "session_id": m.session_id,
+                        "project_path": m.project_path,
+                        "messages": m.message_count,
+                        "started_at": m.started_at.map(|t| t.to_rfc3339()),
+                        "last_activity": m.last_activity.map(|t| t.to_rfc3339()),
+                        "first_user_message": m.first_user_message,
+                    })
+                })
+                .collect();
+            let output = serde_json::json!({
+                "source": "claude",
+                "sessions": items,
+            });
+            println!("{}", serde_json::to_string_pretty(&output)?);
+        }
+        ListFormat::Tsv => {
+            for m in &all {
+                emit_claude_tsv(m);
+            }
+        }
+        ListFormat::Pretty => unreachable!("pretty falls back to project listing"),
+    }
+    Ok(())
+}
+
+fn emit_claude_tsv(m: &toolpath_claude::ConversationMetadata) {
+    println!(
+        "{}\t{}\t{}\t{}\t{}",
+        sanitize_tsv(&m.project_path),
+        sanitize_tsv(&m.session_id),
+        m.last_activity
+            .map(|t| t.to_rfc3339())
+            .unwrap_or_default(),
+        m.message_count,
+        m.first_user_message
+            .as_deref()
+            .map(sanitize_tsv)
+            .unwrap_or_default(),
+    );
+}
+
+// ── Gemini ──────────────────────────────────────────────────────────────────
+
+fn run_gemini(project: Option<String>, fmt: ListFormat) -> Result<()> {
+    let manager = toolpath_gemini::GeminiConvo::new();
+
+    match (project, fmt) {
+        (None, ListFormat::Tsv) => list_gemini_sessions_all(&manager, ListFormat::Tsv),
+        (None, ListFormat::Json) => list_gemini_sessions_all(&manager, ListFormat::Json),
+        (None, ListFormat::Pretty) => list_gemini_projects(&manager, ListFormat::Pretty),
+        (Some(p), f) => list_gemini_sessions(&manager, &p, f),
+    }
+}
+
+fn list_gemini_projects(manager: &toolpath_gemini::GeminiConvo, fmt: ListFormat) -> Result<()> {
+    let projects = manager
+        .list_projects()
+        .map_err(|e| anyhow::anyhow!("{}", e))?;
+
+    match fmt {
+        ListFormat::Json => {
+            let items: Vec<serde_json::Value> = projects
+                .iter()
+                .map(|p| serde_json::json!({ "path": p }))
+                .collect();
+            let output = serde_json::json!({
+                "source": "gemini",
+                "projects": items,
+            });
+            println!("{}", serde_json::to_string_pretty(&output)?);
+        }
+        ListFormat::Tsv => {
             for p in &projects {
-                println!("  {}", p);
+                println!("{}", sanitize_tsv(p));
+            }
+        }
+        ListFormat::Pretty => {
+            println!("Gemini projects:");
+            println!();
+            if projects.is_empty() {
+                println!("  (none)");
+            } else {
+                for p in &projects {
+                    println!("  {}", p);
+                }
             }
         }
     }
@@ -311,120 +479,224 @@ fn list_gemini_projects(manager: &toolpath_gemini::GeminiConvo, json: bool) -> R
 fn list_gemini_sessions(
     manager: &toolpath_gemini::GeminiConvo,
     project_path: &str,
-    json: bool,
+    fmt: ListFormat,
 ) -> Result<()> {
     let metadata = manager
         .list_conversation_metadata(project_path)
         .map_err(|e| anyhow::anyhow!("{}", e))?;
 
-    if json {
-        let items: Vec<serde_json::Value> = metadata
-            .iter()
-            .map(|m| {
-                serde_json::json!({
-                    "session_uuid": m.session_uuid,
-                    "messages": m.message_count,
-                    "sub_agents": m.sub_agent_count,
-                    "started_at": m.started_at.map(|t| t.to_rfc3339()),
-                    "last_activity": m.last_activity.map(|t| t.to_rfc3339()),
+    match fmt {
+        ListFormat::Json => {
+            let items: Vec<serde_json::Value> = metadata
+                .iter()
+                .map(|m| {
+                    serde_json::json!({
+                        "session_uuid": m.session_uuid,
+                        "project_path": m.project_path,
+                        "messages": m.message_count,
+                        "sub_agents": m.sub_agent_count,
+                        "started_at": m.started_at.map(|t| t.to_rfc3339()),
+                        "last_activity": m.last_activity.map(|t| t.to_rfc3339()),
+                        "first_user_message": m.first_user_message,
+                    })
                 })
-            })
-            .collect();
-        let output = serde_json::json!({
-            "source": "gemini",
-            "project": project_path,
-            "sessions": items,
-        });
-        println!("{}", serde_json::to_string_pretty(&output)?);
-    } else {
-        println!("Gemini sessions for {}:", project_path);
-        println!();
-        if metadata.is_empty() {
-            println!("  (none)");
-        } else {
+                .collect();
+            let output = serde_json::json!({
+                "source": "gemini",
+                "project": project_path,
+                "sessions": items,
+            });
+            println!("{}", serde_json::to_string_pretty(&output)?);
+        }
+        ListFormat::Tsv => {
             for m in &metadata {
-                let date = m
-                    .last_activity
-                    .map(|t| t.format("%Y-%m-%d %H:%M").to_string())
-                    .unwrap_or_else(|| "unknown".to_string());
-                let sub = if m.sub_agent_count > 0 {
-                    format!(" +{} sub", m.sub_agent_count)
-                } else {
-                    String::new()
-                };
-                println!(
-                    "  {} {:>4} msgs{}  {}",
-                    &m.session_uuid, m.message_count, sub, date
-                );
+                emit_gemini_tsv(m);
+            }
+        }
+        ListFormat::Pretty => {
+            println!("Gemini sessions for {}:", project_path);
+            println!();
+            if metadata.is_empty() {
+                println!("  (none)");
+            } else {
+                for m in &metadata {
+                    let date = m
+                        .last_activity
+                        .map(|t| t.format("%Y-%m-%d %H:%M").to_string())
+                        .unwrap_or_else(|| "unknown".to_string());
+                    let sub = if m.sub_agent_count > 0 {
+                        format!(" +{} sub", m.sub_agent_count)
+                    } else {
+                        String::new()
+                    };
+                    println!(
+                        "  {} {:>4} msgs{}  {}",
+                        &m.session_uuid, m.message_count, sub, date
+                    );
+                }
             }
         }
     }
     Ok(())
 }
 
-fn run_codex(json: bool) -> Result<()> {
+fn list_gemini_sessions_all(
+    manager: &toolpath_gemini::GeminiConvo,
+    fmt: ListFormat,
+) -> Result<()> {
+    let projects = manager
+        .list_projects()
+        .map_err(|e| anyhow::anyhow!("{}", e))?;
+
+    let mut all: Vec<toolpath_gemini::ConversationMetadata> = Vec::new();
+    for project in &projects {
+        match manager.list_conversation_metadata(project) {
+            Ok(metas) => all.extend(metas),
+            Err(_) => continue,
+        }
+    }
+    all.sort_by(|a, b| b.last_activity.cmp(&a.last_activity));
+
+    match fmt {
+        ListFormat::Json => {
+            let items: Vec<serde_json::Value> = all
+                .iter()
+                .map(|m| {
+                    serde_json::json!({
+                        "session_uuid": m.session_uuid,
+                        "project_path": m.project_path,
+                        "messages": m.message_count,
+                        "sub_agents": m.sub_agent_count,
+                        "started_at": m.started_at.map(|t| t.to_rfc3339()),
+                        "last_activity": m.last_activity.map(|t| t.to_rfc3339()),
+                        "first_user_message": m.first_user_message,
+                    })
+                })
+                .collect();
+            let output = serde_json::json!({
+                "source": "gemini",
+                "sessions": items,
+            });
+            println!("{}", serde_json::to_string_pretty(&output)?);
+        }
+        ListFormat::Tsv => {
+            for m in &all {
+                emit_gemini_tsv(m);
+            }
+        }
+        ListFormat::Pretty => unreachable!("pretty falls back to project listing"),
+    }
+    Ok(())
+}
+
+fn emit_gemini_tsv(m: &toolpath_gemini::ConversationMetadata) {
+    println!(
+        "{}\t{}\t{}\t{}\t{}",
+        sanitize_tsv(&m.project_path),
+        sanitize_tsv(&m.session_uuid),
+        m.last_activity
+            .map(|t| t.to_rfc3339())
+            .unwrap_or_default(),
+        m.message_count,
+        m.first_user_message
+            .as_deref()
+            .map(sanitize_tsv)
+            .unwrap_or_default(),
+    );
+}
+
+// ── Codex ───────────────────────────────────────────────────────────────────
+
+fn run_codex(fmt: ListFormat) -> Result<()> {
     let manager = toolpath_codex::CodexConvo::new();
     let sessions = manager
         .list_sessions()
         .map_err(|e| anyhow::anyhow!("{}", e))?;
 
-    if json {
-        let items: Vec<serde_json::Value> = sessions
-            .iter()
-            .map(|m| {
-                serde_json::json!({
-                    "id": m.id,
-                    "started_at": m.started_at.map(|t| t.to_rfc3339()),
-                    "last_activity": m.last_activity.map(|t| t.to_rfc3339()),
-                    "cwd": m.cwd,
-                    "cli_version": m.cli_version,
-                    "git_branch": m.git_branch,
-                    "git_commit": m.git_commit,
-                    "first_user_message": m.first_user_message,
-                    "line_count": m.line_count,
-                    "file_path": m.file_path,
+    match fmt {
+        ListFormat::Json => {
+            let items: Vec<serde_json::Value> = sessions
+                .iter()
+                .map(|m| {
+                    serde_json::json!({
+                        "id": m.id,
+                        "started_at": m.started_at.map(|t| t.to_rfc3339()),
+                        "last_activity": m.last_activity.map(|t| t.to_rfc3339()),
+                        "cwd": m.cwd,
+                        "cli_version": m.cli_version,
+                        "git_branch": m.git_branch,
+                        "git_commit": m.git_commit,
+                        "first_user_message": m.first_user_message,
+                        "line_count": m.line_count,
+                        "file_path": m.file_path,
+                    })
                 })
-            })
-            .collect();
-        let output = serde_json::json!({
-            "source": "codex",
-            "sessions": items,
-        });
-        println!("{}", serde_json::to_string_pretty(&output)?);
-    } else if sessions.is_empty() {
-        println!("No Codex sessions found in ~/.codex/sessions.");
-    } else {
-        println!("Codex sessions:");
-        println!();
-        for m in &sessions {
-            let date = m
-                .last_activity
-                .map(|t| t.format("%Y-%m-%d %H:%M").to_string())
-                .unwrap_or_else(|| "unknown".to_string());
-            let prompt = m
-                .first_user_message
-                .as_deref()
-                .map(|s| truncate(s, 60))
-                .unwrap_or_default();
-            let id_short: String = m.id.chars().take(8).collect();
-            let cwd = m
-                .cwd
-                .as_ref()
-                .map(|p| p.to_string_lossy().to_string())
-                .unwrap_or_default();
-            println!(
-                "  {} {:>4} lines  {}  {}  {}",
-                id_short, m.line_count, date, cwd, prompt
-            );
+                .collect();
+            let output = serde_json::json!({
+                "source": "codex",
+                "sessions": items,
+            });
+            println!("{}", serde_json::to_string_pretty(&output)?);
+        }
+        ListFormat::Tsv => {
+            for m in &sessions {
+                println!(
+                    "{}\t{}\t{}\t{}\t{}",
+                    sanitize_tsv(&m.id),
+                    m.last_activity
+                        .map(|t| t.to_rfc3339())
+                        .unwrap_or_default(),
+                    m.line_count,
+                    m.cwd
+                        .as_ref()
+                        .map(|p| sanitize_tsv(&p.to_string_lossy()))
+                        .unwrap_or_default(),
+                    m.first_user_message
+                        .as_deref()
+                        .map(sanitize_tsv)
+                        .unwrap_or_default(),
+                );
+            }
+        }
+        ListFormat::Pretty => {
+            if sessions.is_empty() {
+                println!("No Codex sessions found in ~/.codex/sessions.");
+            } else {
+                println!("Codex sessions:");
+                println!();
+                for m in &sessions {
+                    let date = m
+                        .last_activity
+                        .map(|t| t.format("%Y-%m-%d %H:%M").to_string())
+                        .unwrap_or_else(|| "unknown".to_string());
+                    let prompt = m
+                        .first_user_message
+                        .as_deref()
+                        .map(|s| truncate(s, 60))
+                        .unwrap_or_default();
+                    let id_short: String = m.id.chars().take(8).collect();
+                    let cwd = m
+                        .cwd
+                        .as_ref()
+                        .map(|p| p.to_string_lossy().to_string())
+                        .unwrap_or_default();
+                    println!(
+                        "  {} {:>4} lines  {}  {}  {}",
+                        id_short, m.line_count, date, cwd, prompt
+                    );
+                }
+            }
         }
     }
     Ok(())
 }
 
-fn run_opencode(project: Option<String>, json: bool) -> Result<()> {
+// ── opencode ────────────────────────────────────────────────────────────────
+
+fn run_opencode(project: Option<String>, fmt: ListFormat) -> Result<()> {
     #[cfg(target_os = "emscripten")]
     {
-        let _ = (project, json);
+        let _ = (project, fmt);
         anyhow::bail!(
             "'path list opencode' requires a native environment (SQLite + git2 not available under wasm)"
         );
@@ -438,60 +710,86 @@ fn run_opencode(project: Option<String>, json: bool) -> Result<()> {
             .list_session_metadata(project.as_deref())
             .map_err(|e| anyhow::anyhow!("{}", e))?;
 
-        if json {
-            let items: Vec<serde_json::Value> = metas
-                .iter()
-                .map(|m| {
-                    serde_json::json!({
-                        "id": m.id,
-                        "project_id": m.project_id,
-                        "directory": m.directory,
-                        "title": m.title,
-                        "version": m.version,
-                        "started_at": m.started_at.map(|t| t.to_rfc3339()),
-                        "last_activity": m.last_activity.map(|t| t.to_rfc3339()),
-                        "message_count": m.message_count,
-                        "first_user_message": m.first_user_message,
-                        "summary_additions": m.summary_additions,
-                        "summary_deletions": m.summary_deletions,
-                        "summary_files": m.summary_files,
+        match fmt {
+            ListFormat::Json => {
+                let items: Vec<serde_json::Value> = metas
+                    .iter()
+                    .map(|m| {
+                        serde_json::json!({
+                            "id": m.id,
+                            "project_id": m.project_id,
+                            "directory": m.directory,
+                            "title": m.title,
+                            "version": m.version,
+                            "started_at": m.started_at.map(|t| t.to_rfc3339()),
+                            "last_activity": m.last_activity.map(|t| t.to_rfc3339()),
+                            "message_count": m.message_count,
+                            "first_user_message": m.first_user_message,
+                            "summary_additions": m.summary_additions,
+                            "summary_deletions": m.summary_deletions,
+                            "summary_files": m.summary_files,
+                        })
                     })
-                })
-                .collect();
-            let output = serde_json::json!({
-                "source": "opencode",
-                "project": project,
-                "sessions": items,
-            });
-            println!("{}", serde_json::to_string_pretty(&output)?);
-        } else if metas.is_empty() {
-            println!("No opencode sessions found in the database.");
-        } else {
-            println!("opencode sessions:");
-            println!();
-            for m in &metas {
-                let date = m
-                    .last_activity
-                    .map(|t| t.format("%Y-%m-%d %H:%M").to_string())
-                    .unwrap_or_else(|| "unknown".to_string());
-                let id_short: String = m.id.trim_start_matches("ses_").chars().take(10).collect();
-                let prompt = m
-                    .first_user_message
-                    .as_deref()
-                    .map(|s| truncate(s, 60))
-                    .unwrap_or_default();
-                let dir = m.directory.to_string_lossy();
-                println!(
-                    "  {} {:>4} msgs  {}  {}  {}",
-                    id_short, m.message_count, date, dir, prompt
-                );
+                    .collect();
+                let output = serde_json::json!({
+                    "source": "opencode",
+                    "project": project,
+                    "sessions": items,
+                });
+                println!("{}", serde_json::to_string_pretty(&output)?);
+            }
+            ListFormat::Tsv => {
+                for m in &metas {
+                    println!(
+                        "{}\t{}\t{}\t{}\t{}",
+                        sanitize_tsv(&m.id),
+                        m.last_activity
+                            .map(|t| t.to_rfc3339())
+                            .unwrap_or_default(),
+                        m.message_count,
+                        sanitize_tsv(&m.directory.to_string_lossy()),
+                        sanitize_tsv(
+                            m.first_user_message
+                                .as_deref()
+                                .unwrap_or(m.title.as_str()),
+                        ),
+                    );
+                }
+            }
+            ListFormat::Pretty => {
+                if metas.is_empty() {
+                    println!("No opencode sessions found in the database.");
+                } else {
+                    println!("opencode sessions:");
+                    println!();
+                    for m in &metas {
+                        let date = m
+                            .last_activity
+                            .map(|t| t.format("%Y-%m-%d %H:%M").to_string())
+                            .unwrap_or_else(|| "unknown".to_string());
+                        let id_short: String =
+                            m.id.trim_start_matches("ses_").chars().take(10).collect();
+                        let prompt = m
+                            .first_user_message
+                            .as_deref()
+                            .map(|s| truncate(s, 60))
+                            .unwrap_or_default();
+                        let dir = m.directory.to_string_lossy();
+                        println!(
+                            "  {} {:>4} msgs  {}  {}  {}",
+                            id_short, m.message_count, date, dir, prompt
+                        );
+                    }
+                }
             }
         }
         Ok(())
     }
 }
 
-fn run_pi(project: Option<String>, base: Option<PathBuf>, json: bool) -> Result<()> {
+// ── Pi ──────────────────────────────────────────────────────────────────────
+
+fn run_pi(project: Option<String>, base: Option<PathBuf>, fmt: ListFormat) -> Result<()> {
     let manager = if let Some(path) = base {
         let resolver = toolpath_pi::PathResolver::new().with_sessions_dir(&path);
         toolpath_pi::PiConvo::with_resolver(resolver)
@@ -499,75 +797,175 @@ fn run_pi(project: Option<String>, base: Option<PathBuf>, json: bool) -> Result<
         toolpath_pi::PiConvo::new()
     };
 
-    match project {
-        None => list_pi_projects(&manager, json),
-        Some(project_path) => list_pi_sessions(&manager, &project_path, json),
+    match (project, fmt) {
+        (None, ListFormat::Tsv) => list_pi_sessions_all(&manager, ListFormat::Tsv),
+        (None, ListFormat::Json) => list_pi_sessions_all(&manager, ListFormat::Json),
+        (None, ListFormat::Pretty) => list_pi_projects(&manager, ListFormat::Pretty),
+        (Some(p), f) => list_pi_sessions(&manager, &p, f),
     }
 }
 
-fn list_pi_projects(manager: &toolpath_pi::PiConvo, json: bool) -> Result<()> {
+fn list_pi_projects(manager: &toolpath_pi::PiConvo, fmt: ListFormat) -> Result<()> {
     let projects = manager
         .list_projects()
         .map_err(|e| anyhow::anyhow!("{}", e))?;
 
-    if json {
-        let items: Vec<serde_json::Value> = projects
-            .iter()
-            .map(|p| serde_json::json!({ "path": p }))
-            .collect();
-        let output = serde_json::json!({
-            "source": "pi",
-            "projects": items,
-        });
-        println!("{}", serde_json::to_string_pretty(&output)?);
-    } else if projects.is_empty() {
-        println!(
-            "No Pi projects found. Sessions dir: {:?}",
-            manager.resolver().sessions_dir()
-        );
-    } else {
-        println!("Pi projects:");
-        println!();
-        for p in &projects {
-            println!("  {}", p);
+    match fmt {
+        ListFormat::Json => {
+            let items: Vec<serde_json::Value> = projects
+                .iter()
+                .map(|p| serde_json::json!({ "path": p }))
+                .collect();
+            let output = serde_json::json!({
+                "source": "pi",
+                "projects": items,
+            });
+            println!("{}", serde_json::to_string_pretty(&output)?);
+        }
+        ListFormat::Tsv => {
+            for p in &projects {
+                println!("{}", sanitize_tsv(p));
+            }
+        }
+        ListFormat::Pretty => {
+            if projects.is_empty() {
+                println!(
+                    "No Pi projects found. Sessions dir: {:?}",
+                    manager.resolver().sessions_dir()
+                );
+            } else {
+                println!("Pi projects:");
+                println!();
+                for p in &projects {
+                    println!("  {}", p);
+                }
+            }
         }
     }
     Ok(())
 }
 
-fn list_pi_sessions(manager: &toolpath_pi::PiConvo, project_path: &str, json: bool) -> Result<()> {
+fn list_pi_sessions(
+    manager: &toolpath_pi::PiConvo,
+    project_path: &str,
+    fmt: ListFormat,
+) -> Result<()> {
     let sessions = manager
         .list_sessions(project_path)
         .map_err(|e| anyhow::anyhow!("{}", e))?;
 
-    if json {
-        let items: Vec<serde_json::Value> = sessions
-            .iter()
-            .map(|m| {
-                serde_json::json!({
-                    "id": m.id,
-                    "timestamp": m.timestamp,
-                    "entry_count": m.entry_count,
-                    "file_path": m.file_path,
+    match fmt {
+        ListFormat::Json => {
+            let items: Vec<serde_json::Value> = sessions
+                .iter()
+                .map(|m| {
+                    serde_json::json!({
+                        "id": m.id,
+                        "project_path": project_path,
+                        "timestamp": m.timestamp,
+                        "entry_count": m.entry_count,
+                        "file_path": m.file_path,
+                        "first_user_message": m.first_user_message,
+                    })
                 })
-            })
-            .collect();
-        let output = serde_json::json!({
-            "source": "pi",
-            "project": project_path,
-            "sessions": items,
-        });
-        println!("{}", serde_json::to_string_pretty(&output)?);
-    } else if sessions.is_empty() {
-        println!("No sessions found for project: {}", project_path);
-    } else {
-        println!("Sessions for {}:", project_path);
-        println!();
-        for m in &sessions {
-            println!("  {}\t{}\t{} entries", m.id, m.timestamp, m.entry_count);
+                .collect();
+            let output = serde_json::json!({
+                "source": "pi",
+                "project": project_path,
+                "sessions": items,
+            });
+            println!("{}", serde_json::to_string_pretty(&output)?);
+        }
+        ListFormat::Tsv => {
+            for m in &sessions {
+                emit_pi_tsv(project_path, m);
+            }
+        }
+        ListFormat::Pretty => {
+            if sessions.is_empty() {
+                println!("No sessions found for project: {}", project_path);
+            } else {
+                println!("Sessions for {}:", project_path);
+                println!();
+                for m in &sessions {
+                    println!("  {}\t{}\t{} entries", m.id, m.timestamp, m.entry_count);
+                }
+            }
         }
     }
     Ok(())
+}
+
+fn list_pi_sessions_all(manager: &toolpath_pi::PiConvo, fmt: ListFormat) -> Result<()> {
+    let projects = manager
+        .list_projects()
+        .map_err(|e| anyhow::anyhow!("{}", e))?;
+
+    let mut all: Vec<(String, toolpath_pi::SessionMeta)> = Vec::new();
+    for project in &projects {
+        match manager.list_sessions(project) {
+            Ok(metas) => {
+                for m in metas {
+                    all.push((project.clone(), m));
+                }
+            }
+            Err(_) => continue,
+        }
+    }
+    all.sort_by(|a, b| b.1.timestamp.cmp(&a.1.timestamp));
+
+    match fmt {
+        ListFormat::Json => {
+            let items: Vec<serde_json::Value> = all
+                .iter()
+                .map(|(project, m)| {
+                    serde_json::json!({
+                        "id": m.id,
+                        "project_path": project,
+                        "timestamp": m.timestamp,
+                        "entry_count": m.entry_count,
+                        "file_path": m.file_path,
+                        "first_user_message": m.first_user_message,
+                    })
+                })
+                .collect();
+            let output = serde_json::json!({
+                "source": "pi",
+                "sessions": items,
+            });
+            println!("{}", serde_json::to_string_pretty(&output)?);
+        }
+        ListFormat::Tsv => {
+            for (project, m) in &all {
+                emit_pi_tsv(project, m);
+            }
+        }
+        ListFormat::Pretty => unreachable!("pretty falls back to project listing"),
+    }
+    Ok(())
+}
+
+fn emit_pi_tsv(project: &str, m: &toolpath_pi::SessionMeta) {
+    println!(
+        "{}\t{}\t{}\t{}\t{}",
+        sanitize_tsv(project),
+        sanitize_tsv(&m.id),
+        sanitize_tsv(&m.timestamp),
+        m.entry_count,
+        m.first_user_message
+            .as_deref()
+            .map(sanitize_tsv)
+            .unwrap_or_default(),
+    );
+}
+
+// ── Helpers ─────────────────────────────────────────────────────────────────
+
+/// Replace tabs and newlines in a TSV field so the column structure stays
+/// intact. fzf reads line-by-line and splits on tabs — anything embedded
+/// would shift the field layout.
+fn sanitize_tsv(s: &str) -> String {
+    s.replace(['\t', '\n', '\r'], " ")
 }
 
 fn truncate(s: &str, max: usize) -> String {
@@ -613,11 +1011,11 @@ mod tests {
     }
 
     #[test]
-    fn test_run_git_human_readable() {
+    fn test_run_git_pretty() {
         let (dir, repo) = init_temp_repo();
         create_commit(&repo, "initial commit", "file.txt", "hello", None);
 
-        let result = run_git(dir.path().to_path_buf(), "origin".to_string(), false);
+        let result = run_git(dir.path().to_path_buf(), "origin".to_string(), ListFormat::Pretty);
         assert!(result.is_ok());
     }
 
@@ -626,14 +1024,23 @@ mod tests {
         let (dir, repo) = init_temp_repo();
         create_commit(&repo, "initial commit", "file.txt", "hello", None);
 
-        let result = run_git(dir.path().to_path_buf(), "origin".to_string(), true);
+        let result = run_git(dir.path().to_path_buf(), "origin".to_string(), ListFormat::Json);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_run_git_tsv() {
+        let (dir, repo) = init_temp_repo();
+        create_commit(&repo, "initial commit", "file.txt", "hello", None);
+
+        let result = run_git(dir.path().to_path_buf(), "origin".to_string(), ListFormat::Tsv);
         assert!(result.is_ok());
     }
 
     #[test]
     fn test_run_git_invalid_repo() {
         let dir = tempfile::tempdir().unwrap();
-        let result = run_git(dir.path().to_path_buf(), "origin".to_string(), false);
+        let result = run_git(dir.path().to_path_buf(), "origin".to_string(), ListFormat::Pretty);
         assert!(result.is_err());
     }
 
@@ -661,6 +1068,23 @@ mod tests {
         assert_eq!(result.chars().count(), 8);
     }
 
+    #[test]
+    fn test_sanitize_tsv_replaces_tabs_and_newlines() {
+        assert_eq!(sanitize_tsv("a\tb\nc\rd"), "a b c d");
+    }
+
+    #[test]
+    fn test_resolve_format_explicit_wins() {
+        let f = resolve_format(Some(ListFormat::Json), true);
+        assert!(matches!(f, ListFormat::Json));
+    }
+
+    #[test]
+    fn test_resolve_format_json_alias() {
+        let f = resolve_format(None, true);
+        assert!(matches!(f, ListFormat::Json));
+    }
+
     fn setup_claude_manager() -> (tempfile::TempDir, toolpath_claude::ClaudeConvo) {
         let temp = tempfile::tempdir().unwrap();
         let claude_dir = temp.path().join(".claude");
@@ -681,16 +1105,23 @@ mod tests {
     }
 
     #[test]
-    fn test_list_claude_projects_human() {
+    fn test_list_claude_projects_pretty() {
         let (_temp, manager) = setup_claude_manager();
-        let result = list_claude_projects(&manager, false);
+        let result = list_claude_projects(&manager, ListFormat::Pretty);
         assert!(result.is_ok());
     }
 
     #[test]
     fn test_list_claude_projects_json() {
         let (_temp, manager) = setup_claude_manager();
-        let result = list_claude_projects(&manager, true);
+        let result = list_claude_projects(&manager, ListFormat::Json);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_list_claude_projects_tsv() {
+        let (_temp, manager) = setup_claude_manager();
+        let result = list_claude_projects(&manager, ListFormat::Tsv);
         assert!(result.is_ok());
     }
 
@@ -704,21 +1135,35 @@ mod tests {
         let resolver = toolpath_claude::PathResolver::new().with_claude_dir(&claude_dir);
         let manager = toolpath_claude::ClaudeConvo::with_resolver(resolver);
 
-        let result = list_claude_projects(&manager, false);
+        let result = list_claude_projects(&manager, ListFormat::Pretty);
         assert!(result.is_ok());
     }
 
     #[test]
-    fn test_list_claude_sessions_human() {
+    fn test_list_claude_sessions_pretty() {
         let (_temp, manager) = setup_claude_manager();
-        let result = list_claude_sessions(&manager, "/test/project", false);
+        let result = list_claude_sessions(&manager, "/test/project", ListFormat::Pretty);
         assert!(result.is_ok());
     }
 
     #[test]
     fn test_list_claude_sessions_json() {
         let (_temp, manager) = setup_claude_manager();
-        let result = list_claude_sessions(&manager, "/test/project", true);
+        let result = list_claude_sessions(&manager, "/test/project", ListFormat::Json);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_list_claude_sessions_tsv() {
+        let (_temp, manager) = setup_claude_manager();
+        let result = list_claude_sessions(&manager, "/test/project", ListFormat::Tsv);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_list_claude_sessions_all_tsv() {
+        let (_temp, manager) = setup_claude_manager();
+        let result = list_claude_sessions_all(&manager, ListFormat::Tsv);
         assert!(result.is_ok());
     }
 
@@ -732,15 +1177,7 @@ mod tests {
         let resolver = toolpath_claude::PathResolver::new().with_claude_dir(&claude_dir);
         let manager = toolpath_claude::ClaudeConvo::with_resolver(resolver);
 
-        let result = list_claude_sessions(&manager, "/empty/project", false);
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    fn test_run_claude_projects() {
-        let (_temp, manager) = setup_claude_manager();
-        // Test the dispatch to list_claude_projects through run_claude-like path
-        let result = list_claude_projects(&manager, false);
+        let result = list_claude_sessions(&manager, "/empty/project", ListFormat::Pretty);
         assert!(result.is_ok());
     }
 
@@ -765,16 +1202,16 @@ mod tests {
     }
 
     #[test]
-    fn test_list_pi_projects_populated() {
+    fn test_list_pi_projects_pretty() {
         let (_temp, manager) = setup_pi_manager();
-        let result = list_pi_projects(&manager, false);
+        let result = list_pi_projects(&manager, ListFormat::Pretty);
         assert!(result.is_ok());
     }
 
     #[test]
     fn test_list_pi_projects_json() {
         let (_temp, manager) = setup_pi_manager();
-        let result = list_pi_projects(&manager, true);
+        let result = list_pi_projects(&manager, ListFormat::Json);
         assert!(result.is_ok());
     }
 
@@ -787,29 +1224,35 @@ mod tests {
         let resolver = toolpath_pi::PathResolver::new().with_sessions_dir(&sessions_dir);
         let manager = toolpath_pi::PiConvo::with_resolver(resolver);
 
-        let result = list_pi_projects(&manager, false);
+        let result = list_pi_projects(&manager, ListFormat::Pretty);
         assert!(result.is_ok());
     }
 
     #[test]
     fn test_list_pi_sessions() {
         let (_temp, manager) = setup_pi_manager();
-        let result = list_pi_sessions(&manager, "/test/project", false);
+        let result = list_pi_sessions(&manager, "/test/project", ListFormat::Pretty);
         assert!(result.is_ok());
     }
 
     #[test]
-    fn test_list_pi_sessions_json() {
+    fn test_list_pi_sessions_tsv() {
         let (_temp, manager) = setup_pi_manager();
-        let result = list_pi_sessions(&manager, "/test/project", true);
+        let result = list_pi_sessions(&manager, "/test/project", ListFormat::Tsv);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_list_pi_sessions_all_tsv() {
+        let (_temp, manager) = setup_pi_manager();
+        let result = list_pi_sessions_all(&manager, ListFormat::Tsv);
         assert!(result.is_ok());
     }
 
     #[test]
     fn test_list_pi_nonexistent_project() {
         let (_temp, manager) = setup_pi_manager();
-        // A project that doesn't have a directory should error via PiError.
-        let result = list_pi_sessions(&manager, "/does/not/exist", false);
+        let result = list_pi_sessions(&manager, "/does/not/exist", ListFormat::Pretty);
         assert!(result.is_err());
     }
 
@@ -835,30 +1278,44 @@ mod tests {
     }
 
     #[test]
-    fn test_list_gemini_projects_human() {
+    fn test_list_gemini_projects_pretty() {
         let (_t, mgr) = setup_gemini_manager();
-        let result = list_gemini_projects(&mgr, false);
+        let result = list_gemini_projects(&mgr, ListFormat::Pretty);
         assert!(result.is_ok());
     }
 
     #[test]
     fn test_list_gemini_projects_json() {
         let (_t, mgr) = setup_gemini_manager();
-        let result = list_gemini_projects(&mgr, true);
+        let result = list_gemini_projects(&mgr, ListFormat::Json);
         assert!(result.is_ok());
     }
 
     #[test]
-    fn test_list_gemini_sessions_human() {
+    fn test_list_gemini_sessions_pretty() {
         let (_t, mgr) = setup_gemini_manager();
-        let result = list_gemini_sessions(&mgr, "/abs/myrepo", false);
+        let result = list_gemini_sessions(&mgr, "/abs/myrepo", ListFormat::Pretty);
         assert!(result.is_ok());
     }
 
     #[test]
     fn test_list_gemini_sessions_json() {
         let (_t, mgr) = setup_gemini_manager();
-        let result = list_gemini_sessions(&mgr, "/abs/myrepo", true);
+        let result = list_gemini_sessions(&mgr, "/abs/myrepo", ListFormat::Json);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_list_gemini_sessions_tsv() {
+        let (_t, mgr) = setup_gemini_manager();
+        let result = list_gemini_sessions(&mgr, "/abs/myrepo", ListFormat::Tsv);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_list_gemini_sessions_all_tsv() {
+        let (_t, mgr) = setup_gemini_manager();
+        let result = list_gemini_sessions_all(&mgr, ListFormat::Tsv);
         assert!(result.is_ok());
     }
 
@@ -869,7 +1326,7 @@ mod tests {
         std::fs::create_dir_all(gemini.join("tmp/empty")).unwrap();
         let resolver = toolpath_gemini::PathResolver::new().with_gemini_dir(&gemini);
         let mgr = toolpath_gemini::GeminiConvo::with_resolver(resolver);
-        let result = list_gemini_sessions(&mgr, "/nowhere", false);
+        let result = list_gemini_sessions(&mgr, "/nowhere", ListFormat::Pretty);
         assert!(result.is_ok());
     }
 }
