@@ -10,9 +10,7 @@ use toolpath::v1::{Document, Path};
 fn main() -> anyhow::Result<()> {
     let mut args = std::env::args().skip(1);
     let input = args.next().expect("usage: <in.path.json> <out.path.jsonl>");
-    let output = args
-        .next()
-        .expect("usage: <in.path.json> <out.path.jsonl>");
+    let output = args.next().expect("usage: <in.path.json> <out.path.jsonl>");
 
     let json = fs::read_to_string(&input)?;
     let doc = Document::from_json(&json)?;

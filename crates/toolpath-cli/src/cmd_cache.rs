@@ -82,8 +82,7 @@ pub(crate) fn write_cached(id: &str, doc: &Document, force: bool) -> Result<Path
     use std::io::Write;
 
     let dir = cache_dir()?;
-    std::fs::create_dir_all(&dir)
-        .with_context(|| format!("create {}", dir.display()))?;
+    std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -154,9 +153,7 @@ pub(crate) fn list_cached() -> Result<Vec<CacheEntry>> {
         return Ok(Vec::new());
     }
     let mut out = Vec::new();
-    for entry in std::fs::read_dir(&dir)
-        .with_context(|| format!("read {}", dir.display()))?
-    {
+    for entry in std::fs::read_dir(&dir).with_context(|| format!("read {}", dir.display()))? {
         let entry = entry?;
         let path = entry.path();
         if path.extension().and_then(|s| s.to_str()) != Some("json") {

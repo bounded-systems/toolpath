@@ -270,10 +270,7 @@ fn build_inline_tool_uses(extra: &HashMap<String, serde_json::Value>) -> Vec<Too
             let obj = entry.as_object()?;
             let id = obj.get("id")?.as_str()?.to_string();
             let name = obj.get("name")?.as_str()?.to_string();
-            let input = obj
-                .get("input")
-                .cloned()
-                .unwrap_or(serde_json::Value::Null);
+            let input = obj.get("input").cloned().unwrap_or(serde_json::Value::Null);
             let category = parse_category(obj.get("category"));
             let result = obj
                 .get("result")

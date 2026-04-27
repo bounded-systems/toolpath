@@ -637,9 +637,8 @@ fn derive_pathbase(target: String, url_flag: Option<String>) -> Result<Vec<Deriv
         // use that. Otherwise fall back to the stored session's server.
         let base_url = base.unwrap_or_else(|| session.url.clone());
         let body = traces_get(&base_url, &session.token, &id)?;
-        let doc = Document::from_json(&body).map_err(|e| {
-            anyhow::anyhow!("server returned a non-toolpath document: {e}")
-        })?;
+        let doc = Document::from_json(&body)
+            .map_err(|e| anyhow::anyhow!("server returned a non-toolpath document: {e}"))?;
         let cache_id = make_id("pathbase", &id);
         Ok(vec![DerivedDoc { cache_id, doc }])
     }
@@ -690,15 +689,13 @@ fn parse_pathbase_ref(target: &str, url_flag: Option<&str>) -> Result<(Option<St
     }
 }
 
-
 #[cfg(all(test, not(target_os = "emscripten")))]
 mod tests {
     use super::*;
 
     #[test]
     fn parse_pathbase_ref_full_url() {
-        let (base, id) =
-            parse_pathbase_ref("https://pathbase.dev/traces/trc_01H", None).unwrap();
+        let (base, id) = parse_pathbase_ref("https://pathbase.dev/traces/trc_01H", None).unwrap();
         assert_eq!(base.as_deref(), Some("https://pathbase.dev"));
         assert_eq!(id, "trc_01H");
     }
@@ -719,8 +716,7 @@ mod tests {
 
     #[test]
     fn parse_pathbase_ref_url_with_trailing_slash() {
-        let (base, id) =
-            parse_pathbase_ref("https://pathbase.dev/traces/trc_01H/", None).unwrap();
+        let (base, id) = parse_pathbase_ref("https://pathbase.dev/traces/trc_01H/", None).unwrap();
         assert_eq!(base.as_deref(), Some("https://pathbase.dev"));
         assert_eq!(id, "trc_01H");
     }
@@ -758,8 +754,8 @@ mod tests {
         assert!(out[0].cache_id.starts_with("claude-"));
     }
 
-    fn setup_claude_manager_with_two_sessions()
-    -> (tempfile::TempDir, toolpath_claude::ClaudeConvo) {
+    fn setup_claude_manager_with_two_sessions() -> (tempfile::TempDir, toolpath_claude::ClaudeConvo)
+    {
         let temp = tempfile::tempdir().unwrap();
         let claude_dir = temp.path().join(".claude");
         let project_dir = claude_dir.join("projects/-test-project");
@@ -777,8 +773,11 @@ mod tests {
             let a = format!(
                 r#"{{"type":"assistant","uuid":"a-{slug}","timestamp":"{ts}T00:00:01Z","message":{{"role":"assistant","content":"hello"}}}}"#
             );
-            std::fs::write(project_dir.join(format!("{slug}.jsonl")), format!("{u}\n{a}\n"))
-                .unwrap();
+            std::fs::write(
+                project_dir.join(format!("{slug}.jsonl")),
+                format!("{u}\n{a}\n"),
+            )
+            .unwrap();
         }
 
         let resolver = toolpath_claude::PathResolver::new().with_claude_dir(&claude_dir);
@@ -788,7 +787,8 @@ mod tests {
     #[test]
     fn derive_claude_all_emits_one_cache_entry_per_session() {
         let (_t, mgr) = setup_claude_manager_with_two_sessions();
-        let out = derive_claude_with_manager(&mgr, "/test/project".to_string(), None, true).unwrap();
+        let out =
+            derive_claude_with_manager(&mgr, "/test/project".to_string(), None, true).unwrap();
         assert_eq!(out.len(), 2);
         // Distinct cache ids so both can land in the cache without collision.
         assert_ne!(out[0].cache_id, out[1].cache_id);

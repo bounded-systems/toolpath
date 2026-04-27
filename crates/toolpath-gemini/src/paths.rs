@@ -694,9 +694,7 @@ mod tests {
         )
         .unwrap();
 
-        let found = r
-            .resolve_main_file("/p", "session-2026-04-17-abc")
-            .unwrap();
+        let found = r.resolve_main_file("/p", "session-2026-04-17-abc").unwrap();
         assert_eq!(found, Some(chats.join("session-2026-04-17-abc.json")));
     }
 

@@ -206,8 +206,7 @@ pub(crate) fn store_session(path: &Path, s: &StoredSession) -> Result<()> {
     let parent = path
         .parent()
         .ok_or_else(|| anyhow!("credentials path has no parent: {}", path.display()))?;
-    std::fs::create_dir_all(parent)
-        .with_context(|| format!("create {}", parent.display()))?;
+    std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -288,7 +287,11 @@ mod tests {
     #[test]
     fn store_creates_parent_directory() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("nested").join("dir").join("credentials.json");
+        let path = dir
+            .path()
+            .join("nested")
+            .join("dir")
+            .join("credentials.json");
         store_session(&path, &sample()).unwrap();
         assert!(path.exists());
     }
@@ -301,7 +304,10 @@ mod tests {
         let path = dir.path().join("credentials.json");
         store_session(&path, &sample()).unwrap();
         let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
-        assert_eq!(mode, 0o600, "expected 0600 on credentials file, got {mode:o}");
+        assert_eq!(
+            mode, 0o600,
+            "expected 0600 on credentials file, got {mode:o}"
+        );
     }
 
     #[test]

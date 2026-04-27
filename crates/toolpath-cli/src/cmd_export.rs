@@ -96,11 +96,7 @@ fn run_claude(input: String, project: Option<PathBuf>, output: Option<PathBuf>) 
                 );
                 eprintln!();
                 eprintln!("Resume with:");
-                eprintln!(
-                    "  cd {} && claude -r {}",
-                    project_dir.display(),
-                    session_id
-                );
+                eprintln!("  cd {} && claude -r {}", project_dir.display(), session_id);
             }
             (None, Some(out_path)) => {
                 std::fs::write(&out_path, &jsonl)
@@ -136,9 +132,7 @@ fn load_path_doc(input: &str) -> Result<toolpath::v1::Path> {
 }
 
 #[cfg(not(target_os = "emscripten"))]
-fn build_claude_conversation(
-    path: &toolpath::v1::Path,
-) -> Result<toolpath_claude::Conversation> {
+fn build_claude_conversation(path: &toolpath::v1::Path) -> Result<toolpath_claude::Conversation> {
     use toolpath_convo::ConversationProjector;
     let view = toolpath_convo::extract_conversation(path);
     let projector = toolpath_claude::ClaudeProjector;
@@ -179,8 +173,7 @@ fn write_into_claude_project(
 
     let session_id = &conv.session_id;
     let out_path = claude_project_dir.join(format!("{}.jsonl", session_id));
-    std::fs::write(&out_path, jsonl)
-        .with_context(|| format!("write {}", out_path.display()))?;
+    std::fs::write(&out_path, jsonl).with_context(|| format!("write {}", out_path.display()))?;
     Ok(out_path)
 }
 
@@ -244,8 +237,11 @@ fn run_gemini(input: String, project: Option<PathBuf>) -> Result<()> {
         // plus chats/<session-uuid>/<sub>.json for any sub-agents.
         let main_stem = gemini_main_stem(&conversation);
         let main_path = chats_dir.join(format!("{}.json", main_stem));
-        std::fs::write(&main_path, serde_json::to_string_pretty(&conversation.main)?)
-            .with_context(|| format!("write {}", main_path.display()))?;
+        std::fs::write(
+            &main_path,
+            serde_json::to_string_pretty(&conversation.main)?,
+        )
+        .with_context(|| format!("write {}", main_path.display()))?;
         let mut written: Vec<PathBuf> = vec![main_path];
 
         if !conversation.sub_agents.is_empty() {
@@ -351,7 +347,12 @@ fn run_pathbase(input: String, url_flag: Option<String>) -> Result<()> {
 
         let trace = traces_post(&base_url, &session.token, &body)?;
         println!("{}", trace.url);
-        eprintln!("Uploaded {} → {} ({} bytes)", file.display(), trace.id, body.len());
+        eprintln!(
+            "Uploaded {} → {} ({} bytes)",
+            file.display(),
+            trace.id,
+            body.len()
+        );
         Ok(())
     }
 }
@@ -653,7 +654,11 @@ mod tests {
     fn pathbase_requires_login() {
         let temp = tempfile::tempdir().unwrap();
         let input_path = temp.path().join("input.json");
-        std::fs::write(&input_path, serde_json::to_string(&make_path_doc()).unwrap()).unwrap();
+        std::fs::write(
+            &input_path,
+            serde_json::to_string(&make_path_doc()).unwrap(),
+        )
+        .unwrap();
 
         let _g = crate::config::TEST_ENV_LOCK
             .lock()

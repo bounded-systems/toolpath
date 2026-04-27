@@ -136,9 +136,7 @@ pub fn derive_path(view: &ConversationView, config: &DeriveConfig) -> Path {
                     if let Some(result) = &t.result
                         && let Ok(v) = serde_json::to_value(result)
                     {
-                        obj.as_object_mut()
-                            .unwrap()
-                            .insert("result".to_string(), v);
+                        obj.as_object_mut().unwrap().insert("result".to_string(), v);
                     }
                     obj
                 })
@@ -158,11 +156,6 @@ pub fn derive_path(view: &ConversationView, config: &DeriveConfig) -> Path {
             extra.insert("delegations".to_string(), v);
         }
 
-        // NOTE: model is NOT serialized here. It's attributed via the step's
-        // `agent:{model}` actor URI (see `actor_for_turn`) and recorded in
-        // `path.meta.actors[<actor>].model`. Extract recovers it from the
-        // actor string. This matches the convention used by Claude's bespoke
-        // deriver and avoids storing the same fact in two places.
         if let Some(stop_reason) = &turn.stop_reason {
             extra.insert(
                 "stop_reason".to_string(),

@@ -348,7 +348,9 @@ fn build_tool_calls(turn: &Turn, gemini_extras: &Map<String, Value>) -> Option<V
     let calls: Vec<ToolCall> = turn
         .tool_uses
         .iter()
-        .map(|tu| tool_invocation_to_tool_call(tu, meta_by_id.get(&tu.id).copied(), &turn.timestamp))
+        .map(|tu| {
+            tool_invocation_to_tool_call(tu, meta_by_id.get(&tu.id).copied(), &turn.timestamp)
+        })
         .collect();
 
     Some(calls)
@@ -685,7 +687,9 @@ mod tests {
     fn test_system_role_maps_to_info() {
         let mut t = user_turn("s1", "cancelled");
         t.role = Role::System;
-        let convo = GeminiProjector::default().project(&view_with(vec![t])).unwrap();
+        let convo = GeminiProjector::default()
+            .project(&view_with(vec![t]))
+            .unwrap();
         assert_eq!(convo.main.messages[0].role, GeminiRole::Info);
     }
 
@@ -696,18 +700,21 @@ mod tests {
             {"subject": "Searching", "description": "looking in /auth", "timestamp": "2026-04-17T15:00:02Z"},
             {"subject": "Plan", "description": "try token path", "timestamp": "2026-04-17T15:00:03Z"},
         ]);
-        t.extra.insert(
-            "gemini".into(),
-            serde_json::json!({"thoughts_meta": meta}),
-        );
+        t.extra
+            .insert("gemini".into(), serde_json::json!({"thoughts_meta": meta}));
         t.thinking = Some("**Searching**\nlooking in /auth\n\n**Plan**\ntry token path".into());
 
-        let convo = GeminiProjector::default().project(&view_with(vec![t])).unwrap();
+        let convo = GeminiProjector::default()
+            .project(&view_with(vec![t]))
+            .unwrap();
         let thoughts = convo.main.messages[0].thoughts.as_ref().unwrap();
         assert_eq!(thoughts.len(), 2);
         assert_eq!(thoughts[0].subject.as_deref(), Some("Searching"));
         assert_eq!(thoughts[0].description.as_deref(), Some("looking in /auth"));
-        assert_eq!(thoughts[0].timestamp.as_deref(), Some("2026-04-17T15:00:02Z"));
+        assert_eq!(
+            thoughts[0].timestamp.as_deref(),
+            Some("2026-04-17T15:00:02Z")
+        );
         assert_eq!(thoughts[1].subject.as_deref(), Some("Plan"));
     }
 
@@ -716,7 +723,9 @@ mod tests {
         // No gemini.thoughts_meta — projector should still un-flatten the string.
         let mut t = assistant_turn("a1", "");
         t.thinking = Some("**Searching**\nlooking in /auth\n\n**Plan**\ntry token path".into());
-        let convo = GeminiProjector::default().project(&view_with(vec![t])).unwrap();
+        let convo = GeminiProjector::default()
+            .project(&view_with(vec![t]))
+            .unwrap();
         let thoughts = convo.main.messages[0].thoughts.as_ref().unwrap();
         assert_eq!(thoughts.len(), 2);
         assert_eq!(thoughts[0].subject.as_deref(), Some("Searching"));
@@ -732,7 +741,9 @@ mod tests {
                 "tokens": {"input": 10, "output": 5, "cached": 0, "thoughts": 2, "tool": 0, "total": 17}
             }),
         );
-        let convo = GeminiProjector::default().project(&view_with(vec![t])).unwrap();
+        let convo = GeminiProjector::default()
+            .project(&view_with(vec![t]))
+            .unwrap();
         let tokens = convo.main.messages[0].tokens.as_ref().unwrap();
         assert_eq!(tokens.input, Some(10));
         assert_eq!(tokens.output, Some(5));
@@ -749,7 +760,9 @@ mod tests {
             cache_read_tokens: Some(20),
             cache_write_tokens: None,
         });
-        let convo = GeminiProjector::default().project(&view_with(vec![t])).unwrap();
+        let convo = GeminiProjector::default()
+            .project(&view_with(vec![t]))
+            .unwrap();
         let tokens = convo.main.messages[0].tokens.as_ref().unwrap();
         assert_eq!(tokens.input, Some(100));
         assert_eq!(tokens.output, Some(50));
@@ -771,7 +784,9 @@ mod tests {
             }),
             category: Some(ToolCategory::FileRead),
         }];
-        let convo = GeminiProjector::default().project(&view_with(vec![t])).unwrap();
+        let convo = GeminiProjector::default()
+            .project(&view_with(vec![t]))
+            .unwrap();
         let calls = convo.main.messages[0].tool_calls.as_ref().unwrap();
         assert_eq!(calls.len(), 1);
         let call = &calls[0];
@@ -799,7 +814,9 @@ mod tests {
             }),
             category: Some(ToolCategory::Shell),
         }];
-        let convo = GeminiProjector::default().project(&view_with(vec![t])).unwrap();
+        let convo = GeminiProjector::default()
+            .project(&view_with(vec![t]))
+            .unwrap();
         let call = &convo.main.messages[0].tool_calls.as_ref().unwrap()[0];
         assert_eq!(call.status, "error");
     }
@@ -829,7 +846,9 @@ mod tests {
                 }],
             }),
         );
-        let convo = GeminiProjector::default().project(&view_with(vec![t])).unwrap();
+        let convo = GeminiProjector::default()
+            .project(&view_with(vec![t]))
+            .unwrap();
         let call = &convo.main.messages[0].tool_calls.as_ref().unwrap()[0];
         assert_eq!(call.description.as_deref(), Some("write a.rs"));
         assert_eq!(call.display_name.as_deref(), Some("Write a.rs"));
@@ -842,17 +861,16 @@ mod tests {
         t.delegations = vec![DelegatedWork {
             agent_id: "helper-session".into(),
             prompt: "search for the bug".into(),
-            turns: vec![
-                user_turn("su1", "search for the bug"),
-                {
-                    let mut r = assistant_turn("sa1", "found it");
-                    r.timestamp = "2026-04-17T15:10:00Z".into();
-                    r
-                },
-            ],
+            turns: vec![user_turn("su1", "search for the bug"), {
+                let mut r = assistant_turn("sa1", "found it");
+                r.timestamp = "2026-04-17T15:10:00Z".into();
+                r
+            }],
             result: Some("fixed line 42".into()),
         }];
-        let convo = GeminiProjector::default().project(&view_with(vec![t])).unwrap();
+        let convo = GeminiProjector::default()
+            .project(&view_with(vec![t]))
+            .unwrap();
         assert_eq!(convo.sub_agents.len(), 1);
         let sub = &convo.sub_agents[0];
         assert_eq!(sub.session_id, "helper-session");
@@ -872,7 +890,9 @@ mod tests {
             vcs_branch: Some("main".into()),
             vcs_revision: None,
         });
-        let convo = GeminiProjector::default().project(&view_with(vec![t])).unwrap();
+        let convo = GeminiProjector::default()
+            .project(&view_with(vec![t]))
+            .unwrap();
         // The projected main file has no directories field by default.
         assert!(convo.main.directories.is_none());
     }
@@ -889,11 +909,11 @@ mod tests {
             "claude".into(),
             serde_json::json!({"version": "2.1.116", "user_type": "external"}),
         );
-        t.extra.insert(
-            "codex".into(),
-            serde_json::json!({"some": "data"}),
-        );
-        let convo = GeminiProjector::default().project(&view_with(vec![t])).unwrap();
+        t.extra
+            .insert("codex".into(), serde_json::json!({"some": "data"}));
+        let convo = GeminiProjector::default()
+            .project(&view_with(vec![t]))
+            .unwrap();
         let msg = &convo.main.messages[0];
         assert!(
             msg.extra.get("claude").is_none(),
@@ -915,7 +935,9 @@ mod tests {
                 "some_native_extra": "round-tripped value",
             }),
         );
-        let convo = GeminiProjector::default().project(&view_with(vec![t])).unwrap();
+        let convo = GeminiProjector::default()
+            .project(&view_with(vec![t]))
+            .unwrap();
         let msg = &convo.main.messages[0];
         assert_eq!(
             msg.extra.get("some_native_extra"),

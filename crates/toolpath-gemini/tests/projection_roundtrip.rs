@@ -20,8 +20,7 @@ use toolpath_gemini::project::GeminiProjector;
 use toolpath_gemini::provider::to_view;
 use toolpath_gemini::types::{ChatFile, Conversation, GeminiContent, GeminiRole};
 
-const MAIN_FIXTURE: &str =
-    include_str!("fixtures/sample_main_with_subagent_ref.json");
+const MAIN_FIXTURE: &str = include_str!("fixtures/sample_main_with_subagent_ref.json");
 const SUBAGENT_FIXTURE: &str = include_str!("fixtures/sample_subagent.json");
 
 fn load_source_conversation() -> Conversation {
@@ -136,11 +135,7 @@ fn roundtrip_preserves_assistant_text_and_model() {
             "assistant text mismatch at message {}",
             i
         );
-        assert_eq!(
-            before.model, after.model,
-            "model mismatch at message {}",
-            i
-        );
+        assert_eq!(before.model, after.model, "model mismatch at message {}", i);
     }
 }
 
@@ -204,8 +199,16 @@ fn roundtrip_preserves_tool_calls_with_results() {
             after_calls.len()
         );
         for (j, (bc, ac)) in before_calls.iter().zip(after_calls.iter()).enumerate() {
-            assert_eq!(bc.name, ac.name, "tool name mismatch at msg {} call {}", i, j);
-            assert_eq!(bc.args, ac.args, "tool args mismatch at msg {} call {}", i, j);
+            assert_eq!(
+                bc.name, ac.name,
+                "tool name mismatch at msg {} call {}",
+                i, j
+            );
+            assert_eq!(
+                bc.args, ac.args,
+                "tool args mismatch at msg {} call {}",
+                i, j
+            );
             assert_eq!(
                 bc.result_text(),
                 ac.result_text(),
@@ -311,9 +314,19 @@ fn roundtrip_preserves_subagent() {
         "subagent message count"
     );
     // Spot-check the subagent's tool calls round-trip.
-    for (i, (bm, am)) in before.messages.iter().zip(after.messages.iter()).enumerate() {
+    for (i, (bm, am)) in before
+        .messages
+        .iter()
+        .zip(after.messages.iter())
+        .enumerate()
+    {
         assert_eq!(bm.role, am.role, "subagent role at {}", i);
-        assert_eq!(bm.content.text(), am.content.text(), "subagent text at {}", i);
+        assert_eq!(
+            bm.content.text(),
+            am.content.text(),
+            "subagent text at {}",
+            i
+        );
         assert_eq!(
             bm.tool_calls().len(),
             am.tool_calls().len(),

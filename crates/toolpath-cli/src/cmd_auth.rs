@@ -114,8 +114,8 @@ fn status(path: &Path) -> Result<()> {
 }
 
 fn whoami(path: &Path) -> Result<()> {
-    let stored = load_session(path)?
-        .ok_or_else(|| anyhow!("Not logged in. Run `path auth login`."))?;
+    let stored =
+        load_session(path)?.ok_or_else(|| anyhow!("Not logged in. Run `path auth login`."))?;
     let user = api_me(&stored.url, &stored.token)?;
     println!("{} ({})", user.username, user.id);
     if let Some(email) = &user.email {
