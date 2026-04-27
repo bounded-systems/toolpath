@@ -76,6 +76,10 @@ pub struct DeriveConfig {
 }
 
 /// Map a Claude tool name to a category string.
+///
+/// Keep in sync with [`crate::provider::tool_category`] — same table,
+/// different return type (string for path-doc serialization vs
+/// [`toolpath_convo::ToolCategory`] for in-memory views).
 fn tool_category_str(name: &str) -> &'static str {
     match name {
         "Read" => "file_read",
@@ -83,7 +87,7 @@ fn tool_category_str(name: &str) -> &'static str {
         "Write" | "Edit" | "MultiEdit" | "NotebookEdit" => "file_write",
         "Bash" => "shell",
         "WebFetch" | "WebSearch" => "network",
-        "Task" => "delegation",
+        "Task" | "Agent" => "delegation",
         _ => "unknown",
     }
 }
@@ -622,19 +626,6 @@ pub fn derive_project(conversations: &[Conversation], config: &DeriveConfig) -> 
         .collect()
 }
 
-/// Truncate a string to at most `max` characters (not bytes), appending "..."
-/// if truncated. Always cuts on a char boundary.
-#[cfg(test)]
-fn truncate(s: &str, max: usize) -> String {
-    let char_count = s.chars().count();
-    if char_count <= max {
-        s.to_string()
-    } else {
-        let truncated: String = s.chars().take(max - 3).collect();
-        format!("{}...", truncated)
-    }
-}
-
 /// Return the first `n` characters of a string, safe for any UTF-8 content.
 fn safe_prefix(s: &str, n: usize) -> String {
     s.chars().take(n).collect()
@@ -691,34 +682,6 @@ mod tests {
             convo.add_entry(entry);
         }
         convo
-    }
-
-    // ── truncate ───────────────────────────────────────────────────────
-
-    #[test]
-    fn test_truncate_short() {
-        assert_eq!(truncate("hello", 10), "hello");
-    }
-
-    #[test]
-    fn test_truncate_exact() {
-        assert_eq!(truncate("hello", 5), "hello");
-    }
-
-    #[test]
-    fn test_truncate_long() {
-        let result = truncate("hello world, this is long", 10);
-        assert!(result.ends_with("..."));
-        assert_eq!(result.chars().count(), 10);
-    }
-
-    #[test]
-    fn test_truncate_multibyte() {
-        // Should not panic on multi-byte characters
-        let s = "cafe\u{0301} re\u{0301}sume\u{0301} nai\u{0308}ve";
-        let result = truncate(s, 8);
-        assert!(result.ends_with("..."));
-        assert_eq!(result.chars().count(), 8);
     }
 
     // ── safe_prefix ────────────────────────────────────────────────────

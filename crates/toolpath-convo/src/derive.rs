@@ -127,12 +127,18 @@ pub fn derive_path(view: &ConversationView, config: &DeriveConfig) -> Path {
                 .tool_uses
                 .iter()
                 .map(|t| {
-                    serde_json::json!({
+                    let mut obj = serde_json::json!({
                         "id": t.id,
                         "name": t.name,
                         "input": t.input,
                         "category": t.category,
-                    })
+                    });
+                    if let Some(result) = &t.result
+                        && let Ok(v) = serde_json::to_value(result)
+                    {
+                        obj.as_object_mut().unwrap().insert("result".to_string(), v);
+                    }
+                    obj
                 })
                 .collect();
             extra.insert("tool_uses".to_string(), serde_json::Value::Array(arr));
@@ -148,6 +154,25 @@ pub fn derive_path(view: &ConversationView, config: &DeriveConfig) -> Path {
             && let Ok(v) = serde_json::to_value(&turn.delegations)
         {
             extra.insert("delegations".to_string(), v);
+        }
+
+        if let Some(stop_reason) = &turn.stop_reason {
+            extra.insert(
+                "stop_reason".to_string(),
+                serde_json::Value::String(stop_reason.clone()),
+            );
+        }
+
+        if let Some(env) = &turn.environment
+            && let Ok(v) = serde_json::to_value(env)
+        {
+            extra.insert("environment".to_string(), v);
+        }
+
+        if !turn.extra.is_empty()
+            && let Ok(v) = serde_json::to_value(&turn.extra)
+        {
+            extra.insert("turn_extra".to_string(), v);
         }
 
         step.change.insert(

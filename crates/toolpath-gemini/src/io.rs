@@ -60,10 +60,14 @@ impl ConvoIO {
     }
 
     pub fn session_exists(&self, project_path: &str, session_id: &str) -> Result<bool> {
-        // A session is "present" if EITHER a main session file or a
+        // A session is "present" if ANY of: a main session file with that
+        // stem, a main session file whose inner sessionId matches, or a
         // UUID directory of that name exists.
-        let main = self.resolver.main_session_file(project_path, session_id)?;
-        if main.exists() {
+        if self
+            .resolver
+            .resolve_main_file(project_path, session_id)?
+            .is_some()
+        {
             return Ok(true);
         }
         let dir = self.resolver.session_dir(project_path, session_id)?;
@@ -104,13 +108,17 @@ impl ConvoIO {
     /// - A main-session file stem (e.g. `session-2026-04-17T18-09-b26d7f99`)
     ///   — the file is read, and a sibling `<inner-sessionId>/` dir (if
     ///   present) contributes sub-agent chats.
-    /// - A UUID directory name (e.g. `f7cc36c0-980c-4914-ae79-439567272478`)
-    ///   — every `*.json` file inside is loaded; the one without
-    ///   `kind: "subagent"` becomes the main.
+    /// - A full session UUID (the `sessionId` field inside a main chat
+    ///   file, e.g. `f7cc36c0-980c-4914-ae79-439567272478`) — `chats/*.json`
+    ///   is scanned for a file whose inner `sessionId` matches. This is
+    ///   how Gemini CLI itself resolves `--resume <uuid>`.
+    /// - A UUID directory name with no backing main file — every
+    ///   `*.json` file inside is loaded; the one without `kind: "subagent"`
+    ///   becomes the main.
     pub fn read_session(&self, project_path: &str, session_id: &str) -> Result<Conversation> {
-        // Strategy A: look for a main session file at chats/<id>.json.
-        let main_path = self.resolver.main_session_file(project_path, session_id)?;
-        if main_path.exists() {
+        // Strategy A: resolve the main file either by file stem or by
+        // inner sessionId.
+        if let Some(main_path) = self.resolver.resolve_main_file(project_path, session_id)? {
             let main = ConversationReader::read_chat_file(&main_path)?;
             let uuid = main.session_id.clone();
             let sub_agents = if !uuid.is_empty() {
@@ -178,16 +186,15 @@ impl ConvoIO {
 
     /// Lightweight metadata for a single session.
     ///
-    /// Accepts either a main-session file stem or a UUID directory
-    /// name (see [`ConvoIO::read_session`] for the resolution rules).
+    /// Accepts any identifier [`ConvoIO::read_session`] accepts:
+    /// filename stem, inner session UUID, or a bare UUID directory name.
     pub fn read_session_metadata(
         &self,
         project_path: &str,
         session_id: &str,
     ) -> Result<ConversationMetadata> {
-        // Case A: main session file exists.
-        let main_path = self.resolver.main_session_file(project_path, session_id)?;
-        if main_path.exists() {
+        // Case A: main session file resolvable by stem or inner sessionId.
+        if let Some(main_path) = self.resolver.resolve_main_file(project_path, session_id)? {
             let main = ConversationReader::read_chat_file(&main_path)?;
             let uuid = main.session_id.clone();
             let mut sub_chats: Vec<ChatFile> = Vec::new();

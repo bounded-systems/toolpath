@@ -274,6 +274,50 @@ impl PathResolver {
         Ok(self.chats_dir(project_path)?.join(name))
     }
 
+    /// Locate a main chat file whose *identity* (either the filename stem
+    /// or the inner `sessionId` field) matches `session_id`.
+    ///
+    /// This mirrors how Gemini CLI itself resolves `--resume <id>`: it
+    /// accepts both the on-disk stem (e.g. `session-2026-04-17T18-09-b26d7f99`)
+    /// and the full session UUID (which lives inside the file as
+    /// `"sessionId"`). Returns `Ok(None)` if nothing matches.
+    ///
+    /// Does *not* consider UUID subdirectories — those are handled
+    /// separately in [`crate::ConvoIO::read_session`] as an orphan
+    /// sub-agent bucket.
+    pub fn resolve_main_file(
+        &self,
+        project_path: &str,
+        session_id: &str,
+    ) -> Result<Option<PathBuf>> {
+        // Fast path: direct stem match at chats/<session_id>.json.
+        let direct = self.main_session_file(project_path, session_id)?;
+        if direct.exists() {
+            return Ok(Some(direct));
+        }
+
+        // Fallback: scan chats/*.json and match on inner sessionId.
+        let chats = match self.chats_dir(project_path) {
+            Ok(p) => p,
+            Err(_) => return Ok(None),
+        };
+        if !chats.exists() {
+            return Ok(None);
+        }
+        for entry in fs::read_dir(&chats)?.flatten() {
+            let p = entry.path();
+            if !p.is_file() || p.extension().and_then(|s| s.to_str()) != Some("json") {
+                continue;
+            }
+            if let Some(inner) = peek_session_id(&p)
+                && inner == session_id
+            {
+                return Ok(Some(p));
+            }
+        }
+        Ok(None)
+    }
+
     /// List chat file stems in a session directory (without `.json`).
     pub fn list_chat_files(&self, project_path: &str, session_uuid: &str) -> Result<Vec<String>> {
         let dir = match self.session_dir(project_path, session_uuid) {
@@ -635,6 +679,90 @@ mod tests {
             .main_session_file("/p", "session-2026-04-17-abc.json")
             .unwrap();
         assert_eq!(p, p2);
+    }
+
+    #[test]
+    fn test_resolve_main_file_by_stem() {
+        let (_t, r) = setup();
+        let gemini = r.gemini_dir().unwrap();
+        fs::write(gemini.join("projects.json"), r#"{"projects":{"/p":"p"}}"#).unwrap();
+        let chats = gemini.join("tmp/p/chats");
+        fs::create_dir_all(&chats).unwrap();
+        fs::write(
+            chats.join("session-2026-04-17-abc.json"),
+            r#"{"sessionId":"abc-uuid","projectHash":"","messages":[]}"#,
+        )
+        .unwrap();
+
+        let found = r.resolve_main_file("/p", "session-2026-04-17-abc").unwrap();
+        assert_eq!(found, Some(chats.join("session-2026-04-17-abc.json")));
+    }
+
+    #[test]
+    fn test_resolve_main_file_by_inner_session_id() {
+        // Matches the way Gemini CLI's `--resume <uuid>` resolves: scans
+        // all main files and matches on inner `sessionId`.
+        let (_t, r) = setup();
+        let gemini = r.gemini_dir().unwrap();
+        fs::write(gemini.join("projects.json"), r#"{"projects":{"/p":"p"}}"#).unwrap();
+        let chats = gemini.join("tmp/p/chats");
+        fs::create_dir_all(&chats).unwrap();
+        fs::write(
+            chats.join("session-2026-04-17-abc.json"),
+            r#"{"sessionId":"f7cc36c0-980c-4914-ae79-439567272478","projectHash":"","messages":[]}"#,
+        )
+        .unwrap();
+
+        // `--resume f7cc36c0-...` should resolve to the file above even
+        // though its on-disk stem is different.
+        let found = r
+            .resolve_main_file("/p", "f7cc36c0-980c-4914-ae79-439567272478")
+            .unwrap();
+        assert_eq!(found, Some(chats.join("session-2026-04-17-abc.json")));
+    }
+
+    #[test]
+    fn test_resolve_main_file_prefers_stem_over_inner_id() {
+        // If a file's stem *and* another file's inner sessionId both
+        // match, the direct stem lookup wins — it's the fast path and
+        // mirrors CLI lookup order.
+        let (_t, r) = setup();
+        let gemini = r.gemini_dir().unwrap();
+        fs::write(gemini.join("projects.json"), r#"{"projects":{"/p":"p"}}"#).unwrap();
+        let chats = gemini.join("tmp/p/chats");
+        fs::create_dir_all(&chats).unwrap();
+        // File whose stem matches the query
+        fs::write(
+            chats.join("my-id.json"),
+            r#"{"sessionId":"other-uuid","projectHash":"","messages":[]}"#,
+        )
+        .unwrap();
+        // File whose inner sessionId matches the query
+        fs::write(
+            chats.join("session-other.json"),
+            r#"{"sessionId":"my-id","projectHash":"","messages":[]}"#,
+        )
+        .unwrap();
+
+        let found = r.resolve_main_file("/p", "my-id").unwrap();
+        assert_eq!(found, Some(chats.join("my-id.json")));
+    }
+
+    #[test]
+    fn test_resolve_main_file_returns_none_when_unmatched() {
+        let (_t, r) = setup();
+        let gemini = r.gemini_dir().unwrap();
+        fs::write(gemini.join("projects.json"), r#"{"projects":{"/p":"p"}}"#).unwrap();
+        let chats = gemini.join("tmp/p/chats");
+        fs::create_dir_all(&chats).unwrap();
+        fs::write(
+            chats.join("session-other.json"),
+            r#"{"sessionId":"uuid-a","projectHash":"","messages":[]}"#,
+        )
+        .unwrap();
+
+        let found = r.resolve_main_file("/p", "uuid-that-doesnt-exist").unwrap();
+        assert_eq!(found, None);
     }
 
     #[test]

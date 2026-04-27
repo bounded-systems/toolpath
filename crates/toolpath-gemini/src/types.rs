@@ -213,11 +213,17 @@ pub struct Thought {
 /// them.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Tokens {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub input: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cached: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thoughts: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub total: Option<u32>,
 }
 

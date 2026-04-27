@@ -198,12 +198,12 @@ fn build_step(
     let mut convo_extra: HashMap<String, Value> = HashMap::new();
     convo_extra.insert("role".into(), json!(role_str));
     if !turn.text.is_empty() {
-        convo_extra.insert("text".into(), json!(truncate(&turn.text, 2000)));
+        convo_extra.insert("text".into(), json!(turn.text));
     }
     if let Some(th) = turn.thinking.as_deref()
         && !th.is_empty()
     {
-        convo_extra.insert("thinking".into(), json!(truncate(th, 2000)));
+        convo_extra.insert("thinking".into(), json!(th));
     }
     if !turn.tool_uses.is_empty() {
         let calls: Vec<Value> = turn
@@ -434,7 +434,7 @@ fn tool_call_summary(tu: &toolpath_convo::ToolInvocation) -> String {
         "task" | "agent" | "spawn_agent" => pick("prompt").or_else(|| pick("task")),
         _ => None,
     };
-    s.map(|x| truncate(&x, 500)).unwrap_or_default()
+    s.unwrap_or_default()
 }
 
 fn tool_input_file_path(tu: &toolpath_convo::ToolInvocation) -> Option<String> {
@@ -552,16 +552,6 @@ fn append_diff_line(buf: &mut String, line: git2::DiffLine<'_>) {
     buf.push_str(prefix);
     if let Ok(s) = std::str::from_utf8(line.content()) {
         buf.push_str(s);
-    }
-}
-
-fn truncate(s: &str, max: usize) -> String {
-    let count = s.chars().count();
-    if count <= max {
-        s.to_string()
-    } else {
-        let t: String = s.chars().take(max - 3).collect();
-        format!("{}...", t)
     }
 }
 

@@ -20,7 +20,9 @@ pub struct InceptArgs {
 }
 
 pub fn run(args: InceptArgs) -> Result<()> {
-    eprintln!("warning: `path incept` is deprecated; use `path export claude --project <dir>` instead");
+    eprintln!(
+        "warning: `path incept` is deprecated; use `path export claude --project <dir>` instead"
+    );
 
     let input = match args.input {
         Some(s) => s,

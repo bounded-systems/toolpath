@@ -49,7 +49,10 @@ snapshot_test!(
     "path-02-local-session.path.json"
 );
 snapshot_test!(render_md_path_03_signed_pr, "path-03-signed-pr.path.json");
-snapshot_test!(render_md_path_04_exploration, "path-04-exploration.path.json");
+snapshot_test!(
+    render_md_path_04_exploration,
+    "path-04-exploration.path.json"
+);
 
 // Graphs (1)
 snapshot_test!(render_md_graph_01_release, "graph-01-release.json");

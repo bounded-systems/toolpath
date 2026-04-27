@@ -4,6 +4,7 @@ pub mod derive;
 pub mod error;
 pub mod io;
 pub mod paths;
+pub mod project;
 pub mod provider;
 pub mod query;
 pub mod reader;
