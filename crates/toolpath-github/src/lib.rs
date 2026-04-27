@@ -530,6 +530,7 @@ mod native {
                     ref_str: Some(pr["base"]["ref"].as_str().unwrap_or("main").to_string()),
                 }),
                 head,
+                graph_ref: None,
             },
             steps,
             meta: Some(meta),

@@ -309,6 +309,14 @@
         "head": {
           "type": "string",
           "description": "Current tip step ID"
+        },
+        "graph_ref": {
+          "type": "string",
+          "description": "Optional $ref-style URL naming the graph this path belongs to",
+          "examples": [
+            "toolpath://archive/release-v2",
+            "https://archive.example.com/graphs/release-v2.json"
+          ]
         }
       },
       "required": ["id", "base", "head"],

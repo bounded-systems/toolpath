@@ -157,6 +157,11 @@ pub struct PathIdentity {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base: Option<Base>,
     pub head: String,
+    /// Optional `$ref`-style URL naming the graph this path belongs to.
+    /// Uses the same URL conventions as `Graph.paths[*].$ref`
+    /// (e.g. `toolpath://archive/release-v2`, `https://...`, `file:///...`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub graph_ref: Option<String>,
 }
 
 /// Root context for a path
@@ -409,6 +414,7 @@ impl Path {
                 id: id.into(),
                 base,
                 head: head.into(),
+                graph_ref: None,
             },
             steps: Vec::new(),
             meta: None,
@@ -566,6 +572,7 @@ mod tests {
                 id: "p1".into(),
                 base: Some(Base::vcs("github:org/repo", "abc")),
                 head: "s1".into(),
+                graph_ref: None,
             },
             steps: vec![step],
             meta: None,

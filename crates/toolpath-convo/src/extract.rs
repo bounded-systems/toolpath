@@ -370,6 +370,7 @@ mod tests {
                 id: "test-path".into(),
                 base: None,
                 head,
+                graph_ref: None,
             },
             steps,
             meta: None,

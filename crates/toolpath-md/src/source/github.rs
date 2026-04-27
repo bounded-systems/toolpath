@@ -87,6 +87,7 @@ mod tests {
                 id: "pr-42".into(),
                 base: None,
                 head: "s2".into(),
+                graph_ref: None,
             },
             steps: vec![s1, s2],
             meta: Some(PathMeta {

@@ -110,6 +110,7 @@ pub fn derive_path(conversation: &Conversation, config: &DeriveConfig) -> Path {
             id: path_id,
             base: base_uri.map(|uri| Base { uri, ref_str: None }),
             head,
+            graph_ref: None,
         },
         steps,
         meta: Some(PathMeta {

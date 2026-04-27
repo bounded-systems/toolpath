@@ -68,7 +68,7 @@ export default function (eleventyConfig) {
   eleventyConfig.addGlobalData("playgroundFiles", () => {
     const files = [
       "step-01-minimal.json",
-      "path-01-pr.json",
+      "path-01-pr.path.json",
       "graph-01-release.json",
     ];
     const result = {};
@@ -81,10 +81,10 @@ export default function (eleventyConfig) {
   eleventyConfig.addGlobalData("vizExamples", () => {
     const examples = [
       { file: "step-01-minimal.json", name: "Step: minimal" },
-      { file: "path-01-pr.json", name: "Path: PR with dead end" },
-      { file: "path-02-local-session.json", name: "Path: local session" },
-      { file: "path-03-signed-pr.json", name: "Path: signed PR" },
-      { file: "path-04-exploration.json", name: "Path: exploration & merge" },
+      { file: "path-01-pr.path.json", name: "Path: PR with dead end" },
+      { file: "path-02-local-session.path.json", name: "Path: local session" },
+      { file: "path-03-signed-pr.path.json", name: "Path: signed PR" },
+      { file: "path-04-exploration.path.json", name: "Path: exploration & merge" },
       { file: "graph-01-release.json", name: "Graph: release bundle" },
     ];
     return examples.map((e) => ({

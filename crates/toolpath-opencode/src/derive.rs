@@ -159,6 +159,7 @@ fn derive_path_from_view(
             id: path_id,
             base,
             head,
+            graph_ref: None,
         },
         steps,
         meta: Some(PathMeta {

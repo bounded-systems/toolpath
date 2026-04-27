@@ -127,6 +127,7 @@ mod tests {
                 id: "test-path".into(),
                 base: None,
                 head: "step-002".into(),
+                graph_ref: None,
             },
             steps: vec![
                 Step {

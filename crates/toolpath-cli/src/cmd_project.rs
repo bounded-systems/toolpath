@@ -154,6 +154,7 @@ mod tests {
                 id: "test-path".to_string(),
                 base: None,
                 head: "step-002".to_string(),
+                graph_ref: None,
             },
             steps: vec![init_step, append_step],
             meta: None,

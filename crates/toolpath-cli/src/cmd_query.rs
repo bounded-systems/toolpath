@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use anyhow::Result;
 use clap::Subcommand;
 use std::path::PathBuf;
 use toolpath::v1::{Document, query};
@@ -59,10 +59,8 @@ pub fn run(op: QueryOp, pretty: bool) -> Result<()> {
     }
 }
 
-fn read_doc(path: &PathBuf) -> Result<Document> {
-    let content =
-        std::fs::read_to_string(path).with_context(|| format!("Failed to read {:?}", path))?;
-    Document::from_json(&content).with_context(|| format!("Failed to parse {:?}", path))
+fn read_doc(path: &std::path::Path) -> Result<Document> {
+    crate::io::read_document_auto(path)
 }
 
 fn extract_steps(doc: &Document) -> (&[toolpath::v1::Step], Option<&str>) {
@@ -175,6 +173,7 @@ mod tests {
                 id: "p1".into(),
                 base: Some(Base::vcs("github:org/repo", "abc")),
                 head: "s3".into(),
+                graph_ref: None,
             },
             steps: vec![s1, s2, s2a, s3],
             meta: None,
@@ -213,6 +212,7 @@ mod tests {
                 id: "p1".into(),
                 base: None,
                 head: "s1".into(),
+                graph_ref: None,
             },
             steps: vec![s1],
             meta: None,
