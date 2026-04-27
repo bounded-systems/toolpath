@@ -9,19 +9,19 @@ interleave — color-coded by actor type.
 
 ## Overview
 
-Renders any Toolpath `Document` (Step, Path, or Graph) as a Graphviz DOT string. Steps are colored by actor type, dead ends are highlighted, and the DAG structure is preserved visually.
+Renders a Toolpath `Graph` (the single root document type) as a Graphviz DOT string. Steps are colored by actor type, dead ends are highlighted, and the DAG structure is preserved visually. Single-path graphs use a path-focused layout; multi-path graphs use clustered subgraphs.
 
 Depends only on `toolpath` -- no external rendering libraries. You'll need [Graphviz](https://graphviz.org/) installed to convert DOT output to images (`dot -Tpng`).
 
 ## Usage
 
 ```rust
-use toolpath::v1::Document;
+use toolpath::v1::Graph;
 use toolpath_dot::{render, RenderOptions};
 
-let json_str = r#"{"Step":{"step":{"id":"s1","actor":"human:alex","timestamp":"T"},"change":{}}}"#;
-let doc = Document::from_json(json_str).unwrap();
-let dot = render(&doc, &RenderOptions::default());
+let json_str = r#"{"graph":{"id":"g1"},"paths":[]}"#;
+let graph = Graph::from_json(json_str).unwrap();
+let dot = render(&graph, &RenderOptions::default());
 assert!(dot.contains("digraph"));
 ```
 
@@ -47,7 +47,7 @@ let options = RenderOptions {
 
 | Function | Description |
 |---|---|
-| `render(doc, options)` | Render any `Document` variant |
+| `render(graph, options)` | Render a `Graph` (single-path graphs use the path layout) |
 | `render_step(step, options)` | Render a single Step |
 | `render_path(path, options)` | Render a Path with its step DAG |
 | `render_graph(graph, options)` | Render a Graph with subgraph clusters per path |

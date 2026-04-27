@@ -1,21 +1,22 @@
-//! JSONL streaming format for `Path` documents.
+//! JSONL streaming format for single-path Toolpath documents.
 //!
 //! A `.path.jsonl` file is a line-oriented sequence of self-describing JSON
-//! objects that seals to a canonical [`Path`]. Each line is an externally
-//! tagged JSON object: `{"<Variant>": <body>}`. Writers append one line per
-//! logical event (path open, new step, new signature, etc.); readers
-//! accumulate these into a single `Path` document.
+//! objects that seals to a single-path [`Graph`]. On the wire, each line is
+//! an externally tagged JSON object: `{"<Variant>": <body>}`. Writers append
+//! one line per logical event (path open, new step, new signature, etc.);
+//! readers accumulate these into the inner [`Path`], then wrap it as a
+//! single-path [`Graph`] at the file boundary.
 //!
 //! See `docs/RFC-jsonl.md` for the full specification. Round-trip guarantee:
 //! reading a JSONL file and writing it back produces a JSON document
-//! equivalent to what [`Path::to_json`] would produce for the same logical
-//! path — signatures computed over canonical JSON remain valid across
+//! equivalent to what [`Graph::to_json`] would produce for the same logical
+//! graph — signatures computed over canonical JSON remain valid across
 //! conversions.
 //!
 //! # Reading
 //!
 //! ```
-//! use toolpath::v1::Path;
+//! use toolpath::v1::Graph;
 //!
 //! let jsonl = concat!(
 //!     r#"{"PathOpen":{"version":"1","id":"pr-42","base":{"uri":"github:org/repo","ref":"abc"}}}"#, "\n",
@@ -23,7 +24,8 @@
 //!     r#"{"Head":{"step_id":"s1"}}"#, "\n",
 //!     r#"{"PathClose":{}}"#, "\n",
 //! );
-//! let path = Path::from_jsonl_str(jsonl).unwrap();
+//! let graph = Graph::from_jsonl_str(jsonl).unwrap();
+//! let path = graph.single_path().expect("single-path graph");
 //! assert_eq!(path.path.id, "pr-42");
 //! assert_eq!(path.path.head, "s1");
 //! assert_eq!(path.steps.len(), 1);
@@ -32,7 +34,7 @@
 //! # Writing
 //!
 //! ```
-//! use toolpath::v1::{Base, Path, PathIdentity, Step};
+//! use toolpath::v1::{Base, Graph, Path, PathIdentity, Step};
 //!
 //! let step = Step::new("s1", "human:alex", "2026-01-01T00:00:00Z")
 //!     .with_raw_change("f.rs", "@@ -0,0 +1 @@\n+hi");
@@ -46,13 +48,15 @@
 //!     steps: vec![step],
 //!     meta: None,
 //! };
-//! let jsonl = path.to_jsonl_string().unwrap();
+//! let graph = Graph::from_path(path);
+//! let jsonl = graph.to_jsonl_string().unwrap();
 //! let first_line = jsonl.lines().next().unwrap();
 //! assert!(first_line.starts_with(r#"{"PathOpen":"#));
 //! ```
 
 use crate::types::{
-    ActorDefinition, Base, Path, PathIdentity, PathMeta, Ref, Signature, Step, StepMeta,
+    ActorDefinition, Base, Graph, Path, PathIdentity, PathMeta, PathOrRef, Ref, Signature, Step,
+    StepMeta,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -202,6 +206,9 @@ pub enum JsonlError {
     NoSteps,
     /// A line appeared after `PathClose`.
     AfterClose { line_num: usize },
+    /// JSONL only encodes single-path graphs; the source graph held zero or
+    /// more than one inline path.
+    NotSinglePathGraph { path_count: usize },
 }
 
 impl fmt::Display for JsonlError {
@@ -242,6 +249,10 @@ impl fmt::Display for JsonlError {
             JsonlError::AfterClose { line_num } => {
                 write!(f, "line {line_num}: unexpected line after PathClose")
             }
+            JsonlError::NotSinglePathGraph { path_count } => write!(
+                f,
+                "JSONL only encodes single-path graphs (got {path_count} paths)"
+            ),
         }
     }
 }
@@ -278,8 +289,11 @@ enum ParsedLine {
 }
 
 fn parse_line(line: &str, line_num: usize) -> Result<ParsedLine, JsonlError> {
-    let value: serde_json::Value = serde_json::from_str(line)
-        .map_err(|source| JsonlError::MalformedJson { line_num, source })?;
+    let value: serde_json::Value =
+        serde_json::from_str(line).map_err(|source| JsonlError::MalformedJson {
+            line_num,
+            source,
+        })?;
     let obj = value
         .as_object()
         .ok_or(JsonlError::NotAnObject { line_num })?;
@@ -423,6 +437,40 @@ impl Path {
     }
 }
 
+impl Graph {
+    /// Read a JSONL toolpath document from any buffered reader. The stream is
+    /// parsed as a single inline [`Path`] and wrapped in a single-path
+    /// [`Graph`].
+    pub fn from_jsonl_reader<R: BufRead>(reader: R) -> Result<Self, JsonlError> {
+        let path = Path::from_jsonl_reader(reader)?;
+        Ok(Graph::from_path(path))
+    }
+
+    /// Read a JSONL toolpath document from a string.
+    pub fn from_jsonl_str(s: &str) -> Result<Self, JsonlError> {
+        Self::from_jsonl_reader(std::io::Cursor::new(s))
+    }
+
+    /// Write the graph as JSONL. Errors with [`JsonlError::NotSinglePathGraph`]
+    /// if the graph does not hold exactly one inline path — JSONL has no
+    /// representation for multi-path graphs or `$ref` entries.
+    pub fn to_jsonl_writer<W: Write>(&self, w: &mut W) -> Result<(), JsonlError> {
+        match self.paths.as_slice() {
+            [PathOrRef::Path(p)] => p.to_jsonl_writer(w),
+            other => Err(JsonlError::NotSinglePathGraph {
+                path_count: other.len(),
+            }),
+        }
+    }
+
+    /// Write the graph as JSONL into a string.
+    pub fn to_jsonl_string(&self) -> Result<String, JsonlError> {
+        let mut buf: Vec<u8> = Vec::new();
+        self.to_jsonl_writer(&mut buf)?;
+        Ok(String::from_utf8(buf).expect("jsonl writer emits utf-8"))
+    }
+}
+
 fn apply_signature(
     path_meta: &mut PathMeta,
     steps: &mut [Step],
@@ -435,14 +483,13 @@ fn apply_signature(
         return Ok(());
     }
     if let Some(step_id) = body.target.strip_prefix("step:") {
-        let idx =
-            step_idx
-                .get(step_id)
-                .copied()
-                .ok_or_else(|| JsonlError::OrphanStepSignature {
-                    line_num,
-                    step_id: step_id.to_string(),
-                })?;
+        let idx = step_idx
+            .get(step_id)
+            .copied()
+            .ok_or_else(|| JsonlError::OrphanStepSignature {
+                line_num,
+                step_id: step_id.to_string(),
+            })?;
         let step = &mut steps[idx];
         let meta = step.meta.get_or_insert_with(StepMeta::default);
         meta.signatures.push(body.signature);
@@ -649,13 +696,15 @@ fn path_meta_for_open(m: &PathMeta) -> Option<PathOpenMeta> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{ArtifactChange, Document, Ref};
+    use crate::types::{ArtifactChange, Ref};
     use serde_json::json;
     use std::collections::HashMap;
 
     fn make_step(id: &str, parent: Option<&str>) -> Step {
-        let mut s = Step::new(id, "human:alex", "2026-01-01T00:00:00Z")
-            .with_raw_change("src/main.rs", "@@ -1 +1 @@\n-a\n+b");
+        let mut s = Step::new(id, "human:alex", "2026-01-01T00:00:00Z").with_raw_change(
+            "src/main.rs",
+            "@@ -1 +1 @@\n-a\n+b",
+        );
         if let Some(p) = parent {
             s = s.with_parent(p);
         }
@@ -663,7 +712,7 @@ mod tests {
     }
 
     fn canonical_json(path: &Path) -> serde_json::Value {
-        serde_json::to_value(Document::Path(path.clone())).unwrap()
+        serde_json::to_value(path).unwrap()
     }
 
     // ── Line kind serde ────────────────────────────────────────────────────

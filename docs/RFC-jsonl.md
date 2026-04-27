@@ -57,9 +57,9 @@ document.
 1. **Streaming individual steps.** Each step is atomic per line. Partial
    step construction (e.g., emitting a step identity now and its diff
    later) is out of scope.
-2. **Graph-scoped streams.** A JSONL file contains exactly one `Path`.
-   Graphs compose streaming and non-streaming path files via existing
-   `$ref` semantics.
+2. **Multi-path streams.** A JSONL file encodes exactly one inline `Path`,
+   which is wrapped at the file boundary as a single-path `Graph`. Multi-path
+   graphs compose JSONL files via existing `$ref` semantics.
 3. **Mid-file resync or corruption recovery.** Readers always start from
    line 1.
 4. **Transport semantics.** The format is equally usable as a storage
@@ -68,35 +68,31 @@ document.
 
 ## Scope
 
-v1 covers the `Path` document type. `Step` documents are already a single
-JSON blob and do not benefit from streaming. `Graph` documents are a
-container of path references; a streaming graph is a graph that references
-streaming path files.
+v1 covers a single inline `Path` streamed across many JSON lines. The format
+is a single-path graph at the file boundary: when readers seal the stream,
+they wrap the resulting `Path` as a single-path `Graph` (a `Graph` whose
+`paths` array holds exactly one inline path). Multi-path graphs are not
+streamable — they live as canonical `.path.json` files and reference
+streaming siblings via `$ref`.
 
 ## File Extensions
 
-Toolpath `Path` documents use a two-part extension that encodes both the
-document type and the serialization format:
+Toolpath documents use a two-part extension that encodes both the
+serialization strategy and the streaming variant:
 
 | Extension | Format | Description |
 | --------- | ------ | ----------- |
-| `.path.json` | Canonical JSON | A complete `Path` document as a single `{"Path": {...}}` JSON blob. This is the "whole" format — the entire path is buffered and serialized at once. |
-| `.path.jsonl` | Streaming JSONL | A `Path` document expressed as a sequence of self-describing JSON lines, one per line. This is the streaming format defined by this RFC. |
+| `.path.json` | Canonical JSON | A `Graph` document serialized as a single JSON blob. Multi-path graphs require this format. |
+| `.path.jsonl` | Streaming JSONL | A single inline `Path` expressed as a sequence of self-describing JSON lines, sealed as a single-path `Graph` at the file boundary. |
 
-Both extensions identify `Path` documents. The suffix (`.json` vs `.jsonl`)
-distinguishes the serialization strategy. Tools that accept `.path.jsonl`
-input read it into the same in-memory representation as a `.path.json`
-file.
-
-`Step` and `Graph` documents retain their existing conventions (`.json`
-extension, `{"Step": ...}` / `{"Graph": ...}` envelope). Only `Path` has a
-streaming peer format.
+Tools that accept `.path.jsonl` input read it into the same in-memory `Graph`
+representation as a `.path.json` file.
 
 Graph `$ref` entries MUST point to sealed `.path.json` files, not to
 `.path.jsonl` streams. A `$ref` is a promise that the target is a complete,
 valid document; a streaming file may be incomplete or mid-write.
 Tools that consume `.path.jsonl` files should convert them to
-`.path.json` before incorporating them into a graph.
+`.path.json` before incorporating them into a multi-path graph.
 
 ## File Structure
 
@@ -110,7 +106,7 @@ Tools that consume `.path.jsonl` files should convert them to
 | Line format | One JSON object per line |
 
 No blank lines, no comments, no trailing commas. Each line is a single
-externally tagged JSON object, mirroring the canonical `Document` envelope:
+externally tagged JSON object:
 
 ```
 {"<Variant>": <body>}

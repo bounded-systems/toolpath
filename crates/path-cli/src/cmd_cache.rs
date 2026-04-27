@@ -8,7 +8,7 @@
 use anyhow::{Context, Result, anyhow, bail};
 use clap::Subcommand;
 use std::path::PathBuf;
-use toolpath::v1::Document;
+use toolpath::v1::Graph;
 
 use crate::config::config_dir;
 
@@ -78,7 +78,7 @@ pub(crate) fn cache_path(id: &str) -> Result<PathBuf> {
 /// Uses `O_CREAT | O_EXCL` (`create_new`) when `force == false` so the
 /// exists-check and the write are atomic — two concurrent `path import`
 /// invocations racing the same id can't silently stomp each other.
-pub(crate) fn write_cached(id: &str, doc: &Document, force: bool) -> Result<PathBuf> {
+pub(crate) fn write_cached(id: &str, doc: &Graph, force: bool) -> Result<PathBuf> {
     use std::io::Write;
 
     let dir = cache_dir()?;
@@ -220,12 +220,8 @@ mod tests {
         result
     }
 
-    fn sample_doc() -> Document {
-        Document::Step(toolpath::v1::Step::new(
-            "s1",
-            "human:alex",
-            "2026-01-01T00:00:00Z",
-        ))
+    fn sample_doc() -> Graph {
+        Graph::new("g-sample")
     }
 
     #[test]

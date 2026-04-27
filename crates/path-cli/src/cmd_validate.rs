@@ -1,6 +1,6 @@
 use anyhow::Result;
 use std::path::PathBuf;
-use toolpath::v1::Document;
+use toolpath::v1::Graph;
 
 use crate::io::read_document_auto;
 
@@ -14,17 +14,19 @@ pub fn run(input: PathBuf) -> Result<()> {
     }
 }
 
-fn describe(doc: &Document) -> String {
-    match doc {
-        Document::Graph(g) => format!("Graph (id: {})", g.graph.id),
-        Document::Path(p) => format!("Path (id: {}, {} steps)", p.path.id, p.steps.len()),
-        Document::Step(s) => format!("Step (id: {})", s.step.id),
-    }
+fn describe(doc: &Graph) -> String {
+    let path_count = doc.paths.len();
+    format!(
+        "Graph (id: {}, {} {})",
+        doc.graph.id,
+        path_count,
+        if path_count == 1 { "path" } else { "paths" }
+    )
 }
 
 #[cfg(test)]
 fn validate_content(content: &str) -> Result<()> {
-    match Document::from_json(content) {
+    match Graph::from_json(content) {
         Ok(doc) => {
             println!("Valid: {}", describe(&doc));
             Ok(())
@@ -39,20 +41,14 @@ mod tests {
     use std::io::Write;
 
     #[test]
-    fn test_validate_valid_step() {
-        let json = r#"{"Step":{"step":{"id":"s1","actor":"human:alex","timestamp":"2026-01-01T00:00:00Z"},"change":{}}}"#;
+    fn test_validate_empty_graph() {
+        let json = r#"{"graph":{"id":"g1"},"paths":[]}"#;
         assert!(validate_content(json).is_ok());
     }
 
     #[test]
-    fn test_validate_valid_path() {
-        let json = r#"{"Path":{"path":{"id":"p1","head":"s1"},"steps":[]}}"#;
-        assert!(validate_content(json).is_ok());
-    }
-
-    #[test]
-    fn test_validate_valid_graph() {
-        let json = r#"{"Graph":{"graph":{"id":"g1"},"paths":[]}}"#;
+    fn test_validate_single_path_graph() {
+        let json = r#"{"graph":{"id":"g1"},"paths":[{"path":{"id":"p1","head":"s1"},"steps":[{"step":{"id":"s1","actor":"human:alex","timestamp":"2026-01-01T00:00:00Z"},"change":{}}]}]}"#;
         assert!(validate_content(json).is_ok());
     }
 
@@ -62,14 +58,14 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_invalid_structure() {
-        assert!(validate_content(r#"{"Unknown":{}}"#).is_err());
+    fn test_validate_missing_required_field() {
+        assert!(validate_content(r#"{"paths":[]}"#).is_err());
     }
 
     #[test]
     fn test_run_with_temp_file() {
         let mut f = tempfile::NamedTempFile::new().unwrap();
-        write!(f, r#"{{"Step":{{"step":{{"id":"s1","actor":"human:alex","timestamp":"2026-01-01T00:00:00Z"}},"change":{{}}}}}}"#).unwrap();
+        write!(f, r#"{{"graph":{{"id":"g1"}},"paths":[]}}"#).unwrap();
         f.flush().unwrap();
         assert!(run(f.path().to_path_buf()).is_ok());
     }

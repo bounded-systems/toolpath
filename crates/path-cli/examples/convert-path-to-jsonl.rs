@@ -5,7 +5,7 @@
 //! Usage: `cargo run -p path-cli --example convert-path-to-jsonl -- <in.path.json> <out.path.jsonl>`
 
 use std::fs;
-use toolpath::v1::{Document, Path};
+use toolpath::v1::Graph;
 
 fn main() -> anyhow::Result<()> {
     let mut args = std::env::args().skip(1);
@@ -13,12 +13,8 @@ fn main() -> anyhow::Result<()> {
     let output = args.next().expect("usage: <in.path.json> <out.path.jsonl>");
 
     let json = fs::read_to_string(&input)?;
-    let doc = Document::from_json(&json)?;
-    let path: Path = match doc {
-        Document::Path(p) => p,
-        _ => anyhow::bail!("{input}: not a Path document"),
-    };
-    let jsonl = path.to_jsonl_string()?;
+    let graph = Graph::from_json(&json)?;
+    let jsonl = graph.to_jsonl_string()?;
     fs::write(&output, jsonl)?;
     println!("wrote {output}");
     Ok(())

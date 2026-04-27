@@ -8,15 +8,16 @@ everything that happens to code — including the stuff git doesn't see."
 
 Three objects model this: a **Step** is one atomic change by one actor.
 A **Path** is a DAG of steps (like a PR) — abandoned branches become
-implicit dead ends. A **Graph** collects related paths (like a release).
+implicit dead ends. A **Graph** collects related paths (like a release)
+and is the single root type of every Toolpath document.
 
 ## Overview
 
 This crate provides the type system and query API for Toolpath. It contains:
 
-- **Types**: `Document`, `Graph`, `Path`, `Step`, `ArtifactChange`, and all supporting structures
+- **Types**: `Graph`, `Path`, `Step`, `ArtifactChange`, and all supporting structures
 - **Builders**: Convenient constructors and builder methods for constructing documents
-- **Serde**: Full serialization/deserialization with `#[serde(untagged)]` document discrimination
+- **Serde**: Full serialization/deserialization
 - **Query**: Graph traversal and filtering operations on step DAGs
 
 This is the gravity well of the workspace. All other crates depend on `toolpath`; it depends on nothing except `serde` and `serde_json`.
@@ -24,9 +25,7 @@ This is the gravity well of the workspace. All other crates depend on `toolpath`
 ## Types
 
 ```text
-Document (enum: Graph | Path | Step)
-
-Graph
+Graph                           -- the root type of every Toolpath document
   graph: GraphIdentity { id }
   paths: Vec<PathOrRef>         -- inline Path or $ref
   meta?: GraphMeta
@@ -90,18 +89,31 @@ let index = query::step_index(&steps);
 
 ## Serialization
 
-Documents roundtrip through JSON:
+A Toolpath document is a JSON-serialized `Graph` at the root. Single-step or
+single-path provenance becomes a single-path graph:
 
 ```rust
-use toolpath::v1::Document;
+use toolpath::v1::{Graph, Path, Step};
 
-let json_str = r#"{"Step":{"step":{"id":"s1","actor":"human:alex","timestamp":"2026-01-29T10:00:00Z"},"change":{}}}"#;
-let doc = Document::from_json(json_str).unwrap();
-let json = doc.to_json_pretty().unwrap();
+let step = Step::new("s1", "human:alex", "2026-01-29T10:00:00Z")
+    .with_raw_change("src/main.rs", "@@ -1 +1 @@\n-old\n+new");
+let path = Path {
+    path: toolpath::v1::PathIdentity {
+        id: "p1".into(),
+        base: None,
+        head: "s1".into(),
+        graph_ref: None,
+    },
+    steps: vec![step],
+    meta: None,
+};
+let graph = Graph::from_path(path);
+let json = graph.to_json_pretty().unwrap();
 assert!(json.contains("s1"));
-```
 
-The `Document` enum uses `#[serde(untagged)]` and discriminates by structure: it tries Graph (has `graph` + `paths`), then Path (has `path` + `steps`), then Step (has `step` + `change`).
+let parsed = Graph::from_json(&json).unwrap();
+assert_eq!(parsed.single_path().unwrap().path.id, "p1");
+```
 
 ## Part of Toolpath
 

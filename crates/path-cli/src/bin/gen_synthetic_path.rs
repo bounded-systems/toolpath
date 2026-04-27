@@ -28,7 +28,7 @@ use clap::Parser;
 use rand::{Rng, SeedableRng, rngs::StdRng};
 use serde_json::{Value, json};
 use toolpath::v1::{
-    ActorDefinition, ArtifactChange, Base, Document, Path, PathIdentity, PathMeta, Step, StepMeta,
+    ActorDefinition, ArtifactChange, Base, Graph, Path, PathIdentity, PathMeta, Step, StepMeta,
     StructuralChange,
 };
 
@@ -311,7 +311,7 @@ fn main() -> Result<()> {
         }),
     };
 
-    let doc = Document::Path(path);
+    let doc = Graph::from_path(path);
     let json = doc.to_json()?;
     if let Some(parent) = args.out.parent() {
         fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;

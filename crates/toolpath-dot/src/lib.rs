@@ -2,7 +2,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use toolpath::v1::{Document, Graph, Path, PathOrRef, Step, query};
+use toolpath::v1::{Graph, Path, PathOrRef, Step, query};
 
 /// Options controlling what information is rendered in the DOT output.
 pub struct RenderOptions {
@@ -24,13 +24,17 @@ impl Default for RenderOptions {
     }
 }
 
-/// Render any Toolpath [`Document`] variant to a Graphviz DOT string.
-pub fn render(doc: &Document, options: &RenderOptions) -> String {
-    match doc {
-        Document::Graph(g) => render_graph(g, options),
-        Document::Path(p) => render_path(p, options),
-        Document::Step(s) => render_step(s, options),
+/// Render a Toolpath [`Graph`] to a Graphviz DOT string. The graph is the
+/// single root document type — single-path graphs render through the inline
+/// path-level layout for cleaner output, multi-path graphs use the cluster
+/// layout, and an empty graph renders an empty digraph.
+pub fn render(graph: &Graph, options: &RenderOptions) -> String {
+    if graph.paths.len() == 1
+        && let PathOrRef::Path(p) = &graph.paths[0]
+    {
+        return render_path(p, options);
     }
+    render_graph(graph, options)
 }
 
 /// Render a single [`Step`] as a DOT digraph.
@@ -830,16 +834,7 @@ mod tests {
     // ── render (dispatch) ──────────────────────────────────────────────
 
     #[test]
-    fn test_render_dispatches_step() {
-        let step = make_step("s1", "human:alex", &[]);
-        let doc = Document::Step(step);
-        let opts = RenderOptions::default();
-        let dot = render(&doc, &opts);
-        assert!(dot.contains("\"s1\""));
-    }
-
-    #[test]
-    fn test_render_dispatches_path() {
+    fn test_render_single_path_graph_uses_path_layout() {
         let path = Path {
             path: PathIdentity {
                 id: "p1".into(),
@@ -850,22 +845,58 @@ mod tests {
             steps: vec![make_step("s1", "human:alex", &[])],
             meta: None,
         };
-        let doc = Document::Path(path);
+        let graph = Graph::from_path(path);
         let opts = RenderOptions::default();
-        let dot = render(&doc, &opts);
+        let dot = render(&graph, &opts);
         assert!(dot.contains("cluster_legend"));
     }
 
     #[test]
-    fn test_render_dispatches_graph() {
+    fn test_render_multi_path_graph_uses_graph_layout() {
+        let s1 = make_step("s1", "human:alex", &[]);
+        let s3 = make_step("s3", "human:bob", &[]);
+        let path1 = Path {
+            path: PathIdentity {
+                id: "p1".into(),
+                base: None,
+                head: "s1".into(),
+                graph_ref: None,
+            },
+            steps: vec![s1],
+            meta: None,
+        };
+        let path2 = Path {
+            path: PathIdentity {
+                id: "p2".into(),
+                base: None,
+                head: "s3".into(),
+                graph_ref: None,
+            },
+            steps: vec![s3],
+            meta: None,
+        };
+        let graph = Graph {
+            graph: GraphIdentity { id: "g1".into() },
+            paths: vec![
+                PathOrRef::Path(Box::new(path1)),
+                PathOrRef::Path(Box::new(path2)),
+            ],
+            meta: None,
+        };
+        let opts = RenderOptions::default();
+        let dot = render(&graph, &opts);
+        assert!(dot.contains("compound=true"));
+    }
+
+    #[test]
+    fn test_render_empty_graph_uses_graph_layout() {
         let graph = Graph {
             graph: GraphIdentity { id: "g1".into() },
             paths: vec![],
             meta: None,
         };
-        let doc = Document::Graph(graph);
         let opts = RenderOptions::default();
-        let dot = render(&doc, &opts);
+        let dot = render(&graph, &opts);
         assert!(dot.contains("compound=true"));
     }
 }

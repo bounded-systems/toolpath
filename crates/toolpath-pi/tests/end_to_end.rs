@@ -123,9 +123,9 @@ fn test_derive_roundtrip_serde() {
     let session = manager.read_session(PROJECT_CWD, "demo-session-1").unwrap();
 
     let path = toolpath_pi::derive_path(&session, &DeriveConfig::default());
-    let doc = toolpath::v1::Document::Path(path);
+    let doc = toolpath::v1::Graph::from_path(path);
     let json = doc.to_json_pretty().unwrap();
-    let parsed = toolpath::v1::Document::from_json(&json).unwrap();
+    let parsed = toolpath::v1::Graph::from_json(&json).unwrap();
     // Compare as structured JSON values — HashMap-based `extra`/`actors` have
     // non-deterministic key order when re-serialized, so a string compare is flaky.
     let a: serde_json::Value = serde_json::from_str(&json).unwrap();

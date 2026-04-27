@@ -463,36 +463,5 @@
     }
   },
 
-  "oneOf": [
-    {
-      "type": "object",
-      "title": "Step document",
-      "description": "Externally tagged Step: {\"Step\": {…}}",
-      "properties": {
-        "Step": { "$ref": "#/$defs/step" }
-      },
-      "required": ["Step"],
-      "additionalProperties": false
-    },
-    {
-      "type": "object",
-      "title": "Path document",
-      "description": "Externally tagged Path: {\"Path\": {…}}",
-      "properties": {
-        "Path": { "$ref": "#/$defs/path" }
-      },
-      "required": ["Path"],
-      "additionalProperties": false
-    },
-    {
-      "type": "object",
-      "title": "Graph document",
-      "description": "Externally tagged Graph: {\"Graph\": {…}}",
-      "properties": {
-        "Graph": { "$ref": "#/$defs/graph" }
-      },
-      "required": ["Graph"],
-      "additionalProperties": false
-    }
-  ]
+  "$ref": "#/$defs/graph"
 }

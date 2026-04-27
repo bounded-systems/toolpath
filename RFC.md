@@ -87,21 +87,23 @@ Toolpath defines three object types at decreasing levels of granularity:
 Each level can exist standalone or be nested. Steps can stream independently,
 paths can represent complete PRs, and graphs can bundle related paths.
 
-### Document Envelope
+### Document Root
 
-A Toolpath document is **externally tagged**: the top-level JSON object has
-exactly one key — `"Step"`, `"Path"`, or `"Graph"` — whose value contains the
-document content.  This makes the document type unambiguous without inspecting
-the inner fields.
+Every Toolpath document is a **Graph** at the JSON root — there is no envelope
+or discriminator key. The single root type keeps both file shape and tooling
+uniform:
 
 ```json
-{ "Step":  { "step": {...}, "change": {...} } }
-{ "Path":  { "path": {...}, "steps": [...] } }
-{ "Graph": { "graph": {...}, "paths": [...] } }
+{ "graph": {...}, "paths": [...] }
 ```
 
-PascalCase variant names visually distinguish the type tag from the lowercase
-structural fields inside (`step`, `path`, `graph`).
+A single PR or coding session is a Graph that holds one inline path in
+`paths`; a multi-PR release or a bundle of related agent sessions is a Graph
+that holds several. Each `paths[*]` entry is either an inline `Path` object or
+a `$ref` to an external path document.
+
+`Step` and `Path` are **inner** types — they appear inside `Graph.paths` and
+`Path.steps`. They are not valid document roots.
 
 ### File Extensions
 
@@ -110,12 +112,12 @@ serialization format:
 
 | Extension | Document type | Description |
 | --------- | ------------- | ----------- |
-| `.path.json` | Path (canonical) | A complete `{"Path": {...}}` JSON document. |
-| `.path.jsonl` | Path (streaming) | A line-oriented JSONL stream that seals to a `Path`. See the [JSONL Streaming RFC](docs/RFC-jsonl.md). |
+| `.path.json` | Graph (canonical) | A serialized `Graph` JSON document. |
+| `.path.jsonl` | Graph (streaming) | A line-oriented JSONL stream that seals to a single-path `Graph`. See the [JSONL Streaming RFC](docs/RFC-jsonl.md). |
 
-`Step` and `Graph` documents use plain `.json` files with the appropriate
-`{"Step": ...}` or `{"Graph": ...}` envelope. Only `Path` has a streaming
-peer format.
+The `.path.jsonl` form encodes exactly one inline `Path` and is wrapped as a
+single-path `Graph` at the file boundary. Multi-path graphs and `$ref`-only
+entries cannot be represented in JSONL — those require canonical `.path.json`.
 
 Graph `$ref` entries MUST point to sealed `.path.json` files, not to
 `.path.jsonl` streams.
@@ -397,39 +399,39 @@ indicates which step is the current tip.
 
 ### Step Object
 
+A `Step` is an inner type that lives inside `Path.steps`. The JSON shape:
+
 ```json
 {
-  "Step": {
-    "step": {
-      "id": "step-003",
-      "parents": ["step-002"],
-      "actor": "agent:claude-code",
-      "timestamp": "2026-01-29T15:30:00Z"
-    },
+  "step": {
+    "id": "step-003",
+    "parents": ["step-002"],
+    "actor": "agent:claude-code",
+    "timestamp": "2026-01-29T15:30:00Z"
+  },
 
-    "change": {
-      "src/auth/validator.rs": {
-        "raw": "@@ -1,5 +1,25 @@\n use std::error::Error;\n+...",
-        "structural": {
-          "type": "rust.add_items",
-          "items": [
-            {"kind": "struct", "name": "ValidationError"},
-            {"kind": "fn", "name": "validate_email"}
-          ]
-        }
-      },
-      "src/auth/mod.rs": {
-        "raw": "@@ -1,1 +1,2 @@\n+pub mod validator;"
+  "change": {
+    "src/auth/validator.rs": {
+      "raw": "@@ -1,5 +1,25 @@\n use std::error::Error;\n+...",
+      "structural": {
+        "type": "rust.add_items",
+        "items": [
+          {"kind": "struct", "name": "ValidationError"},
+          {"kind": "fn", "name": "validate_email"}
+        ]
       }
     },
-
-    "meta": {
-      "intent": "Add email validation to prevent malformed input",
-      "refs": [
-        {"rel": "fixes", "href": "issue://github/repo/issues/42"},
-        {"rel": "implements", "href": "doc://design/input-validation.md"}
-      ]
+    "src/auth/mod.rs": {
+      "raw": "@@ -1,1 +1,2 @@\n+pub mod validator;"
     }
+  },
+
+  "meta": {
+    "intent": "Add email validation to prevent malformed input",
+    "refs": [
+      {"rel": "fixes", "href": "issue://github/repo/issues/42"},
+      {"rel": "implements", "href": "doc://design/input-validation.md"}
+    ]
   }
 }
 ```
@@ -440,17 +442,15 @@ A step can be minimal:
 
 ```json
 {
-  "Step": {
-    "step": {
-      "id": "step-001",
-      "actor": "human:alex",
-      "timestamp": "2026-01-29T10:00:00Z"
-    },
+  "step": {
+    "id": "step-001",
+    "actor": "human:alex",
+    "timestamp": "2026-01-29T10:00:00Z"
+  },
 
-    "change": {
-      "src/main.rs": {
-        "raw": "@@ -12,1 +12,1 @@\n-    println!(\"Hello world\");\n+    println!(\"Hello, world!\");"
-      }
+  "change": {
+    "src/main.rs": {
+      "raw": "@@ -12,1 +12,1 @@\n-    println!(\"Hello world\");\n+    println!(\"Hello, world!\");"
     }
   }
 }
@@ -464,103 +464,99 @@ A step with full actor and signature metadata:
 
 ```json
 {
-  "Step": {
-    "step": {
-      "id": "step-001",
-      "actor": "human:alex",
-      "timestamp": "2026-01-29T10:00:00Z"
-    },
+  "step": {
+    "id": "step-001",
+    "actor": "human:alex",
+    "timestamp": "2026-01-29T10:00:00Z"
+  },
 
-    "change": {
-      "src/main.rs": {
-        "raw": "@@ -12,1 +12,1 @@\n-    println!(\"Hello world\");\n+    println!(\"Hello, world!\");"
+  "change": {
+    "src/main.rs": {
+      "raw": "@@ -12,1 +12,1 @@\n-    println!(\"Hello world\");\n+    println!(\"Hello, world!\");"
+    }
+  },
+
+  "meta": {
+    "intent": "Fix greeting punctuation",
+    "actors": {
+      "human:alex": {
+        "name": "Alex Kesling",
+        "identities": [{"system": "github", "id": "akesling"}],
+        "keys": [{"type": "gpg", "fingerprint": "ABCD1234..."}]
       }
     },
-
-    "meta": {
-      "intent": "Fix greeting punctuation",
-      "actors": {
-        "human:alex": {
-          "name": "Alex Kesling",
-          "identities": [{"system": "github", "id": "akesling"}],
-          "keys": [{"type": "gpg", "fingerprint": "ABCD1234..."}]
-        }
-      },
-      "signatures": [
-        {
-          "signer": "human:alex",
-          "key": "gpg:ABCD1234",
-          "scope": "author",
-          "sig": "-----BEGIN PGP SIGNATURE-----\n..."
-        }
-      ]
-    }
+    "signatures": [
+      {
+        "signer": "human:alex",
+        "key": "gpg:ABCD1234",
+        "scope": "author",
+        "sig": "-----BEGIN PGP SIGNATURE-----\n..."
+      }
+    ]
   }
 }
 ```
 
 ### Path Object
 
-A path collects steps and provides context:
+A path collects steps and provides context. Paths live inside `Graph.paths`:
 
 ```json
 {
-  "Path": {
-    "path": {
-      "id": "path-pr-42",
-      "base": {
-        "uri": "github:myorg/myrepo",
-        "ref": "abc123def456"
-      },
-      "head": "step-004"
+  "path": {
+    "id": "path-pr-42",
+    "base": {
+      "uri": "github:myorg/myrepo",
+      "ref": "abc123def456"
     },
+    "head": "step-004"
+  },
 
-    "steps": [
-      {
-        "step": { "id": "step-001", "actor": "agent:claude-code", "timestamp": "..." },
-        "change": { "src/validator.rs": { "raw": "..." } },
-        "meta": { "intent": "Add validation struct" }
-      },
-      {
-        "step": { "id": "step-002", "parents": ["step-001"], "actor": "tool:rustfmt", "timestamp": "..." },
-        "change": { "src/validator.rs": { "raw": "..." } },
-        "meta": { "intent": "Auto-format" }
-      },
-      {
-        "step": { "id": "step-001a", "parents": ["step-001"], "actor": "agent:claude-code", "timestamp": "..." },
-        "change": { "src/validator.rs": { "raw": "..." } },
-        "meta": { "intent": "Regex approach (abandoned)" }
-      },
-      {
-        "step": { "id": "step-003", "parents": ["step-002"], "actor": "human:alex", "timestamp": "..." },
-        "change": { "src/validator.rs": { "raw": "..." } },
-        "meta": { "intent": "Refine error messages" }
-      }
-    ],
-
-    "meta": {
-      "title": "Add email validation",
-      "source": "github:myorg/myrepo/pull/42",
-      "actors": {
-        "human:alex": {
-          "name": "Alex Kesling",
-          "identities": [{"system": "github", "id": "akesling"}],
-          "keys": [{"type": "gpg", "fingerprint": "ABCD1234..."}]
-        },
-        "agent:claude-code": {
-          "name": "Claude Code",
-          "provider": "anthropic"
-        },
-        "tool:rustfmt": {
-          "name": "rustfmt",
-          "identities": [{"system": "crates.io", "id": "rustfmt-nightly/1.7.0"}]
-        }
-      },
-      "signatures": [
-        {"signer": "human:alex", "key": "gpg:ABCD1234", "scope": "author", "sig": "..."},
-        {"signer": "human:bob", "key": "gpg:EFGH5678", "scope": "reviewer", "sig": "..."}
-      ]
+  "steps": [
+    {
+      "step": { "id": "step-001", "actor": "agent:claude-code", "timestamp": "..." },
+      "change": { "src/validator.rs": { "raw": "..." } },
+      "meta": { "intent": "Add validation struct" }
+    },
+    {
+      "step": { "id": "step-002", "parents": ["step-001"], "actor": "tool:rustfmt", "timestamp": "..." },
+      "change": { "src/validator.rs": { "raw": "..." } },
+      "meta": { "intent": "Auto-format" }
+    },
+    {
+      "step": { "id": "step-001a", "parents": ["step-001"], "actor": "agent:claude-code", "timestamp": "..." },
+      "change": { "src/validator.rs": { "raw": "..." } },
+      "meta": { "intent": "Regex approach (abandoned)" }
+    },
+    {
+      "step": { "id": "step-003", "parents": ["step-002"], "actor": "human:alex", "timestamp": "..." },
+      "change": { "src/validator.rs": { "raw": "..." } },
+      "meta": { "intent": "Refine error messages" }
     }
+  ],
+
+  "meta": {
+    "title": "Add email validation",
+    "source": "github:myorg/myrepo/pull/42",
+    "actors": {
+      "human:alex": {
+        "name": "Alex Kesling",
+        "identities": [{"system": "github", "id": "akesling"}],
+        "keys": [{"type": "gpg", "fingerprint": "ABCD1234..."}]
+      },
+      "agent:claude-code": {
+        "name": "Claude Code",
+        "provider": "anthropic"
+      },
+      "tool:rustfmt": {
+        "name": "rustfmt",
+        "identities": [{"system": "crates.io", "id": "rustfmt-nightly/1.7.0"}]
+      }
+    },
+    "signatures": [
+      {"signer": "human:alex", "key": "gpg:ABCD1234", "scope": "author", "sig": "..."},
+      {"signer": "human:bob", "key": "gpg:EFGH5678", "scope": "reviewer", "sig": "..."}
+    ]
   }
 }
 ```
@@ -632,40 +628,38 @@ occur between VCS commits.
 
 ### Graph Object
 
-A graph collects related paths:
+A graph collects related paths and is the root document type:
 
 ```json
 {
-  "Graph": {
-    "graph": {
-      "id": "graph-release-v2"
+  "graph": {
+    "id": "graph-release-v2"
+  },
+
+  "paths": [
+    {
+      "path": { "id": "path-pr-42", "base": {...}, "head": "step-004" },
+      "steps": [...],
+      "meta": { "title": "Add email validation" }
     },
+    {
+      "path": { "id": "path-pr-43", "base": {...}, "head": "step-003" },
+      "steps": [...],
+      "meta": { "title": "Fix authentication bug" }
+    },
+    { "$ref": "https://archive.example.com/toolpath/path-pr-44.json" },
+    { "$ref": "toolpath://internal/path-pr-45" }
+  ],
 
-    "paths": [
-      {
-        "path": { "id": "path-pr-42", "base": {...}, "head": "step-004" },
-        "steps": [...],
-        "meta": { "title": "Add email validation" }
-      },
-      {
-        "path": { "id": "path-pr-43", "base": {...}, "head": "step-003" },
-        "steps": [...],
-        "meta": { "title": "Fix authentication bug" }
-      },
-      { "$ref": "https://archive.example.com/toolpath/path-pr-44.json" },
-      { "$ref": "toolpath://internal/path-pr-45" }
+  "meta": {
+    "title": "Release v2.0",
+    "refs": [
+      {"rel": "milestone", "href": "issue://github/myorg/myrepo/milestone/5"}
     ],
-
-    "meta": {
-      "title": "Release v2.0",
-      "refs": [
-        {"rel": "milestone", "href": "issue://github/myorg/myrepo/milestone/5"}
-      ],
-      "actors": {...},
-      "signatures": [
-        {"signer": "human:release-manager", "key": "gpg:...", "scope": "release", "sig": "..."}
-      ]
-    }
+    "actors": {...},
+    "signatures": [
+      {"signer": "human:release-manager", "key": "gpg:...", "scope": "release", "sig": "..."}
+    ]
   }
 }
 ```
@@ -701,8 +695,7 @@ To produce a signable byte sequence:
 
 #### Step Signature (Author)
 
-Signs the inner `step` + `change` fields (excluding both `meta` and the
-`"Step"` document wrapper):
+Signs the inner `step` + `change` fields (excluding `meta`):
 
 ```
 canonical_input = JCS({
@@ -751,27 +744,26 @@ This attests: "I reviewed this path at this head and approve it."
 
 ### Canonicalization Example
 
-Input document:
+Input step (as it appears inside `Path.steps`):
 
 ```json
 {
-  "Step": {
-    "step": {
-      "timestamp": "2026-01-29T10:00:00Z",
-      "id": "step-001",
-      "actor": "human:alex"
-    },
-    "change": {
-      "src/main.rs": {
-        "raw": "@@ -1,1 +1,1 @@\n-hello\n+world"
-      }
-    },
-    "meta": { "intent": "Fix greeting" }
-  }
+  "step": {
+    "timestamp": "2026-01-29T10:00:00Z",
+    "id": "step-001",
+    "actor": "human:alex"
+  },
+  "change": {
+    "src/main.rs": {
+      "raw": "@@ -1,1 +1,1 @@\n-hello\n+world"
+    }
+  },
+  "meta": { "intent": "Fix greeting" }
 }
 ```
 
-Signing operates on the **inner** step content (without the `"Step"` wrapper).
+Signing operates on the `step` + `change` pair (the `meta` block is excluded
+because it carries the signatures themselves).
 
 Canonical form (for signing):
 
@@ -814,22 +806,25 @@ verify_path_signatures(path_document, required_scopes):
 
 ### 1. Representing a PR
 
-A PR is a path rooted at the target branch:
+A PR is a single-path graph rooted at the target branch:
 
 ```json
 {
-  "Path": {
-    "path": {
-      "id": "pr-123",
-      "base": { "uri": "github:myorg/myrepo", "ref": "abc123" },
-      "head": "step-final"
-    },
-    "steps": [...],
-    "meta": {
-      "title": "Add email validation",
-      "source": "github:myorg/myrepo/pull/123"
+  "graph": { "id": "graph-pr-123" },
+  "paths": [
+    {
+      "path": {
+        "id": "pr-123",
+        "base": { "uri": "github:myorg/myrepo", "ref": "abc123" },
+        "head": "step-final"
+      },
+      "steps": [...],
+      "meta": {
+        "title": "Add email validation",
+        "source": "github:myorg/myrepo/pull/123"
+      }
     }
-  }
+  ]
 }
 ```
 
@@ -935,8 +930,7 @@ Toolpath doesn't replace your VCS—it layers richer provenance on top.
 A JSON Schema for validating Toolpath documents is available at
 [schema/toolpath.schema.json](./schema/toolpath.schema.json).
 
-The schema validates all three externally tagged document types (`Step`, `Path`,
-`Graph`) and enforces:
+The schema validates `Graph` documents (the single root type) and enforces:
 - Required fields and structure
 - Actor reference format (`type:name`)
 - Timestamp format (ISO 8601)

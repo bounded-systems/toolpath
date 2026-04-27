@@ -9,23 +9,25 @@ abandoned"), giving models anti-examples alongside the successful path.
 
 ## Overview
 
-Renders any Toolpath `Document` (Step, Path, or Graph) as a Markdown string.
-Steps are topologically sorted, dead ends are marked and summarized, and the
-output includes enough anchoring information (step IDs, artifact paths, actor
-strings) for an LLM to reference back into the original document.
+Renders a Toolpath `Graph` (the single root document type) as a Markdown
+string. Single-path graphs use the path-focused layout; multi-path graphs use
+the cross-path layout. Steps are topologically sorted, dead ends are marked
+and summarized, and the output includes enough anchoring information (step
+IDs, artifact paths, actor strings) for an LLM to reference back into the
+original document.
 
 Depends only on `toolpath` — no template engines, no external dependencies.
 
 ## Usage
 
 ```rust
-use toolpath::v1::Document;
+use toolpath::v1::Graph;
 use toolpath_md::{render, RenderOptions};
 
-let json_str = r#"{"Step":{"step":{"id":"s1","actor":"human:alex","timestamp":"T"},"change":{}}}"#;
-let doc = Document::from_json(json_str).unwrap();
-let md = render(&doc, &RenderOptions::default());
-assert!(md.contains("# s1"));
+let json_str = r#"{"graph":{"id":"g1"},"paths":[]}"#;
+let graph = Graph::from_json(json_str).unwrap();
+let md = render(&graph, &RenderOptions::default());
+assert!(md.contains("g1"));
 ```
 
 Pipe into an LLM for contextual assistance:
@@ -61,7 +63,7 @@ dead end count). Useful for LLM workflows that parse structured preambles.
 
 | Function | Description |
 |---|---|
-| `render(doc, options)` | Render any `Document` variant |
+| `render(graph, options)` | Render a `Graph` (single-path graphs use the path layout) |
 | `render_step(step, options)` | Render a single Step |
 | `render_path(path, options)` | Render a Path with its step DAG |
 | `render_graph(graph, options)` | Render a Graph with all paths |

@@ -222,17 +222,13 @@ fn derive_path_produces_file_artifacts_with_raw_diffs() {
 fn derive_path_validates_as_path_document() {
     let s = session();
     let path = derive::derive_path(&s, &derive::DeriveConfig::default());
-    let doc = toolpath::v1::Document::Path(path);
+    let doc = toolpath::v1::Graph::from_path(path);
     let json = doc.to_json().unwrap();
-    let parsed = toolpath::v1::Document::from_json(&json).unwrap();
-    match parsed {
-        toolpath::v1::Document::Path(p) => {
-            assert!(!p.steps.is_empty());
-            let anc = toolpath::v1::query::ancestors(&p.steps, &p.path.head);
-            assert_eq!(anc.len(), p.steps.len(), "all steps on head ancestry");
-        }
-        _ => panic!("expected Path document"),
-    }
+    let parsed = toolpath::v1::Graph::from_json(&json).unwrap();
+    let p = parsed.single_path().expect("single-path graph");
+    assert!(!p.steps.is_empty());
+    let anc = toolpath::v1::query::ancestors(&p.steps, &p.path.head);
+    assert_eq!(anc.len(), p.steps.len(), "all steps on head ancestry");
 }
 
 #[test]

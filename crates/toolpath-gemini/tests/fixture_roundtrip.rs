@@ -80,18 +80,14 @@ fn fixture_derives_to_valid_path() {
             include_thinking: false,
         },
     );
-    let doc = toolpath::v1::Document::Path(path);
+    let doc = toolpath::v1::Graph::from_path(path);
     let json = doc.to_json().unwrap();
     // Roundtrip verifies serde is well-formed
-    let parsed = toolpath::v1::Document::from_json(&json).unwrap();
-    match parsed {
-        toolpath::v1::Document::Path(p) => {
-            assert!(p.path.id.starts_with("path-gemini-"));
-            assert!(!p.steps.is_empty());
-            // Ancestors of head must cover all steps in a linear session
-            let ancestors = toolpath::v1::query::ancestors(&p.steps, &p.path.head);
-            assert_eq!(ancestors.len(), p.steps.len());
-        }
-        _ => panic!("expected Path document"),
-    }
+    let parsed = toolpath::v1::Graph::from_json(&json).unwrap();
+    let p = parsed.single_path().expect("single-path graph");
+    assert!(p.path.id.starts_with("path-gemini-"));
+    assert!(!p.steps.is_empty());
+    // Ancestors of head must cover all steps in a linear session
+    let ancestors = toolpath::v1::query::ancestors(&p.steps, &p.path.head);
+    assert_eq!(ancestors.len(), p.steps.len());
 }

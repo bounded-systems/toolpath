@@ -2,6 +2,65 @@
 
 All notable changes to the Toolpath workspace are documented here.
 
+## Format simplification — single-root Graph
+
+**Breaking.** `Graph` is now the only root document type. Every `.path.json`
+file deserializes to a `Graph`; every `.path.jsonl` file is a single-path
+`Graph` at the boundary. The previous three-variant `Document` enum
+(`{"Step": …}` / `{"Path": …}` / `{"Graph": …}` envelopes) is removed.
+
+What was a single Step or single Path at the root is now wrapped in a
+single-path Graph: `Graph { graph: { id }, paths: [Path { …, steps: [Step] }] }`.
+This unifies file shape — one schema, one parser path, no envelope to detect.
+
+### toolpath 0.3.0
+
+- **Remove `Document` enum.** The new root type is `Graph`. All `Graph::*`
+  helpers (`from_json`, `to_json`, `to_json_pretty`) plus `Graph::from_path`,
+  `Graph::single_path`, `Graph::into_single_path` cover the previous
+  `Document` surface and add ergonomic single-path lifts.
+- **JSONL.** `Graph::from_jsonl_*` / `Graph::to_jsonl_*` are the file-level
+  API. They wrap a single inline `Path` as a single-path `Graph`. The
+  underlying line-streaming machinery on `Path` is unchanged. New
+  `JsonlError::NotSinglePathGraph` flags multi-path graphs at write time.
+
+### toolpath-git 0.2.0
+
+- `derive` returns `Graph` (was `Document`). A single branch yields a
+  single-path graph; multiple branches yield a multi-path graph.
+
+### toolpath-dot 0.2.0
+
+- `render(&Graph, …)` replaces `render(&Document, …)`. Single-path graphs
+  render through the existing path-level layout; multi-path graphs use the
+  cluster layout. `render_step`, `render_path`, `render_graph` remain.
+
+### toolpath-md 0.3.0
+
+- `render(&Graph, …)` replaces `render(&Document, …)`. Same single-path /
+  multi-path dispatch.
+
+### toolpath-pi 0.3.0
+
+- `derive_project` returns `Graph` (was `Document::Graph(...)`).
+
+### path-cli 0.6.0
+
+- All commands (`validate`, `render`, `query`, `merge`, `import`, `export`,
+  `track`, `cache`) read and write `Graph` documents at file boundaries.
+- `export claude` / `export gemini` reject multi-path graphs with a clear
+  error — projection requires exactly one inline path.
+- `examples/` rewritten as graph-rooted JSON. `step-NN.json` examples are
+  now single-path single-step graphs; `path-NN.path.json` are single-path
+  graphs; `graph-01-release.json` drops its envelope.
+- Schema (`schema/toolpath.schema.json`) collapses the root `oneOf` of
+  three envelopes into a direct `$ref` to the `graph` definition.
+
+### toolpath-cli 0.6.0 (deprecation shim)
+
+- Bumped in lockstep with `path-cli` 0.6.0 (its only dependency). No
+  behavioral change.
+
 ## path-cli 0.5.0 + toolpath-cli 0.5.1 + workspace re-alignment
 
 ### path-cli 0.5.0 (new crate name)

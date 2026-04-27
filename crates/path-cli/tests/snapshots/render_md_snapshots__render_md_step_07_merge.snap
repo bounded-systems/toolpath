@@ -2,14 +2,18 @@
 source: crates/path-cli/tests/render_md_snapshots.rs
 expression: "render_md(\"step-07-merge.json\")"
 ---
-# step-004
+# path-step-004
 
-**Actor:** `human:alex`
+**Head:** `step-004`
+**Steps:** 1 | **Artifacts:** 1 | **Dead ends:** 0
+
+## Timeline
+
+### step-004 — human:alex [head]
+
 **Timestamp:** 2026-01-29T12:00:00Z
 **Parents:** `step-002a`, `step-003b`
 
 > Merge validation improvements from feature-A with logging from feature-B
-
-## Changes
 
 - `src/auth/validator.rs`
