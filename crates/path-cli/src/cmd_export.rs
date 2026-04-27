@@ -6,6 +6,8 @@
 //! - `export gemini` projects a Path document into Gemini CLI's chat-file
 //!   layout under `~/.gemini/tmp/<slot>/chats/`, ready for
 //!   `gemini --resume <uuid>`.
+//! - `export pi` projects a Path document into Pi's JSONL session
+//!   format under `~/.pi/agent/sessions/--<encoded-cwd>--/<id>.jsonl`.
 //! - `export pathbase` uploads the document to a Pathbase server.
 
 use anyhow::{Context, Result};
@@ -48,6 +50,23 @@ pub enum ExportTarget {
         /// Output the main chat file to this path. Sub-agents (if any)
         /// land in a sibling `<session-uuid>/` directory next to it.
         /// Mutually exclusive with --project.
+        #[arg(short, long, conflicts_with = "project")]
+        output: Option<PathBuf>,
+    },
+    /// Project a toolpath document into a Pi (pi.dev) session
+    Pi {
+        /// Input: cache id (e.g. `claude-abc`) or path to a toolpath JSON file
+        #[arg(short, long)]
+        input: String,
+
+        /// Target project directory. With this flag, writes the JSONL
+        /// into `~/.pi/agent/sessions/--<encoded-cwd>--/<session>.jsonl`
+        /// under the encoding scheme Pi uses for project directories.
+        /// Defaults to cwd when neither --project nor --output is given.
+        #[arg(short, long)]
+        project: Option<PathBuf>,
+
+        /// Output JSONL to this file. Mutually exclusive with --project.
         #[arg(short, long, conflicts_with = "project")]
         output: Option<PathBuf>,
     },
@@ -121,6 +140,11 @@ pub fn run(target: ExportTarget) -> Result<()> {
             project,
             output,
         } => run_gemini(input, project, output),
+        ExportTarget::Pi {
+            input,
+            project,
+            output,
+        } => run_pi(input, project, output),
         ExportTarget::Pathbase {
             input,
             url,
@@ -473,6 +497,143 @@ fn gemini_main_stem(convo: &toolpath_gemini::types::Conversation) -> String {
         Some(t) => format!("session-{}-{}", t.format("%Y-%m-%dT%H-%M"), short),
         None => format!("session-{}", convo.session_uuid),
     }
+}
+
+// ── Pi ────────────────────────────────────────────────────────────────
+
+fn run_pi(input: String, project: Option<PathBuf>, output: Option<PathBuf>) -> Result<()> {
+    #[cfg(target_os = "emscripten")]
+    {
+        let _ = (input, project, output);
+        anyhow::bail!("'path export pi' requires a native environment");
+    }
+
+    #[cfg(not(target_os = "emscripten"))]
+    {
+        // Resolve cwd up front; with --output it only feeds the
+        // SessionHeader.cwd (so a downstream Pi reading the file from
+        // a different directory still sees the originating cwd).
+        let project_dir = match project.as_ref() {
+            Some(p) => std::fs::canonicalize(p)
+                .with_context(|| format!("resolve project path {}", p.display()))?,
+            None => std::env::current_dir()?,
+        };
+        let cwd_str = project_dir.to_string_lossy().to_string();
+
+        let session = build_pi_session(&input, &cwd_str)?;
+
+        match (project, output) {
+            (Some(_), None) => write_into_pi_project(&session, &cwd_str)?,
+            (None, Some(out_path)) => write_pi_to_output_path(&session, &out_path)?,
+            (None, None) => write_pi_to_stdout(&session)?,
+            (Some(_), Some(_)) => unreachable!("clap enforces conflicts_with"),
+        }
+        Ok(())
+    }
+}
+
+#[cfg(not(target_os = "emscripten"))]
+fn build_pi_session(input: &str, cwd: &str) -> Result<toolpath_pi::PiSession> {
+    use toolpath_convo::ConversationProjector;
+
+    let path = load_path_doc(input)?;
+    let view = toolpath_convo::extract_conversation(&path);
+
+    let projector = toolpath_pi::project::PiProjector::new().with_cwd(cwd.to_string());
+    let session = projector
+        .project(&view)
+        .map_err(|e| anyhow::anyhow!("Projection failed: {}", e))?;
+
+    if session.header.id.is_empty() {
+        anyhow::bail!("Projected session has no id — cannot place it on disk");
+    }
+    Ok(session)
+}
+
+/// `--project` mode: write the resume-ready layout under
+/// `~/.pi/agent/sessions/--<encoded-cwd>--/<session>.jsonl`.
+#[cfg(not(target_os = "emscripten"))]
+fn write_into_pi_project(session: &toolpath_pi::PiSession, cwd: &str) -> Result<()> {
+    let resolver = toolpath_pi::PathResolver::new();
+    let project_dir = resolver.project_dir(cwd);
+    std::fs::create_dir_all(&project_dir)
+        .with_context(|| format!("create {}", project_dir.display()))?;
+
+    let stem = pi_session_stem(session);
+    let out_path = project_dir.join(format!("{}.jsonl", stem));
+    let bytes = serialize_pi_jsonl(session)?;
+    std::fs::write(&out_path, &bytes).with_context(|| format!("write {}", out_path.display()))?;
+
+    let entry_count = session.entries.len().saturating_sub(1); // minus header
+    eprintln!(
+        "Exported Pi session {} ({} entries) → {}",
+        session.header.id,
+        entry_count,
+        out_path.display()
+    );
+    eprintln!();
+    eprintln!("Loadable via:");
+    eprintln!(
+        "  path import pi --session {} --project {}",
+        session.header.id, cwd
+    );
+    Ok(())
+}
+
+/// `--output` mode: write JSONL to the caller-specified path.
+#[cfg(not(target_os = "emscripten"))]
+fn write_pi_to_output_path(
+    session: &toolpath_pi::PiSession,
+    out_path: &std::path::Path,
+) -> Result<()> {
+    if let Some(parent) = out_path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
+    }
+    let bytes = serialize_pi_jsonl(session)?;
+    std::fs::write(out_path, &bytes).with_context(|| format!("write {}", out_path.display()))?;
+    eprintln!("Wrote {} bytes to {}", bytes.len(), out_path.display());
+    Ok(())
+}
+
+/// Stdout mode.
+#[cfg(not(target_os = "emscripten"))]
+fn write_pi_to_stdout(session: &toolpath_pi::PiSession) -> Result<()> {
+    let bytes = serialize_pi_jsonl(session)?;
+    print!("{}", bytes);
+    Ok(())
+}
+
+/// Stem for a Pi session JSONL filename. Pi's own files use
+/// `<date>_<uuid>.jsonl`; for projected sessions the session id is
+/// already unique enough, so we use it directly with a safe-character
+/// fallback for unusual UUIDs.
+#[cfg(not(target_os = "emscripten"))]
+fn pi_session_stem(session: &toolpath_pi::PiSession) -> String {
+    // Strip any dashes-replaced-as-underscores oddities; for plain
+    // UUIDs / short ids, the value is already filename-safe.
+    session
+        .header
+        .id
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+        .collect()
+}
+
+/// Serialize a `PiSession` to its JSONL on-disk shape: header line
+/// followed by one entry per line. Returns the joined string with a
+/// trailing newline (Pi's reader is happy with or without it; we add
+/// one to match the convention real Pi sessions use).
+#[cfg(not(target_os = "emscripten"))]
+fn serialize_pi_jsonl(session: &toolpath_pi::PiSession) -> Result<String> {
+    let mut lines: Vec<String> = Vec::with_capacity(session.entries.len());
+    for entry in &session.entries {
+        lines.push(serde_json::to_string(entry)?);
+    }
+    let mut out = lines.join("\n");
+    out.push('\n');
+    Ok(out)
 }
 
 // ── Pathbase ──────────────────────────────────────────────────────────
@@ -1104,6 +1265,205 @@ mod tests {
             parsed.is_err(),
             "clap must reject simultaneous --project and --output"
         );
+    }
+
+    fn pi_writes_resume_ready_layout() {
+        // Build a Path doc with a single user turn, run `path export
+        // pi --project DIR`, and confirm the JSONL lands at the
+        // expected `~/.pi/agent/sessions/--<encoded>--/<id>.jsonl`
+        // location and re-parses through Pi's own reader.
+        use toolpath_pi::{PathResolver, PiConvo};
+
+        let temp = tempfile::tempdir().unwrap();
+        let fake_home = temp.path().join("home");
+        std::fs::create_dir_all(&fake_home).unwrap();
+        let project_dir = temp.path().join("myproj");
+        std::fs::create_dir_all(&project_dir).unwrap();
+
+        let session_uuid = "pi-session-test-1";
+        let artifact = format!("pi://{}", session_uuid);
+        let mut extra = HashMap::new();
+        extra.insert("role".into(), serde_json::json!("user"));
+        extra.insert("text".into(), serde_json::json!("Hello pi"));
+        let step = Step {
+            step: StepIdentity {
+                id: "step-001".into(),
+                parents: vec![],
+                actor: "human:alex".into(),
+                timestamp: "2026-04-17T15:00:00Z".into(),
+            },
+            change: {
+                let mut m = HashMap::new();
+                m.insert(
+                    artifact,
+                    ArtifactChange {
+                        raw: None,
+                        structural: Some(StructuralChange {
+                            change_type: "conversation.append".into(),
+                            extra,
+                        }),
+                    },
+                );
+                m
+            },
+            meta: None,
+        };
+        let graph = toolpath::v1::Graph::from_path(toolpath::v1::Path {
+            path: PathIdentity {
+                id: "test-path".into(),
+                base: None,
+                head: "step-001".into(),
+                graph_ref: None,
+            },
+            steps: vec![step],
+            meta: None,
+        });
+        let input_path = temp.path().join("doc.json");
+        std::fs::write(&input_path, graph.to_json().unwrap()).unwrap();
+
+        let _g = crate::config::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let prior_home = std::env::var_os("HOME");
+        unsafe {
+            std::env::set_var("HOME", &fake_home);
+        }
+        let result = run_pi(
+            input_path.to_string_lossy().to_string(),
+            Some(project_dir.clone()),
+            None,
+        );
+        unsafe {
+            match prior_home {
+                Some(v) => std::env::set_var("HOME", v),
+                None => std::env::remove_var("HOME"),
+            }
+        }
+        result.expect("export pi");
+
+        let canon_project = std::fs::canonicalize(&project_dir).unwrap();
+        let resolver = PathResolver::new().with_home(&fake_home);
+        let project_dir_path = resolver.project_dir(canon_project.to_str().unwrap());
+        let expected = project_dir_path.join(format!("{}.jsonl", session_uuid));
+        assert!(expected.exists(), "expected JSONL at {:?}", expected);
+
+        let convo = PiConvo::with_resolver(resolver);
+        let session = convo
+            .read_session(canon_project.to_str().unwrap(), session_uuid)
+            .expect("Pi reader accepts our output");
+        assert_eq!(session.header.id, session_uuid);
+        assert_eq!(session.header.cwd, canon_project.to_string_lossy());
+
+        let user_texts: Vec<String> = session
+            .entries
+            .iter()
+            .filter_map(|e| match e {
+                toolpath_pi::Entry::Message {
+                    message: toolpath_pi::AgentMessage::User { content, .. },
+                    ..
+                } => match content {
+                    toolpath_pi::types::MessageContent::Text(s) => Some(s.clone()),
+                    toolpath_pi::types::MessageContent::Blocks(blocks) => Some(
+                        blocks
+                            .iter()
+                            .filter_map(|b| match b {
+                                toolpath_pi::ContentBlock::Text { text, .. } => Some(text.clone()),
+                                _ => None,
+                            })
+                            .collect::<Vec<_>>()
+                            .join("\n"),
+                    ),
+                },
+                _ => None,
+            })
+            .collect();
+        assert_eq!(user_texts, vec!["Hello pi".to_string()]);
+    }
+
+    #[test]
+    fn pi_rejects_non_single_path_graph() {
+        let temp = tempfile::tempdir().unwrap();
+        let input_path = temp.path().join("input.json");
+        let empty_graph = serde_json::json!({
+            "graph": { "id": "g1" },
+            "paths": [],
+        });
+        std::fs::write(&input_path, empty_graph.to_string()).unwrap();
+
+        let project = temp.path().join("proj");
+        std::fs::create_dir_all(&project).unwrap();
+        let err = run_pi(
+            input_path.to_string_lossy().to_string(),
+            Some(project),
+            None,
+        )
+        .expect_err("should reject empty graph");
+        assert!(err.to_string().contains("single-path"));
+    }
+
+    #[test]
+    fn pi_output_to_file_writes_jsonl() {
+        let temp = tempfile::tempdir().unwrap();
+        let out_path = temp.path().join("out").join("pi.jsonl");
+
+        let session_uuid = "pi-out-test";
+        let artifact = format!("pi://{}", session_uuid);
+        let mut extra = HashMap::new();
+        extra.insert("role".into(), serde_json::json!("user"));
+        extra.insert("text".into(), serde_json::json!("hi"));
+        let step = Step {
+            step: StepIdentity {
+                id: "step-001".into(),
+                parents: vec![],
+                actor: "human:alex".into(),
+                timestamp: "2026-04-17T15:00:00Z".into(),
+            },
+            change: {
+                let mut m = HashMap::new();
+                m.insert(
+                    artifact,
+                    ArtifactChange {
+                        raw: None,
+                        structural: Some(StructuralChange {
+                            change_type: "conversation.append".into(),
+                            extra,
+                        }),
+                    },
+                );
+                m
+            },
+            meta: None,
+        };
+        let graph = toolpath::v1::Graph::from_path(toolpath::v1::Path {
+            path: PathIdentity {
+                id: "test-path".into(),
+                base: None,
+                head: "step-001".into(),
+                graph_ref: None,
+            },
+            steps: vec![step],
+            meta: None,
+        });
+        let input_path = temp.path().join("doc.json");
+        std::fs::write(&input_path, graph.to_json().unwrap()).unwrap();
+
+        run_pi(
+            input_path.to_string_lossy().to_string(),
+            None,
+            Some(out_path.clone()),
+        )
+        .expect("export pi --output");
+
+        assert!(out_path.exists(), "output file missing");
+        let body = std::fs::read_to_string(&out_path).unwrap();
+        let lines: Vec<&str> = body.lines().collect();
+        assert!(lines.len() >= 2);
+        assert!(lines[0].contains("\"type\":\"session\""));
+        assert!(lines[1].contains("\"role\":\"user\""));
+
+        let session = toolpath_pi::reader::read_session_from_file(&out_path)
+            .expect("Pi reader accepts the JSONL");
+        assert_eq!(session.header.id, session_uuid);
     }
 
     #[test]
