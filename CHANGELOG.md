@@ -2,6 +2,21 @@
 
 All notable changes to the Toolpath workspace are documented here.
 
+## toolpath-claude 0.8.0 + toolpath-gemini 0.2.0 + toolpath-pi 0.2.0
+
+### toolpath-claude 0.8.0
+
+- Add `ConversationMetadata.first_user_message: Option<String>` — the first non-empty user-prompt text in the conversation. Populated cheaply during the metadata pass so picker UIs can surface what the conversation was *about* without a full read. Chain-aware: aggregated from the oldest segment.
+- Fix `sanitize_project_path` to also map `.` → `-`, matching Claude Code's actual encoding. Without this, projects under dotted directories (`github.com/…`, `.claude/worktrees/…`) couldn't be looked up by their original path.
+
+### toolpath-gemini 0.2.0
+
+- Add `ConversationMetadata.first_user_message: Option<String>` — the first non-empty user-prompt text in the main chat. Populated for both main-session-file and orphan-UUID-directory cases.
+
+### toolpath-pi 0.2.0
+
+- Add `SessionMeta.first_user_message: Option<String>` — extracted during `list_sessions` by walking the JSONL until a user-role message with text content is found.
+
 ## 0.2.0 — toolpath + 0.4.0 — toolpath-cli
 
 ### toolpath 0.2.0

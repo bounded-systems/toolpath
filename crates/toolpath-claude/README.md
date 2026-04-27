@@ -66,6 +66,18 @@ println!("{} entries", convo.entries.len());
 // Most recent conversation
 let latest = manager.most_recent_conversation("/Users/alex/project")?;
 
+// Lightweight metadata — useful as a "session picker" surface. The
+// `first_user_message` field is the first non-empty user-prompt text,
+// extracted during the metadata pass with no extra I/O.
+for meta in manager.list_conversation_metadata("/Users/alex/project")? {
+    println!(
+        "{} ({}msgs): {}",
+        meta.session_id,
+        meta.message_count,
+        meta.first_user_message.as_deref().unwrap_or("(no prompt)"),
+    );
+}
+
 // Search
 let matches = manager.find_conversations_with_text("/Users/alex/project", "authentication")?;
 # Ok::<(), Box<dyn std::error::Error>>(())

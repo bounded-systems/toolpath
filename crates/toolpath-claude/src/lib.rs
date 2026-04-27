@@ -184,6 +184,7 @@ impl ClaudeConvo {
         let mut last_activity = None;
         let mut project_path_val = String::new();
         let mut file_path = std::path::PathBuf::new();
+        let mut first_user_message: Option<String> = None;
 
         for (i, segment_id) in chain.iter().enumerate() {
             let meta = self
@@ -203,6 +204,10 @@ impl ClaudeConvo {
             if i == 0 {
                 file_path = meta.file_path;
             }
+            // Chain is oldest-first; keep the first non-empty user prompt.
+            if first_user_message.is_none() && meta.first_user_message.is_some() {
+                first_user_message = meta.first_user_message;
+            }
         }
 
         Ok(ConversationMetadata {
@@ -212,6 +217,7 @@ impl ClaudeConvo {
             message_count: total_messages,
             started_at,
             last_activity,
+            first_user_message,
         })
     }
 

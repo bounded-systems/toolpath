@@ -25,3 +25,23 @@ let session = manager
     .expect("no Pi sessions");
 let view = manager.to_view(&session);
 ```
+
+## Listing sessions
+
+`list_sessions` returns lightweight `SessionMeta` summaries — id, timestamp,
+file path, entry count, and `first_user_message` (the first non-empty
+user-prompt text). The last field is what makes the listing useful for
+"pick a session by topic" surfaces like an `fzf` picker.
+
+```rust,no_run
+use toolpath_pi::PiConvo;
+
+let manager = PiConvo::new();
+for meta in manager.list_sessions("/Users/alex/project").unwrap() {
+    println!(
+        "{}: {}",
+        meta.id,
+        meta.first_user_message.as_deref().unwrap_or("(no prompt)"),
+    );
+}
+```

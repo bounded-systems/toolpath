@@ -6,6 +6,8 @@
 //! composition with `render | query | validate`.
 
 #[cfg(not(target_os = "emscripten"))]
+use crate::fzf;
+#[cfg(not(target_os = "emscripten"))]
 use anyhow::Context;
 use anyhow::Result;
 use clap::Subcommand;
@@ -62,11 +64,11 @@ pub enum ImportSource {
     },
     /// Import from Claude conversation logs
     Claude {
-        /// Project path (e.g., /Users/alex/myproject)
+        /// Project path (omit to interactively pick across all projects)
         #[arg(short, long)]
-        project: String,
+        project: Option<String>,
 
-        /// Specific session ID
+        /// Specific session ID (omit to interactively pick)
         #[arg(short, long)]
         session: Option<String>,
 
@@ -76,11 +78,11 @@ pub enum ImportSource {
     },
     /// Import from Gemini CLI conversation logs
     Gemini {
-        /// Project path (e.g., /Users/alex/myproject)
+        /// Project path (omit to interactively pick across all projects)
         #[arg(short, long)]
-        project: String,
+        project: Option<String>,
 
-        /// Specific session UUID (the directory name under chats/)
+        /// Specific session UUID (omit to interactively pick)
         #[arg(short, long)]
         session: Option<String>,
 
@@ -122,11 +124,11 @@ pub enum ImportSource {
     },
     /// Import from Pi (pi.dev) coding-agent session logs
     Pi {
-        /// Project path (cwd the session ran in)
+        /// Project path (omit to interactively pick across all projects)
         #[arg(short, long)]
-        project: String,
+        project: Option<String>,
 
-        /// Specific session ID (default: most recent)
+        /// Specific session ID (default: most recent or interactive pick)
         #[arg(short, long)]
         session: Option<String>,
 
@@ -360,40 +362,97 @@ fn derive_github(
     }
 }
 
-fn derive_claude(project: String, session: Option<String>, all: bool) -> Result<Vec<DerivedDoc>> {
+fn derive_claude(
+    project: Option<String>,
+    session: Option<String>,
+    all: bool,
+) -> Result<Vec<DerivedDoc>> {
     let manager = toolpath_claude::ClaudeConvo::new();
     derive_claude_with_manager(&manager, project, session, all)
 }
 
 fn derive_claude_with_manager(
     manager: &toolpath_claude::ClaudeConvo,
-    project: String,
+    project: Option<String>,
     session: Option<String>,
     all: bool,
 ) -> Result<Vec<DerivedDoc>> {
-    let config = toolpath_claude::derive::DeriveConfig {
-        project_path: Some(project.clone()),
+    let make_config = |p: &str| toolpath_claude::derive::DeriveConfig {
+        project_path: Some(p.to_string()),
         include_thinking: false,
     };
 
-    let paths: Vec<toolpath::v1::Path> = if let Some(session_id) = session {
-        let convo = manager
-            .read_conversation(&project, &session_id)
-            .map_err(|e| anyhow::anyhow!("{}", e))?;
-        vec![toolpath_claude::derive::derive_path(&convo, &config)]
-    } else if all {
-        let convos = manager
-            .read_all_conversations(&project)
-            .map_err(|e| anyhow::anyhow!("{}", e))?;
-        toolpath_claude::derive::derive_project(&convos, &config)
-    } else {
-        let convo = manager
-            .most_recent_conversation(&project)
-            .map_err(|e| anyhow::anyhow!("{}", e))?
-            .ok_or_else(|| anyhow::anyhow!("No conversations found for project: {}", project))?;
-        vec![toolpath_claude::derive::derive_path(&convo, &config)]
+    // Interactive picker fires only when no explicit `--session` (and not
+    // `--all`); the same flow handles single- and multi-select. If fzf isn't
+    // available, we fall back to most-recent for explicit-project, or print
+    // the recipe and bail when `--project` is also missing.
+    let pairs: Vec<(String, String)> = match (project, session, all) {
+        (Some(p), Some(s), _) => vec![(p, s)],
+        (Some(p), None, true) => {
+            let convos = manager
+                .read_all_conversations(&p)
+                .map_err(|e| anyhow::anyhow!("{}", e))?;
+            let cfg = make_config(&p);
+            return wrap_paths_claude(toolpath_claude::derive::derive_project(&convos, &cfg));
+        }
+        (Some(p), None, false) => {
+            #[cfg(not(target_os = "emscripten"))]
+            {
+                if let Some(picks) = pick_claude_in_project(manager, &p)? {
+                    picks
+                } else {
+                    let convo = manager
+                        .most_recent_conversation(&p)
+                        .map_err(|e| anyhow::anyhow!("{}", e))?
+                        .ok_or_else(|| {
+                            anyhow::anyhow!("No conversations found for project: {}", p)
+                        })?;
+                    let cfg = make_config(&p);
+                    return wrap_paths_claude(vec![toolpath_claude::derive::derive_path(
+                        &convo, &cfg,
+                    )]);
+                }
+            }
+            #[cfg(target_os = "emscripten")]
+            {
+                let convo = manager
+                    .most_recent_conversation(&p)
+                    .map_err(|e| anyhow::anyhow!("{}", e))?
+                    .ok_or_else(|| anyhow::anyhow!("No conversations found for project: {}", p))?;
+                let cfg = make_config(&p);
+                return wrap_paths_claude(vec![toolpath_claude::derive::derive_path(&convo, &cfg)]);
+            }
+        }
+        (None, _, _) => {
+            #[cfg(not(target_os = "emscripten"))]
+            {
+                match pick_claude_global(manager)? {
+                    Some(picks) => picks,
+                    None => {
+                        fzf::print_recipe("claude", true);
+                        anyhow::bail!("--project required when not running interactively");
+                    }
+                }
+            }
+            #[cfg(target_os = "emscripten")]
+            {
+                anyhow::bail!("--project required");
+            }
+        }
     };
 
+    let mut paths: Vec<toolpath::v1::Path> = Vec::with_capacity(pairs.len());
+    for (project_path, session_id) in &pairs {
+        let convo = manager
+            .read_conversation(project_path, session_id)
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
+        let cfg = make_config(project_path);
+        paths.push(toolpath_claude::derive::derive_path(&convo, &cfg));
+    }
+    wrap_paths_claude(paths)
+}
+
+fn wrap_paths_claude(paths: Vec<toolpath::v1::Path>) -> Result<Vec<DerivedDoc>> {
     Ok(paths
         .into_iter()
         .map(|p| {
@@ -406,8 +465,97 @@ fn derive_claude_with_manager(
         .collect())
 }
 
+#[cfg(not(target_os = "emscripten"))]
+fn pick_claude_in_project(
+    manager: &toolpath_claude::ClaudeConvo,
+    project: &str,
+) -> Result<Option<Vec<(String, String)>>> {
+    if !fzf::available() {
+        return Ok(None);
+    }
+    let metas = manager
+        .list_conversation_metadata(project)
+        .map_err(|e| anyhow::anyhow!("{}", e))?;
+    if metas.is_empty() {
+        return Ok(None);
+    }
+    let lines: Vec<String> = metas
+        .iter()
+        .map(|m| {
+            // Cols 1+2 are hidden ID columns the parser uses; cols 3+ are
+            // visible to fzf for display + fuzzy-match. Lead the visible
+            // section with the title so the user is searching what the
+            // conversation was *about*, not on UUIDs.
+            format!(
+                "{}\t{}\t{}\t{}\t{} msgs",
+                tab_safe(&m.project_path),
+                tab_safe(&m.session_id),
+                fzf_title(m.first_user_message.as_deref().unwrap_or("(no prompt)")),
+                short_timestamp(m.last_activity),
+                m.message_count,
+            )
+        })
+        .collect();
+    let opts = fzf::PickOptions {
+        with_nth: "3..",
+        prompt: "claude session> ",
+        preview: Some("path show claude --project {1} --session {2}"),
+        header: Some("pick a Claude session (TAB = multi-select, Enter = confirm)"),
+        tiebreak: "index",
+        multi: true,
+    };
+    let selected = fzf::pick(&lines, &opts)?;
+    Ok(Some(parse_project_session(&selected)))
+}
+
+#[cfg(not(target_os = "emscripten"))]
+fn pick_claude_global(
+    manager: &toolpath_claude::ClaudeConvo,
+) -> Result<Option<Vec<(String, String)>>> {
+    if !fzf::available() {
+        return Ok(None);
+    }
+    let projects = manager
+        .list_projects()
+        .map_err(|e| anyhow::anyhow!("{}", e))?;
+    let mut metas: Vec<toolpath_claude::ConversationMetadata> = Vec::new();
+    for p in &projects {
+        if let Ok(ms) = manager.list_conversation_metadata(p) {
+            metas.extend(ms);
+        }
+    }
+    metas.sort_by(|a, b| b.last_activity.cmp(&a.last_activity));
+    if metas.is_empty() {
+        return Ok(None);
+    }
+    let lines: Vec<String> = metas
+        .iter()
+        .map(|m| {
+            format!(
+                "{}\t{}\t{}\t{}\t{} msgs\t{}",
+                tab_safe(&m.project_path),
+                tab_safe(&m.session_id),
+                fzf_title(m.first_user_message.as_deref().unwrap_or("(no prompt)")),
+                short_timestamp(m.last_activity),
+                m.message_count,
+                tab_safe(&project_short(&m.project_path)),
+            )
+        })
+        .collect();
+    let opts = fzf::PickOptions {
+        with_nth: "3..",
+        prompt: "claude session> ",
+        preview: Some("path show claude --project {1} --session {2}"),
+        header: Some("pick a Claude session (TAB = multi-select, Enter = confirm)"),
+        tiebreak: "index",
+        multi: true,
+    };
+    let selected = fzf::pick(&lines, &opts)?;
+    Ok(Some(parse_project_session(&selected)))
+}
+
 fn derive_gemini(
-    project: String,
+    project: Option<String>,
     session: Option<String>,
     all: bool,
     include_thinking: bool,
@@ -418,34 +566,83 @@ fn derive_gemini(
 
 fn derive_gemini_with_manager(
     manager: &toolpath_gemini::GeminiConvo,
-    project: String,
+    project: Option<String>,
     session: Option<String>,
     all: bool,
     include_thinking: bool,
 ) -> Result<Vec<DerivedDoc>> {
-    let config = toolpath_gemini::derive::DeriveConfig {
-        project_path: Some(project.clone()),
+    let make_config = |p: &str| toolpath_gemini::derive::DeriveConfig {
+        project_path: Some(p.to_string()),
         include_thinking,
     };
 
-    let paths: Vec<toolpath::v1::Path> = if let Some(session_uuid) = session {
-        let convo = manager
-            .read_conversation(&project, &session_uuid)
-            .map_err(|e| anyhow::anyhow!("{}", e))?;
-        vec![toolpath_gemini::derive::derive_path(&convo, &config)]
-    } else if all {
-        let convos = manager
-            .read_all_conversations(&project)
-            .map_err(|e| anyhow::anyhow!("{}", e))?;
-        toolpath_gemini::derive::derive_project(&convos, &config)
-    } else {
-        let convo = manager
-            .most_recent_conversation(&project)
-            .map_err(|e| anyhow::anyhow!("{}", e))?
-            .ok_or_else(|| anyhow::anyhow!("No conversations found for project: {}", project))?;
-        vec![toolpath_gemini::derive::derive_path(&convo, &config)]
+    let pairs: Vec<(String, String)> = match (project, session, all) {
+        (Some(p), Some(s), _) => vec![(p, s)],
+        (Some(p), None, true) => {
+            let convos = manager
+                .read_all_conversations(&p)
+                .map_err(|e| anyhow::anyhow!("{}", e))?;
+            let cfg = make_config(&p);
+            return wrap_paths_gemini(toolpath_gemini::derive::derive_project(&convos, &cfg));
+        }
+        (Some(p), None, false) => {
+            #[cfg(not(target_os = "emscripten"))]
+            {
+                if let Some(picks) = pick_gemini_in_project(manager, &p)? {
+                    picks
+                } else {
+                    let convo = manager
+                        .most_recent_conversation(&p)
+                        .map_err(|e| anyhow::anyhow!("{}", e))?
+                        .ok_or_else(|| {
+                            anyhow::anyhow!("No conversations found for project: {}", p)
+                        })?;
+                    let cfg = make_config(&p);
+                    return wrap_paths_gemini(vec![toolpath_gemini::derive::derive_path(
+                        &convo, &cfg,
+                    )]);
+                }
+            }
+            #[cfg(target_os = "emscripten")]
+            {
+                let convo = manager
+                    .most_recent_conversation(&p)
+                    .map_err(|e| anyhow::anyhow!("{}", e))?
+                    .ok_or_else(|| anyhow::anyhow!("No conversations found for project: {}", p))?;
+                let cfg = make_config(&p);
+                return wrap_paths_gemini(vec![toolpath_gemini::derive::derive_path(&convo, &cfg)]);
+            }
+        }
+        (None, _, _) => {
+            #[cfg(not(target_os = "emscripten"))]
+            {
+                match pick_gemini_global(manager)? {
+                    Some(picks) => picks,
+                    None => {
+                        fzf::print_recipe("gemini", true);
+                        anyhow::bail!("--project required when not running interactively");
+                    }
+                }
+            }
+            #[cfg(target_os = "emscripten")]
+            {
+                anyhow::bail!("--project required");
+            }
+        }
     };
 
+    let mut paths: Vec<toolpath::v1::Path> = Vec::with_capacity(pairs.len());
+    for (project_path, session_uuid) in &pairs {
+        let convo = manager
+            .read_conversation(project_path, session_uuid)
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
+        let cfg = make_config(project_path);
+        paths.push(toolpath_gemini::derive::derive_path(&convo, &cfg));
+    }
+    wrap_paths_gemini(paths)
+}
+
+fn wrap_paths_gemini(paths: Vec<toolpath::v1::Path>) -> Result<Vec<DerivedDoc>> {
     Ok(paths
         .into_iter()
         .map(|p| {
@@ -458,31 +655,148 @@ fn derive_gemini_with_manager(
         .collect())
 }
 
+#[cfg(not(target_os = "emscripten"))]
+fn pick_gemini_in_project(
+    manager: &toolpath_gemini::GeminiConvo,
+    project: &str,
+) -> Result<Option<Vec<(String, String)>>> {
+    if !fzf::available() {
+        return Ok(None);
+    }
+    let metas = manager
+        .list_conversation_metadata(project)
+        .map_err(|e| anyhow::anyhow!("{}", e))?;
+    if metas.is_empty() {
+        return Ok(None);
+    }
+    let lines: Vec<String> = metas
+        .iter()
+        .map(|m| {
+            format!(
+                "{}\t{}\t{}\t{}\t{} msgs",
+                tab_safe(&m.project_path),
+                tab_safe(&m.session_uuid),
+                fzf_title(m.first_user_message.as_deref().unwrap_or("(no prompt)")),
+                short_timestamp(m.last_activity),
+                m.message_count,
+            )
+        })
+        .collect();
+    let opts = fzf::PickOptions {
+        with_nth: "3..",
+        prompt: "gemini session> ",
+        preview: Some("path show gemini --project {1} --session {2}"),
+        header: Some("pick a Gemini session (TAB = multi-select, Enter = confirm)"),
+        tiebreak: "index",
+        multi: true,
+    };
+    let selected = fzf::pick(&lines, &opts)?;
+    Ok(Some(parse_project_session(&selected)))
+}
+
+#[cfg(not(target_os = "emscripten"))]
+fn pick_gemini_global(
+    manager: &toolpath_gemini::GeminiConvo,
+) -> Result<Option<Vec<(String, String)>>> {
+    if !fzf::available() {
+        return Ok(None);
+    }
+    let projects = manager
+        .list_projects()
+        .map_err(|e| anyhow::anyhow!("{}", e))?;
+    let mut metas: Vec<toolpath_gemini::ConversationMetadata> = Vec::new();
+    for p in &projects {
+        if let Ok(ms) = manager.list_conversation_metadata(p) {
+            metas.extend(ms);
+        }
+    }
+    metas.sort_by(|a, b| b.last_activity.cmp(&a.last_activity));
+    if metas.is_empty() {
+        return Ok(None);
+    }
+    let lines: Vec<String> = metas
+        .iter()
+        .map(|m| {
+            format!(
+                "{}\t{}\t{}\t{}\t{} msgs\t{}",
+                tab_safe(&m.project_path),
+                tab_safe(&m.session_uuid),
+                fzf_title(m.first_user_message.as_deref().unwrap_or("(no prompt)")),
+                short_timestamp(m.last_activity),
+                m.message_count,
+                tab_safe(&project_short(&m.project_path)),
+            )
+        })
+        .collect();
+    let opts = fzf::PickOptions {
+        with_nth: "3..",
+        prompt: "gemini session> ",
+        preview: Some("path show gemini --project {1} --session {2}"),
+        header: Some("pick a Gemini session (TAB = multi-select, Enter = confirm)"),
+        tiebreak: "index",
+        multi: true,
+    };
+    let selected = fzf::pick(&lines, &opts)?;
+    Ok(Some(parse_project_session(&selected)))
+}
+
 fn derive_codex(session: Option<String>, all: bool) -> Result<Vec<DerivedDoc>> {
     let manager = toolpath_codex::CodexConvo::new();
     let config = toolpath_codex::derive::DeriveConfig { project_path: None };
 
-    let paths: Vec<toolpath::v1::Path> = if all {
-        let sessions = manager
-            .read_all_sessions()
-            .map_err(|e| anyhow::anyhow!("{}", e))?;
-        if sessions.is_empty() {
-            anyhow::bail!("No Codex sessions found in ~/.codex/sessions");
+    let session_ids: Vec<String> = match (session, all) {
+        (Some(s), _) => vec![s],
+        (None, true) => {
+            let sessions = manager
+                .read_all_sessions()
+                .map_err(|e| anyhow::anyhow!("{}", e))?;
+            if sessions.is_empty() {
+                anyhow::bail!("No Codex sessions found in ~/.codex/sessions");
+            }
+            return wrap_paths_codex(toolpath_codex::derive::derive_project(&sessions, &config));
         }
-        toolpath_codex::derive::derive_project(&sessions, &config)
-    } else if let Some(sid) = session {
-        let s = manager
-            .read_session(&sid)
-            .map_err(|e| anyhow::anyhow!("{}", e))?;
-        vec![toolpath_codex::derive::derive_path(&s, &config)]
-    } else {
-        let s = manager
-            .most_recent_session()
-            .map_err(|e| anyhow::anyhow!("{}", e))?
-            .ok_or_else(|| anyhow::anyhow!("No Codex sessions found in ~/.codex/sessions"))?;
-        vec![toolpath_codex::derive::derive_path(&s, &config)]
+        (None, false) => {
+            #[cfg(not(target_os = "emscripten"))]
+            {
+                match pick_codex(&manager)? {
+                    Some(picks) => picks,
+                    None => {
+                        let s = manager
+                            .most_recent_session()
+                            .map_err(|e| anyhow::anyhow!("{}", e))?
+                            .ok_or_else(|| {
+                                anyhow::anyhow!("No Codex sessions found in ~/.codex/sessions")
+                            })?;
+                        return wrap_paths_codex(vec![toolpath_codex::derive::derive_path(
+                            &s, &config,
+                        )]);
+                    }
+                }
+            }
+            #[cfg(target_os = "emscripten")]
+            {
+                let s = manager
+                    .most_recent_session()
+                    .map_err(|e| anyhow::anyhow!("{}", e))?
+                    .ok_or_else(|| {
+                        anyhow::anyhow!("No Codex sessions found in ~/.codex/sessions")
+                    })?;
+                return wrap_paths_codex(vec![toolpath_codex::derive::derive_path(&s, &config)]);
+            }
+        }
     };
 
+    let mut paths: Vec<toolpath::v1::Path> = Vec::with_capacity(session_ids.len());
+    for sid in &session_ids {
+        let s = manager
+            .read_session(sid)
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
+        paths.push(toolpath_codex::derive::derive_path(&s, &config));
+    }
+    wrap_paths_codex(paths)
+}
+
+fn wrap_paths_codex(paths: Vec<toolpath::v1::Path>) -> Result<Vec<DerivedDoc>> {
     Ok(paths
         .into_iter()
         .map(|p| {
@@ -493,6 +807,47 @@ fn derive_codex(session: Option<String>, all: bool) -> Result<Vec<DerivedDoc>> {
             }
         })
         .collect())
+}
+
+#[cfg(not(target_os = "emscripten"))]
+fn pick_codex(manager: &toolpath_codex::CodexConvo) -> Result<Option<Vec<String>>> {
+    if !fzf::available() {
+        return Ok(None);
+    }
+    let metas = manager
+        .list_sessions()
+        .map_err(|e| anyhow::anyhow!("{}", e))?;
+    if metas.is_empty() {
+        return Ok(None);
+    }
+    let lines: Vec<String> = metas
+        .iter()
+        .map(|m| {
+            format!(
+                "{}\t{}\t{}\t{} lines\t{}",
+                tab_safe(&m.id),
+                fzf_title(m.first_user_message.as_deref().unwrap_or("(no prompt)")),
+                short_timestamp(m.last_activity),
+                m.line_count,
+                tab_safe(
+                    &m.cwd
+                        .as_ref()
+                        .map(|p| project_short(&p.to_string_lossy()))
+                        .unwrap_or_default(),
+                ),
+            )
+        })
+        .collect();
+    let opts = fzf::PickOptions {
+        with_nth: "2..",
+        prompt: "codex session> ",
+        preview: Some("path show codex --session {1}"),
+        header: Some("pick a Codex session (TAB = multi-select, Enter = confirm)"),
+        tiebreak: "index",
+        multi: true,
+    };
+    let selected = fzf::pick(&lines, &opts)?;
+    Ok(Some(parse_single_id(&selected)))
 }
 
 fn derive_opencode(
@@ -516,63 +871,119 @@ fn derive_opencode(
             no_snapshot_diffs,
             ..Default::default()
         };
-
-        let paths: Vec<toolpath::v1::Path> = if all {
-            let metas = manager
-                .io()
-                .list_session_metadata(project.as_deref())
-                .map_err(|e| anyhow::anyhow!("{}", e))?;
-            if metas.is_empty() {
-                anyhow::bail!("No opencode sessions found");
-            }
-            let mut out = Vec::with_capacity(metas.len());
-            for m in metas {
-                let s = manager
-                    .read_session(&m.id)
-                    .map_err(|e| anyhow::anyhow!("{}: {}", m.id, e))?;
-                out.push(toolpath_opencode::derive::derive_path_with_resolver(
-                    &s,
-                    &config,
-                    manager.resolver(),
-                ));
-            }
-            out
-        } else if let Some(sid) = session {
+        let derive_one = |sid: &str| -> Result<toolpath::v1::Path> {
             let s = manager
-                .read_session(&sid)
+                .read_session(sid)
                 .map_err(|e| anyhow::anyhow!("{}", e))?;
-            vec![toolpath_opencode::derive::derive_path_with_resolver(
+            Ok(toolpath_opencode::derive::derive_path_with_resolver(
                 &s,
                 &config,
                 manager.resolver(),
-            )]
-        } else {
-            let s = manager
-                .most_recent_session()
-                .map_err(|e| anyhow::anyhow!("{}", e))?
-                .ok_or_else(|| anyhow::anyhow!("No opencode sessions found"))?;
-            vec![toolpath_opencode::derive::derive_path_with_resolver(
-                &s,
-                &config,
-                manager.resolver(),
-            )]
+            ))
         };
 
-        Ok(paths
-            .into_iter()
-            .map(|p| {
-                let cache_id = make_id("opencode", &p.path.id);
-                DerivedDoc {
-                    cache_id,
-                    doc: Document::Path(p),
+        let session_ids: Vec<String> = match (session, all) {
+            (Some(s), _) => vec![s],
+            (None, true) => {
+                let metas = manager
+                    .io()
+                    .list_session_metadata(project.as_deref())
+                    .map_err(|e| anyhow::anyhow!("{}", e))?;
+                if metas.is_empty() {
+                    anyhow::bail!("No opencode sessions found");
                 }
-            })
-            .collect())
+                let mut out = Vec::with_capacity(metas.len());
+                for m in &metas {
+                    out.push(derive_one(&m.id)?);
+                }
+                return wrap_paths_opencode(out);
+            }
+            (None, false) => match pick_opencode(&manager, project.as_deref())? {
+                Some(picks) => picks,
+                None => {
+                    let s = manager
+                        .most_recent_session()
+                        .map_err(|e| anyhow::anyhow!("{}", e))?
+                        .ok_or_else(|| anyhow::anyhow!("No opencode sessions found"))?;
+                    return wrap_paths_opencode(vec![
+                        toolpath_opencode::derive::derive_path_with_resolver(
+                            &s,
+                            &config,
+                            manager.resolver(),
+                        ),
+                    ]);
+                }
+            },
+        };
+
+        let mut paths: Vec<toolpath::v1::Path> = Vec::with_capacity(session_ids.len());
+        for sid in &session_ids {
+            paths.push(derive_one(sid)?);
+        }
+        wrap_paths_opencode(paths)
     }
 }
 
+fn wrap_paths_opencode(paths: Vec<toolpath::v1::Path>) -> Result<Vec<DerivedDoc>> {
+    Ok(paths
+        .into_iter()
+        .map(|p| {
+            let cache_id = make_id("opencode", &p.path.id);
+            DerivedDoc {
+                cache_id,
+                doc: Document::Path(p),
+            }
+        })
+        .collect())
+}
+
+#[cfg(not(target_os = "emscripten"))]
+fn pick_opencode(
+    manager: &toolpath_opencode::OpencodeConvo,
+    project: Option<&str>,
+) -> Result<Option<Vec<String>>> {
+    if !fzf::available() {
+        return Ok(None);
+    }
+    let metas = manager
+        .io()
+        .list_session_metadata(project)
+        .map_err(|e| anyhow::anyhow!("{}", e))?;
+    if metas.is_empty() {
+        return Ok(None);
+    }
+    let lines: Vec<String> = metas
+        .iter()
+        .map(|m| {
+            format!(
+                "{}\t{}\t{}\t{} msgs\t{}",
+                tab_safe(&m.id),
+                fzf_title(
+                    m.first_user_message
+                        .as_deref()
+                        .filter(|s| !s.is_empty())
+                        .unwrap_or(m.title.as_str()),
+                ),
+                short_timestamp(m.last_activity),
+                m.message_count,
+                tab_safe(&project_short(&m.directory.to_string_lossy())),
+            )
+        })
+        .collect();
+    let opts = fzf::PickOptions {
+        with_nth: "2..",
+        prompt: "opencode session> ",
+        preview: Some("path show opencode --session {1}"),
+        header: Some("pick an opencode session (TAB = multi-select, Enter = confirm)"),
+        tiebreak: "index",
+        multi: true,
+    };
+    let selected = fzf::pick(&lines, &opts)?;
+    Ok(Some(parse_single_id(&selected)))
+}
+
 fn derive_pi(
-    project: String,
+    project: Option<String>,
     session: Option<String>,
     all: bool,
     base: Option<PathBuf>,
@@ -588,36 +999,241 @@ fn derive_pi(
 
 fn derive_pi_with_manager(
     manager: &toolpath_pi::PiConvo,
-    project: String,
+    project: Option<String>,
     session: Option<String>,
     all: bool,
 ) -> Result<Vec<DerivedDoc>> {
     let config = toolpath_pi::DeriveConfig::default();
 
-    let doc: Document = if all {
-        let sessions = manager
-            .read_all_sessions(&project)
-            .map_err(|e| anyhow::anyhow!("{}", e))?;
-        if sessions.is_empty() {
-            anyhow::bail!("No Pi sessions found for project: {}", project);
+    let pairs: Vec<(String, String)> = match (project, session, all) {
+        (Some(p), Some(s), _) => vec![(p, s)],
+        (Some(p), None, true) => {
+            let sessions = manager
+                .read_all_sessions(&p)
+                .map_err(|e| anyhow::anyhow!("{}", e))?;
+            if sessions.is_empty() {
+                anyhow::bail!("No Pi sessions found for project: {}", p);
+            }
+            let graph = toolpath_pi::derive::derive_graph(&sessions, None, &config);
+            let doc = Document::Graph(graph);
+            let cache_id = make_id("pi", &doc_inner_id(&doc));
+            return Ok(vec![DerivedDoc { cache_id, doc }]);
         }
-        let graph = toolpath_pi::derive::derive_graph(&sessions, None, &config);
-        Document::Graph(graph)
-    } else if let Some(sid) = session {
-        let session = manager
-            .read_session(&project, &sid)
-            .map_err(|e| anyhow::anyhow!("{}", e))?;
-        Document::Path(toolpath_pi::derive::derive_path(&session, &config))
-    } else {
-        let session = manager
-            .most_recent_session(&project)
-            .map_err(|e| anyhow::anyhow!("{}", e))?
-            .ok_or_else(|| anyhow::anyhow!("No Pi sessions found for project: {}", project))?;
-        Document::Path(toolpath_pi::derive::derive_path(&session, &config))
+        (Some(p), None, false) => {
+            #[cfg(not(target_os = "emscripten"))]
+            {
+                if let Some(picks) = pick_pi_in_project(manager, &p)? {
+                    picks
+                } else {
+                    let session = manager
+                        .most_recent_session(&p)
+                        .map_err(|e| anyhow::anyhow!("{}", e))?
+                        .ok_or_else(|| {
+                            anyhow::anyhow!("No Pi sessions found for project: {}", p)
+                        })?;
+                    let doc =
+                        Document::Path(toolpath_pi::derive::derive_path(&session, &config));
+                    let cache_id = make_id("pi", &doc_inner_id(&doc));
+                    return Ok(vec![DerivedDoc { cache_id, doc }]);
+                }
+            }
+            #[cfg(target_os = "emscripten")]
+            {
+                let session = manager
+                    .most_recent_session(&p)
+                    .map_err(|e| anyhow::anyhow!("{}", e))?
+                    .ok_or_else(|| anyhow::anyhow!("No Pi sessions found for project: {}", p))?;
+                let doc = Document::Path(toolpath_pi::derive::derive_path(&session, &config));
+                let cache_id = make_id("pi", &doc_inner_id(&doc));
+                return Ok(vec![DerivedDoc { cache_id, doc }]);
+            }
+        }
+        (None, _, _) => {
+            #[cfg(not(target_os = "emscripten"))]
+            {
+                match pick_pi_global(manager)? {
+                    Some(picks) => picks,
+                    None => {
+                        fzf::print_recipe("pi", true);
+                        anyhow::bail!("--project required when not running interactively");
+                    }
+                }
+            }
+            #[cfg(target_os = "emscripten")]
+            {
+                anyhow::bail!("--project required");
+            }
+        }
     };
 
-    let cache_id = make_id("pi", &doc_inner_id(&doc));
-    Ok(vec![DerivedDoc { cache_id, doc }])
+    let mut docs: Vec<DerivedDoc> = Vec::with_capacity(pairs.len());
+    for (project_path, session_id) in &pairs {
+        let session = manager
+            .read_session(project_path, session_id)
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
+        let doc = Document::Path(toolpath_pi::derive::derive_path(&session, &config));
+        let cache_id = make_id("pi", &doc_inner_id(&doc));
+        docs.push(DerivedDoc { cache_id, doc });
+    }
+    Ok(docs)
+}
+
+#[cfg(not(target_os = "emscripten"))]
+fn pick_pi_in_project(
+    manager: &toolpath_pi::PiConvo,
+    project: &str,
+) -> Result<Option<Vec<(String, String)>>> {
+    if !fzf::available() {
+        return Ok(None);
+    }
+    let metas = manager
+        .list_sessions(project)
+        .map_err(|e| anyhow::anyhow!("{}", e))?;
+    if metas.is_empty() {
+        return Ok(None);
+    }
+    let lines: Vec<String> = metas
+        .iter()
+        .map(|m| {
+            format!(
+                "{}\t{}\t{}\t{}\t{} entries",
+                tab_safe(project),
+                tab_safe(&m.id),
+                fzf_title(m.first_user_message.as_deref().unwrap_or("(no prompt)")),
+                tab_safe(&m.timestamp),
+                m.entry_count,
+            )
+        })
+        .collect();
+    let opts = fzf::PickOptions {
+        with_nth: "3..",
+        prompt: "pi session> ",
+        preview: Some("path show pi --project {1} --session {2}"),
+        header: Some("pick a Pi session (TAB = multi-select, Enter = confirm)"),
+        tiebreak: "index",
+        multi: true,
+    };
+    let selected = fzf::pick(&lines, &opts)?;
+    Ok(Some(parse_project_session(&selected)))
+}
+
+#[cfg(not(target_os = "emscripten"))]
+fn pick_pi_global(manager: &toolpath_pi::PiConvo) -> Result<Option<Vec<(String, String)>>> {
+    if !fzf::available() {
+        return Ok(None);
+    }
+    let projects = manager
+        .list_projects()
+        .map_err(|e| anyhow::anyhow!("{}", e))?;
+    let mut all: Vec<(String, toolpath_pi::SessionMeta)> = Vec::new();
+    for p in &projects {
+        if let Ok(ms) = manager.list_sessions(p) {
+            for m in ms {
+                all.push((p.clone(), m));
+            }
+        }
+    }
+    all.sort_by(|a, b| b.1.timestamp.cmp(&a.1.timestamp));
+    if all.is_empty() {
+        return Ok(None);
+    }
+    let lines: Vec<String> = all
+        .iter()
+        .map(|(project, m)| {
+            format!(
+                "{}\t{}\t{}\t{}\t{} entries\t{}",
+                tab_safe(project),
+                tab_safe(&m.id),
+                fzf_title(m.first_user_message.as_deref().unwrap_or("(no prompt)")),
+                tab_safe(&m.timestamp),
+                m.entry_count,
+                tab_safe(&project_short(project)),
+            )
+        })
+        .collect();
+    let opts = fzf::PickOptions {
+        with_nth: "3..",
+        prompt: "pi session> ",
+        preview: Some("path show pi --project {1} --session {2}"),
+        header: Some("pick a Pi session (TAB = multi-select, Enter = confirm)"),
+        tiebreak: "index",
+        multi: true,
+    };
+    let selected = fzf::pick(&lines, &opts)?;
+    Ok(Some(parse_project_session(&selected)))
+}
+
+/// Parse fzf output where each line is `<project>\t<session>\t…`.
+fn parse_project_session(lines: &[String]) -> Vec<(String, String)> {
+    lines
+        .iter()
+        .filter_map(|line| {
+            let mut parts = line.split('\t');
+            let project = parts.next()?.to_string();
+            let session = parts.next()?.to_string();
+            if project.is_empty() || session.is_empty() {
+                None
+            } else {
+                Some((project, session))
+            }
+        })
+        .collect()
+}
+
+#[cfg(not(target_os = "emscripten"))]
+fn parse_single_id(lines: &[String]) -> Vec<String> {
+    lines
+        .iter()
+        .filter_map(|line| {
+            let id = line.split('\t').next()?.to_string();
+            if id.is_empty() { None } else { Some(id) }
+        })
+        .collect()
+}
+
+/// Replace tabs/newlines so a TSV row stays one line with stable columns.
+fn tab_safe(s: &str) -> String {
+    s.replace(['\t', '\n', '\r'], " ")
+}
+
+/// Display-friendly title cell for an fzf row: tab-safe, single-line, capped
+/// in length so a long pasted prompt doesn't push later columns off screen.
+/// fzf still fuzzy-matches on the truncated form — full prompt text lives in
+/// the preview pane via `path show`.
+#[cfg(not(target_os = "emscripten"))]
+fn fzf_title(s: &str) -> String {
+    const MAX: usize = 120;
+    let safe = tab_safe(s);
+    if safe.chars().count() > MAX {
+        let head: String = safe.chars().take(MAX - 1).collect();
+        format!("{head}…")
+    } else {
+        safe
+    }
+}
+
+/// Compact timestamp for fzf rows — `YYYY-MM-DD HH:MM` is enough resolution
+/// to disambiguate sessions in a picker without eating a full RFC 3339 line.
+#[cfg(not(target_os = "emscripten"))]
+fn short_timestamp(t: Option<chrono::DateTime<chrono::Utc>>) -> String {
+    match t {
+        Some(t) => t.format("%Y-%m-%d %H:%M").to_string(),
+        None => "          —     ".to_string(), // pad so the column stays aligned
+    }
+}
+
+/// Last two path segments — enough to disambiguate `…/repo/.claude/worktrees/foo`
+/// from `…/other-repo/main` without showing the full absolute path.
+#[cfg(not(target_os = "emscripten"))]
+fn project_short(p: &str) -> String {
+    let trimmed = p.trim_end_matches('/');
+    let parts: Vec<&str> = trimmed.rsplit('/').take(2).collect();
+    if parts.is_empty() {
+        return p.to_string();
+    }
+    let mut out: Vec<&str> = parts.into_iter().collect();
+    out.reverse();
+    out.join("/")
 }
 
 fn derive_pathbase(target: String, url_flag: Option<String>) -> Result<Vec<DerivedDoc>> {
@@ -745,7 +1361,7 @@ mod tests {
         let (_t, mgr) = setup_claude_manager();
         let out = derive_claude_with_manager(
             &mgr,
-            "/test/project".to_string(),
+            Some("/test/project".to_string()),
             Some("session-abc".to_string()),
             false,
         )
@@ -788,7 +1404,8 @@ mod tests {
     fn derive_claude_all_emits_one_cache_entry_per_session() {
         let (_t, mgr) = setup_claude_manager_with_two_sessions();
         let out =
-            derive_claude_with_manager(&mgr, "/test/project".to_string(), None, true).unwrap();
+            derive_claude_with_manager(&mgr, Some("/test/project".to_string()), None, true)
+                .unwrap();
         assert_eq!(out.len(), 2);
         // Distinct cache ids so both can land in the cache without collision.
         assert_ne!(out[0].cache_id, out[1].cache_id);

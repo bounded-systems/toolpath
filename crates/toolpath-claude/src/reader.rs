@@ -86,6 +86,7 @@ impl ConversationReader {
         let mut started_at = None;
         let mut last_activity = None;
         let mut project_path = String::new();
+        let mut first_user_message: Option<String> = None;
 
         for line in reader.lines() {
             let line = line?;
@@ -105,6 +106,19 @@ impl ConversationReader {
                         && let Some(cwd) = entry.cwd
                     {
                         project_path = cwd;
+                    }
+
+                    // First user prompt with actual text (skip tool-result-only
+                    // user entries, which `Message::text()` collapses to "").
+                    if first_user_message.is_none()
+                        && entry.entry_type == "user"
+                        && let Some(msg) = &entry.message
+                    {
+                        let text = msg.text();
+                        let trimmed = text.trim();
+                        if !trimmed.is_empty() {
+                            first_user_message = Some(trimmed.to_string());
+                        }
                     }
 
                     if !entry.timestamp.is_empty()
@@ -129,6 +143,7 @@ impl ConversationReader {
             message_count,
             started_at,
             last_activity,
+            first_user_message,
         })
     }
 
