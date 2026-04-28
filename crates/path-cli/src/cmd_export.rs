@@ -8,6 +8,9 @@
 //!   `gemini --resume <uuid>`.
 //! - `export pi` projects a Path document into Pi's JSONL session
 //!   format under `~/.pi/agent/sessions/--<encoded-cwd>--/<id>.jsonl`.
+//! - `export codex` projects a Path document into Codex CLI's rollout
+//!   JSONL under `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl`,
+//!   loadable via `codex resume <session-uuid>`.
 //! - `export pathbase` uploads the document to a Pathbase server.
 
 use anyhow::{Context, Result};
@@ -63,6 +66,25 @@ pub enum ExportTarget {
         /// into `~/.pi/agent/sessions/--<encoded-cwd>--/<session>.jsonl`
         /// under the encoding scheme Pi uses for project directories.
         /// Defaults to cwd when neither --project nor --output is given.
+        #[arg(short, long)]
+        project: Option<PathBuf>,
+
+        /// Output JSONL to this file. Mutually exclusive with --project.
+        #[arg(short, long, conflicts_with = "project")]
+        output: Option<PathBuf>,
+    },
+    /// Project a toolpath document into a Codex CLI session
+    Codex {
+        /// Input: cache id (e.g. `claude-abc`) or path to a toolpath JSON file
+        #[arg(short, long)]
+        input: String,
+
+        /// Target project directory. With this flag, writes the JSONL
+        /// into `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl` (Codex's
+        /// date-bucketed layout). The session_meta line carries this
+        /// path as `cwd`, so `codex resume <session-uuid>` invoked from
+        /// the same directory will resolve it correctly. Defaults to
+        /// cwd when neither --project nor --output is given.
         #[arg(short, long)]
         project: Option<PathBuf>,
 
@@ -145,6 +167,11 @@ pub fn run(target: ExportTarget) -> Result<()> {
             project,
             output,
         } => run_pi(input, project, output),
+        ExportTarget::Codex {
+            input,
+            project,
+            output,
+        } => run_codex(input, project, output),
         ExportTarget::Pathbase {
             input,
             url,
@@ -638,6 +665,290 @@ fn serialize_pi_jsonl(session: &toolpath_pi::PiSession) -> Result<String> {
     out.push('\n');
     Ok(out)
 }
+
+// ── Codex ─────────────────────────────────────────────────────────────
+
+fn run_codex(input: String, project: Option<PathBuf>, output: Option<PathBuf>) -> Result<()> {
+    #[cfg(target_os = "emscripten")]
+    {
+        let _ = (input, project, output);
+        anyhow::bail!("'path export codex' requires a native environment");
+    }
+
+    #[cfg(not(target_os = "emscripten"))]
+    {
+        // Resolve cwd up front; with --output it only feeds the
+        // SessionMeta.cwd / TurnContext.cwd payload (so a `codex
+        // resume` invocation from a different directory still sees the
+        // originating cwd recorded in the rollout).
+        let project_dir = match project.as_ref() {
+            Some(p) => std::fs::canonicalize(p)
+                .with_context(|| format!("resolve project path {}", p.display()))?,
+            None => std::env::current_dir()?,
+        };
+        let cwd_str = project_dir.to_string_lossy().to_string();
+
+        let session = build_codex_session(&input, &cwd_str)?;
+
+        match (project, output) {
+            (Some(_), None) => write_into_codex_project(&session)?,
+            (None, Some(out_path)) => write_codex_to_output_path(&session, &out_path)?,
+            (None, None) => write_codex_to_stdout(&session)?,
+            (Some(_), Some(_)) => unreachable!("clap enforces conflicts_with"),
+        }
+        Ok(())
+    }
+}
+
+#[cfg(not(target_os = "emscripten"))]
+fn build_codex_session(input: &str, cwd: &str) -> Result<toolpath_codex::Session> {
+    use toolpath_convo::ConversationProjector;
+
+    let path = load_path_doc(input)?;
+    let view = toolpath_convo::extract_conversation(&path);
+
+    let projector = toolpath_codex::project::CodexProjector::new().with_cwd(cwd.to_string());
+    let session = projector
+        .project(&view)
+        .map_err(|e| anyhow::anyhow!("Projection failed: {}", e))?;
+
+    if session.id.is_empty() {
+        anyhow::bail!("Projected session has no id — cannot place it on disk");
+    }
+    Ok(session)
+}
+
+/// `--project` mode: write the resume-ready layout under
+/// `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl`. The date partitioning
+/// matches Codex's own filing convention; the timestamp prefix is
+/// derived from the session's first event time.
+#[cfg(not(target_os = "emscripten"))]
+fn write_into_codex_project(session: &toolpath_codex::Session) -> Result<()> {
+    let session_ts = codex_session_timestamp(session)?;
+    let resolver = toolpath_codex::PathResolver::new();
+    let sessions_root = resolver
+        .sessions_root()
+        .map_err(|e| anyhow::anyhow!("Cannot resolve Codex sessions dir: {}", e))?;
+
+    // sessions/YYYY/MM/DD/
+    let date_dir = sessions_root
+        .join(session_ts.format("%Y").to_string())
+        .join(session_ts.format("%m").to_string())
+        .join(session_ts.format("%d").to_string());
+    std::fs::create_dir_all(&date_dir).with_context(|| format!("create {}", date_dir.display()))?;
+
+    let stem = codex_rollout_stem(session, &session_ts);
+    let out_path = date_dir.join(format!("{}.jsonl", stem));
+    let bytes = serialize_codex_jsonl(session)?;
+    std::fs::write(&out_path, &bytes).with_context(|| format!("write {}", out_path.display()))?;
+
+    // Codex's `resume` command reads its session catalog from
+    // `state_5.sqlite` (`threads` table), not from a filesystem scan.
+    // Without a row pointing at our rollout file, the projected
+    // session is invisible to `codex resume`. Best-effort: register
+    // it now. If the DB doesn't exist (Codex never run on this
+    // machine) or the schema has moved, log a warning and continue.
+    let codex_dir = resolver
+        .codex_dir()
+        .map_err(|e| anyhow::anyhow!("Cannot resolve ~/.codex dir: {}", e))?;
+    let registration = register_codex_thread(&codex_dir, session, &out_path, &session_ts);
+
+    eprintln!(
+        "Exported Codex session {} ({} lines) → {}",
+        session.id,
+        session.lines.len(),
+        out_path.display()
+    );
+    match registration {
+        Ok(true) => eprintln!("  registered in {}/state_5.sqlite", codex_dir.display()),
+        Ok(false) => eprintln!(
+            "  warning: state_5.sqlite not found at {} — `codex resume` won't see this session",
+            codex_dir.display()
+        ),
+        Err(e) => eprintln!(
+            "  warning: failed to register thread in state_5.sqlite: {} — `codex resume` may not see this session",
+            e
+        ),
+    }
+    eprintln!();
+    eprintln!("Loadable via:");
+    eprintln!("  path import codex --session {}", session.id);
+    eprintln!();
+    eprintln!("Open conversation with:");
+    eprintln!("  codex resume {}", session.id);
+    Ok(())
+}
+
+/// Insert (or replace) a row in Codex's `threads` table so `codex
+/// resume <id>` sees the projected session.
+///
+/// Returns `Ok(true)` on success, `Ok(false)` if the DB doesn't exist,
+/// or an `Err` if the DB exists but the insert failed. Schema-fragile
+/// — we target the `state_5.sqlite` shape observed in Codex 0.118.0
+/// (threads table with id/rollout_path/source/cwd/title/sandbox_policy/
+/// approval_mode/etc.). When Codex bumps to `state_6`, this code needs
+/// updating.
+#[cfg(not(target_os = "emscripten"))]
+fn register_codex_thread(
+    codex_dir: &std::path::Path,
+    session: &toolpath_codex::Session,
+    rollout_path: &std::path::Path,
+    session_ts: &chrono::DateTime<chrono::Utc>,
+) -> std::result::Result<bool, rusqlite::Error> {
+    let db_path = codex_dir.join("state_5.sqlite");
+    if !db_path.exists() {
+        return Ok(false);
+    }
+    let conn = rusqlite::Connection::open(&db_path)?;
+
+    let created_at = session_ts.timestamp();
+    let created_at_ms = session_ts.timestamp_millis();
+    let (cwd, model_provider, cli_version) = match session.meta() {
+        Some(m) => (
+            m.cwd.to_string_lossy().to_string(),
+            m.model_provider.clone().unwrap_or_else(|| "openai".into()),
+            m.cli_version,
+        ),
+        None => ("/".to_string(), "openai".to_string(), String::new()),
+    };
+    let first_user_message = first_user_message_text(session);
+    let title = first_user_message.chars().take(200).collect::<String>();
+    let has_user_event: i64 = if first_user_message.is_empty() { 0 } else { 1 };
+    // Default sandbox_policy mirrors what Codex itself writes for a
+    // workspace-write session. Stored as a JSON blob in the `threads`
+    // table.
+    let sandbox_policy_json = serde_json::json!({
+        "type": "workspace-write",
+        "writable_roots": [],
+        "network_access": false,
+        "exclude_tmpdir_env_var": false,
+        "exclude_slash_tmp": false,
+    })
+    .to_string();
+
+    // INSERT OR REPLACE so re-exporting the same session id updates
+    // the row instead of erroring on the primary key.
+    conn.execute(
+        "INSERT OR REPLACE INTO threads (
+            id, rollout_path, created_at, updated_at, source, model_provider,
+            cwd, title, sandbox_policy, approval_mode, tokens_used, has_user_event,
+            archived, cli_version, first_user_message, memory_mode,
+            created_at_ms, updated_at_ms
+         ) VALUES (
+            ?1, ?2, ?3, ?4, 'cli', ?5,
+            ?6, ?7, ?8, 'on-request', 0, ?9,
+            0, ?10, ?11, 'enabled',
+            ?12, ?13
+         )",
+        rusqlite::params![
+            session.id,
+            rollout_path.to_string_lossy(),
+            created_at,
+            created_at,
+            model_provider,
+            cwd,
+            title,
+            sandbox_policy_json,
+            has_user_event,
+            cli_version,
+            first_user_message,
+            created_at_ms,
+            created_at_ms,
+        ],
+    )?;
+    Ok(true)
+}
+
+/// Pull the first user-text message out of a Codex session for the
+/// `threads.first_user_message` / `threads.title` columns. Empty when
+/// the session has no user messages yet.
+#[cfg(not(target_os = "emscripten"))]
+fn first_user_message_text(session: &toolpath_codex::Session) -> String {
+    use toolpath_codex::types::{ResponseItem, RolloutItem};
+    for line in &session.lines {
+        if let RolloutItem::ResponseItem(ResponseItem::Message(m)) = line.item()
+            && m.role == "user"
+        {
+            let t = m.text();
+            if !t.is_empty() {
+                return t;
+            }
+        }
+    }
+    String::new()
+}
+
+/// `--output` mode: write JSONL to the caller-specified path.
+#[cfg(not(target_os = "emscripten"))]
+fn write_codex_to_output_path(
+    session: &toolpath_codex::Session,
+    out_path: &std::path::Path,
+) -> Result<()> {
+    if let Some(parent) = out_path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
+    }
+    let bytes = serialize_codex_jsonl(session)?;
+    std::fs::write(out_path, &bytes).with_context(|| format!("write {}", out_path.display()))?;
+    eprintln!("Wrote {} bytes to {}", bytes.len(), out_path.display());
+    Ok(())
+}
+
+/// Stdout mode.
+#[cfg(not(target_os = "emscripten"))]
+fn write_codex_to_stdout(session: &toolpath_codex::Session) -> Result<()> {
+    let bytes = serialize_codex_jsonl(session)?;
+    print!("{}", bytes);
+    Ok(())
+}
+
+/// Pull the session's intended timestamp out of its session_meta line.
+/// Falls back to the wall clock at projection time when the metadata
+/// is missing or unparseable — Codex's directory layout requires SOME
+/// date to file under.
+#[cfg(not(target_os = "emscripten"))]
+fn codex_session_timestamp(
+    session: &toolpath_codex::Session,
+) -> Result<chrono::DateTime<chrono::Utc>> {
+    if let Some(meta) = session.meta()
+        && let Ok(dt) = meta.timestamp.parse::<chrono::DateTime<chrono::Utc>>()
+    {
+        return Ok(dt);
+    }
+    Ok(chrono::Utc::now())
+}
+
+/// Filename stem matching Codex's own naming:
+/// `rollout-YYYY-MM-DDThh-mm-ss-<session-uuid>`.
+#[cfg(not(target_os = "emscripten"))]
+fn codex_rollout_stem(
+    session: &toolpath_codex::Session,
+    ts: &chrono::DateTime<chrono::Utc>,
+) -> String {
+    let stamp = ts.format("%Y-%m-%dT%H-%M-%S").to_string();
+    let uuid_safe: String = session
+        .id
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+        .collect();
+    format!("rollout-{}-{}", stamp, uuid_safe)
+}
+
+/// Serialize a Codex `Session` to JSONL — one [`RolloutLine`] per line,
+/// trailing newline included. This matches the on-disk shape Codex's
+/// rollout recorder writes.
+#[cfg(not(target_os = "emscripten"))]
+fn serialize_codex_jsonl(session: &toolpath_codex::Session) -> Result<String> {
+    let mut lines: Vec<String> = Vec::with_capacity(session.lines.len());
+    for line in &session.lines {
+        lines.push(serde_json::to_string(line)?);
+    }
+    let mut out = lines.join("\n");
+    out.push('\n');
+    Ok(out)
+}
+
 
 // ── Pathbase ──────────────────────────────────────────────────────────
 
@@ -1270,6 +1581,7 @@ mod tests {
         );
     }
 
+    #[test]
     fn pi_writes_resume_ready_layout() {
         // Build a Path doc with a single user turn, run `path export
         // pi --project DIR`, and confirm the JSONL lands at the
@@ -1467,6 +1779,214 @@ mod tests {
         let session = toolpath_pi::reader::read_session_from_file(&out_path)
             .expect("Pi reader accepts the JSONL");
         assert_eq!(session.header.id, session_uuid);
+    }
+
+    #[test]
+    fn codex_output_to_file_writes_jsonl() {
+        let temp = tempfile::tempdir().unwrap();
+        let out_path = temp.path().join("out").join("codex.jsonl");
+
+        let session_uuid = "019dabc6-8fef-7681-a054-b5bb75fcb97d";
+        let artifact = format!("codex://{}", session_uuid);
+        let mut extra = HashMap::new();
+        extra.insert("role".into(), serde_json::json!("user"));
+        extra.insert("text".into(), serde_json::json!("hello codex"));
+        let step = Step {
+            step: StepIdentity {
+                id: "step-001".into(),
+                parents: vec![],
+                actor: "human:alex".into(),
+                timestamp: "2026-04-20T16:00:00Z".into(),
+            },
+            change: {
+                let mut m = HashMap::new();
+                m.insert(
+                    artifact,
+                    ArtifactChange {
+                        raw: None,
+                        structural: Some(StructuralChange {
+                            change_type: "conversation.append".into(),
+                            extra,
+                        }),
+                    },
+                );
+                m
+            },
+            meta: None,
+        };
+        let graph = toolpath::v1::Graph::from_path(toolpath::v1::Path {
+            path: PathIdentity {
+                id: "test-path".into(),
+                base: None,
+                head: "step-001".into(),
+                graph_ref: None,
+            },
+            steps: vec![step],
+            meta: None,
+        });
+        let input_path = temp.path().join("doc.json");
+        std::fs::write(&input_path, graph.to_json().unwrap()).unwrap();
+
+        run_codex(
+            input_path.to_string_lossy().to_string(),
+            None,
+            Some(out_path.clone()),
+        )
+        .expect("export codex --output");
+
+        assert!(out_path.exists(), "output file missing");
+        let body = std::fs::read_to_string(&out_path).unwrap();
+        let lines: Vec<&str> = body.lines().collect();
+        assert_eq!(lines.len(), 4, "got {} lines: {:?}", lines.len(), lines);
+        assert!(lines[0].contains("\"type\":\"session_meta\""));
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(lines[0]).unwrap()["payload"]["id"].as_str(),
+            Some(session_uuid)
+        );
+        assert!(lines[1].contains("\"type\":\"turn_context\""));
+        assert!(lines[2].contains("\"type\":\"response_item\""));
+        assert!(lines[3].contains("\"type\":\"event_msg\""));
+        assert!(lines[3].contains("\"type\":\"user_message\""));
+
+        let reread = toolpath_codex::RolloutReader::read_session(&out_path)
+            .expect("Codex reader accepts the JSONL");
+        assert_eq!(reread.id, session_uuid);
+        assert_eq!(reread.lines.len(), 4);
+    }
+
+    #[test]
+    fn codex_writes_into_dated_sessions_dir_with_project() {
+        // `--project DIR` mode writes to
+        // `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl`. The
+        // resolver's HOME-based default is overridden via $HOME.
+        use toolpath_codex::PathResolver;
+
+        let temp = tempfile::tempdir().unwrap();
+        let fake_home = temp.path().join("home");
+        std::fs::create_dir_all(&fake_home).unwrap();
+        let project_dir = temp.path().join("myproj");
+        std::fs::create_dir_all(&project_dir).unwrap();
+
+        let session_uuid = "019dabc6-aaaa-bbbb-cccc-ddddeeeefff0";
+        let artifact = format!("codex://{}", session_uuid);
+        let mut extra = HashMap::new();
+        extra.insert("role".into(), serde_json::json!("user"));
+        extra.insert("text".into(), serde_json::json!("hi codex via project"));
+        let step = Step {
+            step: StepIdentity {
+                id: "step-001".into(),
+                parents: vec![],
+                actor: "human:alex".into(),
+                timestamp: "2026-05-15T10:30:00.000Z".into(),
+            },
+            change: {
+                let mut m = HashMap::new();
+                m.insert(
+                    artifact,
+                    ArtifactChange {
+                        raw: None,
+                        structural: Some(StructuralChange {
+                            change_type: "conversation.append".into(),
+                            extra,
+                        }),
+                    },
+                );
+                m
+            },
+            meta: None,
+        };
+        let graph = toolpath::v1::Graph::from_path(toolpath::v1::Path {
+            path: PathIdentity {
+                id: "test-path".into(),
+                base: None,
+                head: "step-001".into(),
+                graph_ref: None,
+            },
+            steps: vec![step],
+            meta: None,
+        });
+        let input_path = temp.path().join("doc.json");
+        std::fs::write(&input_path, graph.to_json().unwrap()).unwrap();
+
+        let _g = crate::config::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let prior_home = std::env::var_os("HOME");
+        unsafe {
+            std::env::set_var("HOME", &fake_home);
+        }
+        let result = run_codex(
+            input_path.to_string_lossy().to_string(),
+            Some(project_dir.clone()),
+            None,
+        );
+        unsafe {
+            match prior_home {
+                Some(v) => std::env::set_var("HOME", v),
+                None => std::env::remove_var("HOME"),
+            }
+        }
+        result.expect("export codex --project");
+
+        let resolver = PathResolver::new().with_home(&fake_home);
+        let dated_dir = resolver
+            .sessions_root()
+            .unwrap()
+            .join("2026")
+            .join("05")
+            .join("15");
+        assert!(
+            dated_dir.exists(),
+            "expected dated sessions dir at {}",
+            dated_dir.display()
+        );
+        let rollout_files: Vec<PathBuf> = std::fs::read_dir(&dated_dir)
+            .unwrap()
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .filter(|p| {
+                p.is_file()
+                    && p.file_name()
+                        .and_then(|n| n.to_str())
+                        .is_some_and(|s| s.starts_with("rollout-") && s.ends_with(".jsonl"))
+            })
+            .collect();
+        assert_eq!(rollout_files.len(), 1, "expected one rollout-*.jsonl");
+
+        let name = rollout_files[0]
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap();
+        assert!(name.contains("2026-05-15T10-30-00"), "got name: {}", name);
+        assert!(
+            name.contains("019dabc6"),
+            "filename should embed the uuid prefix; got {}",
+            name
+        );
+
+        let reread =
+            toolpath_codex::RolloutReader::read_session(&rollout_files[0]).expect("read back");
+        assert_eq!(reread.id, session_uuid);
+    }
+
+    #[test]
+    fn codex_rejects_non_single_path_graph() {
+        let temp = tempfile::tempdir().unwrap();
+        let input_path = temp.path().join("input.json");
+        let empty_graph = serde_json::json!({
+            "graph": { "id": "g1" },
+            "paths": [],
+        });
+        std::fs::write(&input_path, empty_graph.to_string()).unwrap();
+
+        let project = temp.path().join("proj");
+        std::fs::create_dir_all(&project).unwrap();
+        let err = run_codex(
+            input_path.to_string_lossy().to_string(),
+            Some(project),
+            None,
+        )
+        .expect_err("should reject empty graph");
+        assert!(err.to_string().contains("single-path"));
     }
 
     #[test]

@@ -118,6 +118,41 @@ pub fn tool_category(name: &str) -> Option<ToolCategory> {
     }
 }
 
+/// Reverse of [`tool_category`]: pick Codex's preferred native tool name
+/// for a generic [`ToolCategory`], using call args to disambiguate.
+///
+/// Used by [`crate::project::CodexProjector`] when projecting tool calls
+/// from foreign harnesses. Notably, FileWrite always maps to `write_file`
+/// (not `apply_patch`) — `apply_patch` takes a free-form V4A patch
+/// string rather than JSON args, so projecting JSON-shape edits as
+/// `apply_patch` would emit a malformed CustomToolCall. Same-harness
+/// round-trips preserve the source name verbatim before reaching this
+/// fallback.
+pub fn native_name(category: ToolCategory, args: &Value) -> Option<&'static str> {
+    match category {
+        ToolCategory::Shell => Some("exec_command"),
+        ToolCategory::FileRead => Some(if args.get("file_paths").is_some() {
+            "read_many_files"
+        } else if args.get("path").is_some() && args.get("file_path").is_none() {
+            "list_dir"
+        } else {
+            "read_file"
+        }),
+        ToolCategory::FileSearch => Some(if args.get("pattern").is_some() {
+            "grep_search"
+        } else {
+            "glob"
+        }),
+        ToolCategory::FileWrite => Some("write_file"),
+        ToolCategory::Network => Some(if args.get("url").is_some() {
+            "web_fetch"
+        } else {
+            "web_search"
+        }),
+        ToolCategory::Delegation => Some("spawn_agent"),
+    }
+}
+
 // ── Session → ConversationView ─────────────────────────────────────
 
 /// Convert a parsed Codex [`Session`] to the provider-agnostic
