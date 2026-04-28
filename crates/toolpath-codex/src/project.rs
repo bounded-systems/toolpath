@@ -289,11 +289,6 @@ fn emit_user_message(turn: &Turn, lines: &mut Vec<RolloutLine>) {
         "message",
         serde_json::to_value(&msg).unwrap_or(Value::Null),
     ));
-    // Codex's TUI plays back conversation history from `event_msg`
-    // lines, not from `response_item` lines. Without a paired
-    // `user_message` event, `codex resume` would render this turn as
-    // empty scrollback. Skip the bracket-prefixed system caveats — the
-    // real TUI never shows those.
     if !turn.text.is_empty() && !is_system_caveat(&turn.text) {
         lines.push(event_msg_line(
             &turn.timestamp,
@@ -308,9 +303,6 @@ fn emit_user_message(turn: &Turn, lines: &mut Vec<RolloutLine>) {
     }
 }
 
-/// User text wrapped in `<…>` tags is a system-injected envelope
-/// (caveats, environment_context, …), not something the user typed.
-/// Real Codex sessions don't surface these in the TUI scrollback.
 fn is_system_caveat(text: &str) -> bool {
     let trimmed = text.trim_start();
     trimmed.starts_with('<') && trimmed.contains('>')
@@ -391,31 +383,17 @@ fn emit_assistant(
         ));
     }
 
-    // The assistant's text-only message line. Codex annotates every
-    // assistant message with a `phase`: `"final"` on the closing
-    // message of the session, `"commentary"` on every other. We don't
-    // emit `end_turn` — real rollouts use `phase` alone for this and
-    // leave `end_turn` absent.
-    // Real Codex uses `final_answer` (not `final`) for the closing
-    // assistant turn. The TUI gates scrollback rendering on this exact
-    // string — a wrong value silently drops the message from view.
+    // The TUI gates scrollback rendering on `final_answer` exactly —
+    // `final` would silently drop the closing message from view.
     let phase = Some(if is_final_assistant {
         "final_answer".to_string()
     } else {
         "commentary".to_string()
     });
-    // Emit a message line whenever the turn carries text, when it has
-    // neither tool calls nor thinking (so something has to anchor the
-    // assistant turn), or when this is the final assistant — the
-    // final-phase marker has to land on a message line for Codex to
-    // see it.
     if is_final_assistant
         || !turn.text.is_empty()
         || (turn.tool_uses.is_empty() && turn.thinking.is_none())
     {
-        // Emit the message even when text is empty if there are no
-        // other lines to anchor the assistant turn — keeps it
-        // representable.
         let msg = Message {
             role: "assistant".to_string(),
             content: vec![ContentPart::OutputText {
@@ -432,9 +410,6 @@ fn emit_assistant(
             "message",
             serde_json::to_value(&msg).unwrap_or(Value::Null),
         ));
-        // Pair the response_item message with an `event_msg.agent_message`
-        // so `codex resume` actually shows this text in scrollback.
-        // Empty-text anchor messages don't need a UI counterpart.
         if !turn.text.is_empty() {
             lines.push(event_msg_line(
                 &turn.timestamp,
@@ -448,8 +423,6 @@ fn emit_assistant(
         }
     }
 
-    // Tool calls + their outputs. Each tool_use produces two lines
-    // (call + output) when a result is present, one line otherwise.
     let tool_extras = codex
         .get("tool_extras")
         .and_then(Value::as_object)
@@ -461,10 +434,6 @@ fn emit_assistant(
     }
 }
 
-/// Decide whether to emit a CustomToolCall (free-form input) or a
-/// FunctionCall (JSON args). `apply_patch` is the only stable Codex
-/// custom-tool name we expect to round-trip; everything else is a
-/// JSON FunctionCall.
 fn emit_tool_call(
     turn: &Turn,
     tu: &ToolInvocation,
@@ -480,9 +449,6 @@ fn emit_tool_call(
         .unwrap_or_default();
 
     if name == "apply_patch" {
-        // Source was Codex apply_patch — preserve the free-form input.
-        // For Codex-source `tu.input` is a JSON string already;
-        // otherwise we stringify whatever's there.
         let input_str = match &tu.input {
             Value::String(s) => s.clone(),
             other => serde_json::to_string(other).unwrap_or_default(),
@@ -515,7 +481,6 @@ fn emit_tool_call(
                 "custom_tool_call_output",
                 serde_json::to_value(&out).unwrap_or(Value::Null),
             ));
-            // TUI counterpart for patch results.
             lines.push(event_msg_line(
                 &turn.timestamp,
                 json!({
@@ -529,9 +494,7 @@ fn emit_tool_call(
             ));
         }
     } else {
-        // Codex's `arguments` field is a JSON STRING (the JSON-encoded
-        // args), not a parsed value. We serialize the input value to
-        // its string form to match the wire shape.
+        // Codex's `arguments` field is a JSON-encoded string, not a parsed value.
         let arguments = serde_json::to_string(&tu.input).unwrap_or_else(|_| "{}".into());
         let call = FunctionCall {
             name: name.to_string(),
@@ -557,12 +520,8 @@ fn emit_tool_call(
                 "function_call_output",
                 serde_json::to_value(&out).unwrap_or(Value::Null),
             ));
-            // For shell tools, emit an `exec_command_end` event_msg so
-            // the TUI renders the command + output in scrollback. We
-            // don't have a real process_id, exit code, or duration from
-            // foreign sources, but the TUI reads `status: "completed"`
-            // and `parsed_cmd` to render the entry, so those have to
-            // be present even if synthetic.
+            // The TUI requires `status: "completed"` and a populated
+            // `parsed_cmd` to render the entry; synthetic values are fine.
             if name == "exec_command" || name == "shell" {
                 let cmd_str = tu
                     .input
@@ -635,9 +594,6 @@ fn response_item_line(timestamp: &str, inner_type: &str, mut payload: Value) -> 
     }
 }
 
-/// Build an `event_msg` rollout line. The TUI renders conversation
-/// history from these (separately from `response_item` lines, which are
-/// the model's input feed).
 fn event_msg_line(timestamp: &str, payload: Value) -> RolloutLine {
     RolloutLine {
         timestamp: timestamp.to_string(),

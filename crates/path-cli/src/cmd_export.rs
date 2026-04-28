@@ -742,12 +742,8 @@ fn write_into_codex_project(session: &toolpath_codex::Session) -> Result<()> {
     let bytes = serialize_codex_jsonl(session)?;
     std::fs::write(&out_path, &bytes).with_context(|| format!("write {}", out_path.display()))?;
 
-    // Codex's `resume` command reads its session catalog from
-    // `state_5.sqlite` (`threads` table), not from a filesystem scan.
-    // Without a row pointing at our rollout file, the projected
-    // session is invisible to `codex resume`. Best-effort: register
-    // it now. If the DB doesn't exist (Codex never run on this
-    // machine) or the schema has moved, log a warning and continue.
+    // `codex resume` reads from state_5.sqlite, not the filesystem;
+    // without a thread row the rollout file is invisible.
     let codex_dir = resolver
         .codex_dir()
         .map_err(|e| anyhow::anyhow!("Cannot resolve ~/.codex dir: {}", e))?;
@@ -779,15 +775,8 @@ fn write_into_codex_project(session: &toolpath_codex::Session) -> Result<()> {
     Ok(())
 }
 
-/// Insert (or replace) a row in Codex's `threads` table so `codex
-/// resume <id>` sees the projected session.
-///
-/// Returns `Ok(true)` on success, `Ok(false)` if the DB doesn't exist,
-/// or an `Err` if the DB exists but the insert failed. Schema-fragile
-/// — we target the `state_5.sqlite` shape observed in Codex 0.118.0
-/// (threads table with id/rollout_path/source/cwd/title/sandbox_policy/
-/// approval_mode/etc.). When Codex bumps to `state_6`, this code needs
-/// updating.
+/// Schema-fragile: targets the `state_5.sqlite` shape. Returns
+/// `Ok(false)` when the DB doesn't exist.
 #[cfg(not(target_os = "emscripten"))]
 fn register_codex_thread(
     codex_dir: &std::path::Path,
@@ -814,9 +803,6 @@ fn register_codex_thread(
     let first_user_message = first_user_message_text(session);
     let title = first_user_message.chars().take(200).collect::<String>();
     let has_user_event: i64 = if first_user_message.is_empty() { 0 } else { 1 };
-    // Default sandbox_policy mirrors what Codex itself writes for a
-    // workspace-write session. Stored as a JSON blob in the `threads`
-    // table.
     let sandbox_policy_json = serde_json::json!({
         "type": "workspace-write",
         "writable_roots": [],
@@ -826,8 +812,6 @@ fn register_codex_thread(
     })
     .to_string();
 
-    // INSERT OR REPLACE so re-exporting the same session id updates
-    // the row instead of erroring on the primary key.
     conn.execute(
         "INSERT OR REPLACE INTO threads (
             id, rollout_path, created_at, updated_at, source, model_provider,
@@ -859,9 +843,6 @@ fn register_codex_thread(
     Ok(true)
 }
 
-/// Pull the first user-text message out of a Codex session for the
-/// `threads.first_user_message` / `threads.title` columns. Empty when
-/// the session has no user messages yet.
 #[cfg(not(target_os = "emscripten"))]
 fn first_user_message_text(session: &toolpath_codex::Session) -> String {
     use toolpath_codex::types::{ResponseItem, RolloutItem};
