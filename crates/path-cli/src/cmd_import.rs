@@ -12,7 +12,7 @@ use anyhow::Context;
 use anyhow::Result;
 use clap::Subcommand;
 use std::path::PathBuf;
-use toolpath::v1::Document;
+use toolpath::v1::Graph;
 
 use crate::cmd_cache::{make_id, write_cached};
 
@@ -173,7 +173,7 @@ pub fn run(args: ImportArgs, pretty: bool) -> Result<()> {
 
 struct DerivedDoc {
     cache_id: String,
-    doc: Document,
+    doc: Graph,
 }
 
 fn emit(docs: &[DerivedDoc], force: bool, no_cache: bool, pretty: bool) -> Result<()> {
@@ -198,11 +198,15 @@ fn emit(docs: &[DerivedDoc], force: bool, no_cache: bool, pretty: bool) -> Resul
     Ok(())
 }
 
-fn doc_summary(doc: &Document) -> String {
-    match doc {
-        Document::Graph(g) => format!("graph {} ({} paths)", g.graph.id, g.paths.len()),
-        Document::Path(p) => format!("path {} ({} steps)", p.path.id, p.steps.len()),
-        Document::Step(s) => format!("step {}", s.step.id),
+fn doc_summary(doc: &Graph) -> String {
+    if let Some(p) = doc.single_path() {
+        format!(
+            "graph {} (1 path, {} steps)",
+            doc.graph.id,
+            p.steps.len()
+        )
+    } else {
+        format!("graph {} ({} paths)", doc.graph.id, doc.paths.len())
     }
 }
 
@@ -304,14 +308,9 @@ fn short_path_hash(s: &str) -> String {
     format!("{:08x}", h.finish() as u32)
 }
 
-/// Extract the inner identifier from a document (Path.path.id, Graph.graph.id, etc.)
-/// without source prefix.
-fn doc_inner_id(doc: &Document) -> String {
-    match doc {
-        Document::Graph(g) => g.graph.id.clone(),
-        Document::Path(p) => p.path.id.clone(),
-        Document::Step(s) => s.step.id.clone(),
-    }
+/// Extract the inner identifier from a graph (without source prefix).
+fn doc_inner_id(doc: &Graph) -> String {
+    doc.graph.id.clone()
 }
 
 fn derive_github(
@@ -356,7 +355,7 @@ fn derive_github(
         };
 
         let path = toolpath_github::derive_pull_request(&owner, &repo_name, pr_number, &config)?;
-        let doc = Document::Path(path);
+        let doc = Graph::from_path(path);
         let cache_id = make_id("github", &format!("{owner}_{repo_name}-{pr_number}"));
         Ok(vec![DerivedDoc { cache_id, doc }])
     }
@@ -459,7 +458,7 @@ fn wrap_paths_claude(paths: Vec<toolpath::v1::Path>) -> Result<Vec<DerivedDoc>> 
             let cache_id = make_id("claude", &p.path.id);
             DerivedDoc {
                 cache_id,
-                doc: Document::Path(p),
+                doc: Graph::from_path(p),
             }
         })
         .collect())
@@ -649,7 +648,7 @@ fn wrap_paths_gemini(paths: Vec<toolpath::v1::Path>) -> Result<Vec<DerivedDoc>> 
             let cache_id = make_id("gemini", &p.path.id);
             DerivedDoc {
                 cache_id,
-                doc: Document::Path(p),
+                doc: Graph::from_path(p),
             }
         })
         .collect())
@@ -803,7 +802,7 @@ fn wrap_paths_codex(paths: Vec<toolpath::v1::Path>) -> Result<Vec<DerivedDoc>> {
             let cache_id = make_id("codex", &p.path.id);
             DerivedDoc {
                 cache_id,
-                doc: Document::Path(p),
+                doc: Graph::from_path(p),
             }
         })
         .collect())
@@ -931,7 +930,7 @@ fn wrap_paths_opencode(paths: Vec<toolpath::v1::Path>) -> Result<Vec<DerivedDoc>
             let cache_id = make_id("opencode", &p.path.id);
             DerivedDoc {
                 cache_id,
-                doc: Document::Path(p),
+                doc: Graph::from_path(p),
             }
         })
         .collect())
@@ -1014,8 +1013,7 @@ fn derive_pi_with_manager(
             if sessions.is_empty() {
                 anyhow::bail!("No Pi sessions found for project: {}", p);
             }
-            let graph = toolpath_pi::derive::derive_graph(&sessions, None, &config);
-            let doc = Document::Graph(graph);
+            let doc = toolpath_pi::derive::derive_graph(&sessions, None, &config);
             let cache_id = make_id("pi", &doc_inner_id(&doc));
             return Ok(vec![DerivedDoc { cache_id, doc }]);
         }
@@ -1031,7 +1029,9 @@ fn derive_pi_with_manager(
                         .ok_or_else(|| {
                             anyhow::anyhow!("No Pi sessions found for project: {}", p)
                         })?;
-                    let doc = Document::Path(toolpath_pi::derive::derive_path(&session, &config));
+                    let doc = Graph::from_path(toolpath_pi::derive::derive_path(
+                        &session, &config,
+                    ));
                     let cache_id = make_id("pi", &doc_inner_id(&doc));
                     return Ok(vec![DerivedDoc { cache_id, doc }]);
                 }
@@ -1042,7 +1042,8 @@ fn derive_pi_with_manager(
                     .most_recent_session(&p)
                     .map_err(|e| anyhow::anyhow!("{}", e))?
                     .ok_or_else(|| anyhow::anyhow!("No Pi sessions found for project: {}", p))?;
-                let doc = Document::Path(toolpath_pi::derive::derive_path(&session, &config));
+                let doc =
+                    Graph::from_path(toolpath_pi::derive::derive_path(&session, &config));
                 let cache_id = make_id("pi", &doc_inner_id(&doc));
                 return Ok(vec![DerivedDoc { cache_id, doc }]);
             }
@@ -1070,7 +1071,7 @@ fn derive_pi_with_manager(
         let session = manager
             .read_session(project_path, session_id)
             .map_err(|e| anyhow::anyhow!("{}", e))?;
-        let doc = Document::Path(toolpath_pi::derive::derive_path(&session, &config));
+        let doc = Graph::from_path(toolpath_pi::derive::derive_path(&session, &config));
         let cache_id = make_id("pi", &doc_inner_id(&doc));
         docs.push(DerivedDoc { cache_id, doc });
     }
@@ -1252,7 +1253,7 @@ fn derive_pathbase(target: String, url_flag: Option<String>) -> Result<Vec<Deriv
         // use that. Otherwise fall back to the stored session's server.
         let base_url = base.unwrap_or_else(|| session.url.clone());
         let body = traces_get(&base_url, &session.token, &id)?;
-        let doc = Document::from_json(&body)
+        let doc = Graph::from_json(&body)
             .map_err(|e| anyhow::anyhow!("server returned a non-toolpath document: {e}"))?;
         let cache_id = make_id("pathbase", &id);
         Ok(vec![DerivedDoc { cache_id, doc }])

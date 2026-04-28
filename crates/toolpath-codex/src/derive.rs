@@ -525,7 +525,7 @@ mod tests {
     use crate::CodexConvo;
     use std::fs;
     use tempfile::TempDir;
-    use toolpath::v1::Document;
+    use toolpath::v1::Graph;
 
     fn fixture_session(body: &str) -> (TempDir, CodexConvo, String) {
         let temp = TempDir::new().unwrap();
@@ -644,18 +644,14 @@ mod tests {
         let (_t, mgr, id) = fixture_session(&minimal_body());
         let session = mgr.read_session(&id).unwrap();
         let path = derive_path(&session, &DeriveConfig::default());
-        let doc = Document::Path(path);
+        let doc = Graph::from_path(path);
         let json = doc.to_json().unwrap();
         // Round-trip through the validator (it just needs to parse).
-        let parsed = Document::from_json(&json).unwrap();
-        match parsed {
-            Document::Path(p) => {
-                assert!(!p.steps.is_empty());
-                let ancestors = toolpath::v1::query::ancestors(&p.steps, &p.path.head);
-                assert_eq!(ancestors.len(), p.steps.len(), "all steps on head ancestry");
-            }
-            _ => panic!("expected Path"),
-        }
+        let parsed = Graph::from_json(&json).unwrap();
+        let p = parsed.single_path().expect("single-path graph");
+        assert!(!p.steps.is_empty());
+        let ancestors = toolpath::v1::query::ancestors(&p.steps, &p.path.head);
+        assert_eq!(ancestors.len(), p.steps.len(), "all steps on head ancestry");
     }
 
     #[test]

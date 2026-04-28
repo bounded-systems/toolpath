@@ -9,7 +9,7 @@
 
 use anyhow::Result;
 use clap::Subcommand;
-use toolpath::v1::Document;
+use toolpath::v1::Graph;
 
 #[derive(Subcommand, Debug)]
 pub enum ShowSource {
@@ -63,7 +63,7 @@ pub enum ShowSource {
 
 pub fn run(source: ShowSource) -> Result<()> {
     let path = derive_one(source)?;
-    let doc = Document::Path(path);
+    let doc = Graph::from_path(path);
     let opts = toolpath_md::RenderOptions {
         detail: toolpath_md::Detail::Summary,
         front_matter: false,

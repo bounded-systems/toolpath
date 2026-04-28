@@ -126,17 +126,13 @@ fn load_path_doc(input: &str) -> Result<toolpath::v1::Path> {
     let file = cache_ref(input)?;
     let json = std::fs::read_to_string(&file)
         .with_context(|| format!("Failed to read {}", file.display()))?;
-    let doc: toolpath::v1::Document = serde_json::from_str(&json)
+    let doc = toolpath::v1::Graph::from_json(&json)
         .map_err(|e| anyhow::anyhow!("Failed to parse toolpath document: {}", e))?;
-    match doc {
-        toolpath::v1::Document::Path(p) => Ok(p),
-        toolpath::v1::Document::Step(_) => {
-            anyhow::bail!("Expected a Path document, got a Step")
-        }
-        toolpath::v1::Document::Graph(_) => {
-            anyhow::bail!("Expected a Path document, got a Graph")
-        }
-    }
+    doc.into_single_path().ok_or_else(|| {
+        anyhow::anyhow!(
+            "expected a single-path graph; the source graph holds zero or multiple paths"
+        )
+    })
 }
 
 #[cfg(not(target_os = "emscripten"))]
@@ -427,7 +423,7 @@ fn run_pathbase(input: String, url_flag: Option<String>) -> Result<()> {
             .with_context(|| format!("Failed to read {}", file.display()))?;
         // Validate locally so we give a clean error rather than relying on
         // the server to reject malformed payloads.
-        toolpath::v1::Document::from_json(&body)
+        toolpath::v1::Graph::from_json(&body)
             .map_err(|e| anyhow::anyhow!("Invalid toolpath document: {}", e))?;
 
         let session = require_session()?;
@@ -476,7 +472,7 @@ mod tests {
     use std::collections::HashMap;
     use toolpath::v1::{ArtifactChange, PathIdentity, Step, StepIdentity, StructuralChange};
 
-    fn make_path_doc() -> toolpath::v1::Document {
+    fn make_path_doc() -> toolpath::v1::Graph {
         let artifact_key = "agent://claude/test-session";
 
         let init_step = Step {
@@ -541,7 +537,7 @@ mod tests {
             meta: None,
         };
 
-        toolpath::v1::Document::Path(path)
+        toolpath::v1::Graph::from_path(path)
     }
 
     #[test]
@@ -568,24 +564,40 @@ mod tests {
     }
 
     #[test]
-    fn claude_rejects_non_path_doc() {
+    fn claude_rejects_multi_path_graph() {
         let temp = tempfile::tempdir().unwrap();
         let input_path = temp.path().join("input.json");
-        let step = Step {
-            step: StepIdentity {
-                id: "s1".into(),
-                parents: vec![],
-                actor: "human:x".into(),
-                timestamp: "2024-01-01T00:00:00Z".into(),
+        let make_path = |id: &str| toolpath::v1::Path {
+            path: PathIdentity {
+                id: id.into(),
+                base: None,
+                head: "s1".into(),
+                graph_ref: None,
             },
-            change: HashMap::new(),
+            steps: vec![Step {
+                step: StepIdentity {
+                    id: "s1".into(),
+                    parents: vec![],
+                    actor: "human:x".into(),
+                    timestamp: "2024-01-01T00:00:00Z".into(),
+                },
+                change: HashMap::new(),
+                meta: None,
+            }],
             meta: None,
         };
-        let doc = toolpath::v1::Document::Step(step);
-        std::fs::write(&input_path, serde_json::to_string(&doc).unwrap()).unwrap();
+        let multi = toolpath::v1::Graph {
+            graph: toolpath::v1::GraphIdentity { id: "g".into() },
+            paths: vec![
+                toolpath::v1::PathOrRef::Path(Box::new(make_path("p1"))),
+                toolpath::v1::PathOrRef::Path(Box::new(make_path("p2"))),
+            ],
+            meta: None,
+        };
+        std::fs::write(&input_path, serde_json::to_string(&multi).unwrap()).unwrap();
 
         let err = run_claude(input_path.to_string_lossy().to_string(), None, None).unwrap_err();
-        assert!(err.to_string().contains("Step"));
+        assert!(err.to_string().contains("single-path graph"));
     }
 
     #[test]
@@ -659,7 +671,7 @@ mod tests {
             },
             meta: None,
         };
-        let doc = toolpath::v1::Document::Path(toolpath::v1::Path {
+        let doc = toolpath::v1::Graph::from_path(toolpath::v1::Path {
             path: PathIdentity {
                 id: "test-path".into(),
                 base: None,
@@ -726,21 +738,37 @@ mod tests {
     }
 
     #[test]
-    fn gemini_rejects_non_path_doc() {
+    fn gemini_rejects_multi_path_graph() {
         let temp = tempfile::tempdir().unwrap();
         let input_path = temp.path().join("input.json");
-        let step = Step {
-            step: StepIdentity {
-                id: "s1".into(),
-                parents: vec![],
-                actor: "human:x".into(),
-                timestamp: "2024-01-01T00:00:00Z".into(),
+        let make_path = |id: &str| toolpath::v1::Path {
+            path: PathIdentity {
+                id: id.into(),
+                base: None,
+                head: "s1".into(),
+                graph_ref: None,
             },
-            change: HashMap::new(),
+            steps: vec![Step {
+                step: StepIdentity {
+                    id: "s1".into(),
+                    parents: vec![],
+                    actor: "human:x".into(),
+                    timestamp: "2024-01-01T00:00:00Z".into(),
+                },
+                change: HashMap::new(),
+                meta: None,
+            }],
             meta: None,
         };
-        let doc = toolpath::v1::Document::Step(step);
-        std::fs::write(&input_path, serde_json::to_string(&doc).unwrap()).unwrap();
+        let multi = toolpath::v1::Graph {
+            graph: toolpath::v1::GraphIdentity { id: "g".into() },
+            paths: vec![
+                toolpath::v1::PathOrRef::Path(Box::new(make_path("p1"))),
+                toolpath::v1::PathOrRef::Path(Box::new(make_path("p2"))),
+            ],
+            meta: None,
+        };
+        std::fs::write(&input_path, serde_json::to_string(&multi).unwrap()).unwrap();
 
         let project = temp.path().join("proj");
         std::fs::create_dir_all(&project).unwrap();
@@ -749,8 +777,8 @@ mod tests {
             Some(project),
             None,
         )
-        .expect_err("should reject Step doc");
-        assert!(err.to_string().contains("Step"));
+        .expect_err("should reject multi-path graph");
+        assert!(err.to_string().contains("single-path graph"));
     }
 
     #[test]
@@ -792,7 +820,7 @@ mod tests {
             },
             meta: None,
         };
-        let doc = toolpath::v1::Document::Path(toolpath::v1::Path {
+        let doc = toolpath::v1::Graph::from_path(toolpath::v1::Path {
             path: PathIdentity {
                 id: "test-path".into(),
                 base: None,

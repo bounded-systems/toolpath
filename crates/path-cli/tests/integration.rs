@@ -104,7 +104,8 @@ fn derive_git_produces_path() {
         .arg(&branch)
         .assert()
         .success()
-        .stdout(predicate::str::contains("\"Path\""))
+        .stdout(predicate::str::contains("\"graph\":"))
+        .stdout(predicate::str::contains("\"paths\":"))
         .stdout(predicate::str::contains("\"head\":"))
         .stdout(predicate::str::contains("\"steps\""));
 }
@@ -126,7 +127,7 @@ fn derive_git_has_correct_actor() {
     assert!(output.status.success());
 
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    let path = &json["Path"];
+    let path = &json["paths"][0];
 
     // Actor is derived from git author email username (alice@example.com → alice)
     let step = &path["steps"][0];
@@ -156,7 +157,7 @@ fn derive_git_has_change_with_diff() {
     assert!(output.status.success());
 
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    let step = &json["Path"]["steps"][0];
+    let step = &json["paths"][0]["steps"][0];
 
     // The step should have a change for main.rs with a raw diff
     let change = &step["change"]["main.rs"];
@@ -188,7 +189,7 @@ fn derive_git_has_intent_from_commit_message() {
     assert!(output.status.success());
 
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    let step = &json["Path"]["steps"][0];
+    let step = &json["paths"][0]["steps"][0];
 
     // meta.intent is the commit message
     assert_eq!(step["meta"]["intent"], "fix the bug");
@@ -211,7 +212,7 @@ fn derive_git_has_base_uri() {
     assert!(output.status.success());
 
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    let base = &json["Path"]["path"]["base"];
+    let base = &json["paths"][0]["path"]["base"];
 
     // base.uri should be a file:// URL pointing to the repo
     let uri = base["uri"].as_str().unwrap();
@@ -311,7 +312,8 @@ fn merge_produces_graph() {
         .arg(examples_dir().join("path-02-local-session.path.json"))
         .assert()
         .success()
-        .stdout(predicate::str::contains("\"Graph\""));
+        .stdout(predicate::str::contains("\"graph\":"))
+        .stdout(predicate::str::contains("\"paths\":"));
 }
 
 // ── .path.jsonl input ────────────────────────────────────────────────
@@ -324,7 +326,7 @@ fn validate_accepts_path_jsonl() {
         .arg(examples_dir().join("path-02-local-session.path.jsonl"))
         .assert()
         .success()
-        .stdout(predicate::str::contains("Valid: Path"));
+        .stdout(predicate::str::contains("Valid: Graph"));
 }
 
 #[test]
@@ -378,7 +380,8 @@ fn merge_accepts_path_jsonl() {
         .arg(examples_dir().join("path-02-local-session.path.jsonl"))
         .assert()
         .success()
-        .stdout(predicate::str::contains("\"Graph\""));
+        .stdout(predicate::str::contains("\"graph\":"))
+        .stdout(predicate::str::contains("\"paths\":"));
 }
 
 // ── Auth ─────────────────────────────────────────────────────────────
@@ -451,7 +454,8 @@ fn import_git_no_cache_emits_stdout_json() {
         .arg(&branch)
         .assert()
         .success()
-        .stdout(predicate::str::contains("\"Path\""))
+        .stdout(predicate::str::contains("\"graph\":"))
+        .stdout(predicate::str::contains("\"paths\":"))
         .stdout(predicate::str::contains("\"steps\""));
 }
 
@@ -641,6 +645,7 @@ fn derive_alias_still_works_with_warning() {
         .arg(&branch)
         .assert()
         .success()
-        .stdout(predicate::str::contains("\"Path\""))
+        .stdout(predicate::str::contains("\"graph\":"))
+        .stdout(predicate::str::contains("\"paths\":"))
         .stderr(predicate::str::contains("deprecated"));
 }

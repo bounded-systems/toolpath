@@ -14,10 +14,9 @@ pub mod v1 {
     //!
     //! The top-level types you construct, serialize, and deserialize:
     //!
-    //! - [`Document`] — an enum that can hold any of the three document kinds
-    //! - [`Step`] — a single atomic change
+    //! - [`Graph`] — a collection of paths; the single root type of every Toolpath document
     //! - [`Path`] — a sequence of steps (e.g. a PR)
-    //! - [`Graph`] — a collection of paths (e.g. a release)
+    //! - [`Step`] — a single atomic change
     //!
     //! # Change representation
     //!
@@ -134,8 +133,8 @@ pub mod v1 {
     }
 
     pub use crate::types::{
-        ActorDefinition, ArtifactChange, Base, Document, Graph, GraphIdentity, GraphMeta, Identity,
-        Key, Path, PathIdentity, PathMeta, PathOrRef, PathRef, Ref, Signature, Step, StepIdentity,
+        ActorDefinition, ArtifactChange, Base, Graph, GraphIdentity, GraphMeta, Identity, Key,
+        Path, PathIdentity, PathMeta, PathOrRef, PathRef, Ref, Signature, Step, StepIdentity,
         StepMeta, StructuralChange, VcsSource,
     };
 }

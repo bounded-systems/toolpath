@@ -573,7 +573,7 @@ mod tests {
     use rusqlite::Connection;
     use std::fs;
     use tempfile::TempDir;
-    use toolpath::v1::Document;
+    use toolpath::v1::Graph;
 
     fn fixture(body_sql: &str) -> (TempDir, OpencodeConvo, PathResolver) {
         let temp = TempDir::new().unwrap();
@@ -665,15 +665,12 @@ mod tests {
             },
             &resolver,
         );
-        let doc = Document::Path(p);
+        let doc = Graph::from_path(p);
         let json = doc.to_json().unwrap();
-        let parsed = Document::from_json(&json).unwrap();
-        if let Document::Path(pp) = parsed {
-            let anc = toolpath::v1::query::ancestors(&pp.steps, &pp.path.head);
-            assert_eq!(anc.len(), pp.steps.len(), "all steps on head ancestry");
-        } else {
-            panic!("expected Path");
-        }
+        let parsed = Graph::from_json(&json).unwrap();
+        let pp = parsed.single_path().expect("single-path graph");
+        let anc = toolpath::v1::query::ancestors(&pp.steps, &pp.path.head);
+        assert_eq!(anc.len(), pp.steps.len(), "all steps on head ancestry");
     }
 
     #[test]

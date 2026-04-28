@@ -2,14 +2,19 @@
 source: crates/path-cli/tests/render_md_snapshots.rs
 expression: "render_md(\"step-03-formatter.json\")"
 ---
-# step-003
+# path-step-003
 
-**Actor:** `tool:rustfmt/1.7.0`
+**Head:** `step-003`
+**Changes:** +8 −3 across 1 files
+**Steps:** 1 | **Artifacts:** 1 | **Dead ends:** 0
+
+## Timeline
+
+### step-003 — tool:rustfmt/1.7.0 [head]
+
 **Timestamp:** 2026-01-29T10:05:30Z
 **Parents:** `step-002`
 
 > Automatic code formatting
-
-## Changes
 
 - `src/auth/validator.rs` (+8 -3)

@@ -12,7 +12,7 @@
 //! non-canonical fields like `resultDisplay` structured payloads that
 //! only survive via provider extras).
 
-use toolpath::v1::{Document, Path};
+use toolpath::v1::{Graph, Path};
 use toolpath_convo::{
     ConversationProjector, ConversationView, DeriveConfig, derive_path, extract_conversation,
 };
@@ -44,13 +44,12 @@ fn roundtrip(source: &Conversation) -> (ConversationView, Conversation, Path) {
 
     // Serialize & re-parse the Path to simulate on-disk storage.
     let path = derive_path(&view_forward, &DeriveConfig::default());
-    let doc = Document::Path(path.clone());
-    let json = serde_json::to_string(&doc).expect("serialize Document");
-    let back: Document = serde_json::from_str(&json).expect("parse Document");
-    let reparsed = match back {
-        Document::Path(p) => p,
-        other => panic!("expected Path, got {:?}", other),
-    };
+    let doc = Graph::from_path(path.clone());
+    let json = serde_json::to_string(&doc).expect("serialize Graph");
+    let back: Graph = serde_json::from_str(&json).expect("parse Graph");
+    let reparsed = back
+        .into_single_path()
+        .expect("single-path graph");
 
     let view_back = extract_conversation(&reparsed);
     let projector = GeminiProjector::new()

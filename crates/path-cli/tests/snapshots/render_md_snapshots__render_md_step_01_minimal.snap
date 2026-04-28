@@ -2,11 +2,16 @@
 source: crates/path-cli/tests/render_md_snapshots.rs
 expression: "render_md(\"step-01-minimal.json\")"
 ---
-# step-001
+# path-step-001
 
-**Actor:** `human:alex`
+**Head:** `step-001`
+**Changes:** +1 −1 across 1 files
+**Steps:** 1 | **Artifacts:** 1 | **Dead ends:** 0
+
+## Timeline
+
+### step-001 — human:alex [head]
+
 **Timestamp:** 2026-01-29T10:00:00Z
-
-## Changes
 
 - `src/main.rs` (+1 -1)

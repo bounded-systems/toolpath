@@ -265,7 +265,7 @@ fn compute_diff(old: &str, new: &str) -> Option<String> {
     }
 }
 
-fn format_output(doc: v1::Document, pretty: bool) -> Result<String> {
+fn format_output(doc: v1::Graph, pretty: bool) -> Result<String> {
     if pretty {
         doc.to_json_pretty()
     } else {
@@ -583,7 +583,7 @@ fn run_annotate(
 
 fn run_export(session_path: PathBuf, pretty: bool) -> Result<()> {
     let (path_doc, _state) = load_session(&session_path)?;
-    let doc = v1::Document::Path(path_doc);
+    let doc = v1::Graph::from_path(path_doc);
     let json = format_output(doc, pretty)?;
     println!("{json}");
     Ok(())
@@ -591,7 +591,7 @@ fn run_export(session_path: PathBuf, pretty: bool) -> Result<()> {
 
 fn run_close(session_path: PathBuf, pretty: bool, output: Option<PathBuf>) -> Result<()> {
     let (path_doc, _state) = load_session(&session_path)?;
-    let doc = v1::Document::Path(path_doc);
+    let doc = v1::Graph::from_path(path_doc);
     let json = format_output(doc, pretty)?;
 
     if let Some(out) = output {
@@ -787,8 +787,7 @@ mod tests {
 
     #[test]
     fn test_format_output_pretty_and_compact() {
-        let step = v1::Step::new("s1", "human:alex", "2026-01-01T00:00:00Z");
-        let doc = v1::Document::Step(step);
+        let doc = v1::Graph::new("g1");
 
         let pretty = format_output(doc.clone(), true).unwrap();
         assert!(pretty.contains('\n'));
@@ -996,17 +995,13 @@ mod tests {
         assert_eq!(def.identities[0].id, "alex@example.com");
 
         // The session IS the document — actors survive as-is
-        let doc = v1::Document::Path(path_doc);
+        let doc = v1::Graph::from_path(path_doc);
         let json = doc.to_json_pretty().unwrap();
         assert!(json.contains("alex@example.com"));
-        let parsed = v1::Document::from_json(&json).unwrap();
-        match parsed {
-            v1::Document::Path(p) => {
-                let a = p.meta.unwrap().actors.unwrap();
-                assert_eq!(a["human:alex"].name.as_deref(), Some("Alex"));
-            }
-            _ => panic!("Expected Path"),
-        }
+        let parsed = v1::Graph::from_json(&json).unwrap();
+        let p = parsed.single_path().expect("single-path graph");
+        let a = p.meta.as_ref().unwrap().actors.as_ref().unwrap();
+        assert_eq!(a["human:alex"].name.as_deref(), Some("Alex"));
     }
 
     // ── record_step ──────────────────────────────────────────────────────
@@ -1715,17 +1710,13 @@ mod tests {
         let json = std::fs::read_to_string(&output_path).unwrap();
         assert!(!json.contains("\"track\""));
         assert!(!json.contains("buffer_cache"));
-        let doc = v1::Document::from_json(&json).unwrap();
-        match doc {
-            v1::Document::Path(p) => {
-                assert_eq!(p.path.id, "track-test-1");
-                assert_eq!(p.path.head, "step-001");
-                assert_eq!(p.steps.len(), 1);
-                // No title/source set → no meta block
-                assert!(p.meta.is_none());
-            }
-            _ => panic!("Expected Path"),
-        }
+        let doc = v1::Graph::from_json(&json).unwrap();
+        let p = doc.single_path().expect("single-path graph");
+        assert_eq!(p.path.id, "track-test-1");
+        assert_eq!(p.path.head, "step-001");
+        assert_eq!(p.steps.len(), 1);
+        // No title/source set → no meta block
+        assert!(p.meta.is_none());
     }
 
     #[test]
@@ -1850,13 +1841,11 @@ mod tests {
         assert_eq!(exported.steps.len(), 1);
 
         // Roundtrip through JSON
-        let doc = v1::Document::Path(exported);
+        let doc = v1::Graph::from_path(exported);
         let json = doc.to_json_pretty().unwrap();
-        let parsed = v1::Document::from_json(&json).unwrap();
-        match parsed {
-            v1::Document::Path(p) => assert_eq!(p.path.id, "track-test-doc"),
-            _ => panic!("Expected Path"),
-        }
+        let parsed = v1::Graph::from_json(&json).unwrap();
+        let p = parsed.single_path().expect("single-path graph");
+        assert_eq!(p.path.id, "track-test-doc");
     }
 
     #[test]
@@ -1920,22 +1909,18 @@ mod tests {
 
         // Load = export-ready (track state already stripped)
         let (path_doc, _) = load_session(&session_path).unwrap();
-        let doc = v1::Document::Path(path_doc.clone());
+        let doc = v1::Graph::from_path(path_doc.clone());
 
         // Serialize and parse back
         let json = doc.to_json_pretty().unwrap();
-        let parsed = v1::Document::from_json(&json).unwrap();
-        match parsed {
-            v1::Document::Path(p) => {
-                assert_eq!(p.steps.len(), 3);
-                assert_eq!(p.path.head, "step-003");
-                // Verify DAG structure preserved
-                assert!(p.steps[0].step.parents.is_empty());
-                assert_eq!(p.steps[1].step.parents, vec!["step-001"]);
-                assert_eq!(p.steps[2].step.parents, vec!["step-001"]);
-            }
-            _ => panic!("Expected Path"),
-        }
+        let parsed = v1::Graph::from_json(&json).unwrap();
+        let p = parsed.single_path().expect("single-path graph");
+        assert_eq!(p.steps.len(), 3);
+        assert_eq!(p.path.head, "step-003");
+        // Verify DAG structure preserved
+        assert!(p.steps[0].step.parents.is_empty());
+        assert_eq!(p.steps[1].step.parents, vec!["step-001"]);
+        assert_eq!(p.steps[2].step.parents, vec!["step-001"]);
 
         // Dead ends still work after roundtrip
         let dead = v1::query::dead_ends(&path_doc.steps, &path_doc.path.head);
@@ -2026,34 +2011,30 @@ mod tests {
         let json = std::fs::read_to_string(&output).unwrap();
         assert!(!json.contains("buffer_cache"));
         assert!(!json.contains("seq_to_step"));
-        let doc = v1::Document::from_json(&json).unwrap();
-        match doc {
-            v1::Document::Path(p) => {
-                assert_eq!(p.steps.len(), 3);
-                assert_eq!(p.path.head, "step-003");
-                assert!(p.path.base.is_some());
+        let doc = v1::Graph::from_json(&json).unwrap();
+        let p = doc.single_path().expect("single-path graph");
+        assert_eq!(p.steps.len(), 3);
+        assert_eq!(p.path.head, "step-003");
+        assert!(p.path.base.is_some());
 
-                // step-001: root
-                assert!(p.steps[0].step.parents.is_empty());
-                // step-002: child of step-001
-                assert_eq!(p.steps[1].step.parents, vec!["step-001"]);
-                // step-003: also child of step-001 (branch!)
-                assert_eq!(p.steps[2].step.parents, vec!["step-001"]);
+        // step-001: root
+        assert!(p.steps[0].step.parents.is_empty());
+        // step-002: child of step-001
+        assert_eq!(p.steps[1].step.parents, vec!["step-001"]);
+        // step-003: also child of step-001 (branch!)
+        assert_eq!(p.steps[2].step.parents, vec!["step-001"]);
 
-                // Note was set on step-002 (it was head when we noted)
-                let intent = p.steps[1].meta.as_ref().and_then(|m| m.intent.as_ref());
-                assert_eq!(intent, Some(&"Add line 4".to_string()));
+        // Note was set on step-002 (it was head when we noted)
+        let intent = p.steps[1].meta.as_ref().and_then(|m| m.intent.as_ref());
+        assert_eq!(intent, Some(&"Add line 4".to_string()));
 
-                // Dead ends: step-002 is not on ancestry of step-003
-                let dead = v1::query::dead_ends(&p.steps, &p.path.head);
-                assert_eq!(dead.len(), 1);
-                assert_eq!(dead[0].step.id, "step-002");
+        // Dead ends: step-002 is not on ancestry of step-003
+        let dead = v1::query::dead_ends(&p.steps, &p.path.head);
+        assert_eq!(dead.len(), 1);
+        assert_eq!(dead[0].step.id, "step-002");
 
-                // No title/source set → no meta block
-                assert!(p.meta.is_none());
-            }
-            _ => panic!("Expected Path"),
-        }
+        // No title/source set → no meta block
+        assert!(p.meta.is_none());
     }
 
     // ── record_step --source ──────────────────────────────────────────────
@@ -2136,17 +2117,13 @@ mod tests {
         assert_eq!(source.extra["dirty"], serde_json::json!(true));
 
         // Roundtrip through JSON
-        let doc = v1::Document::Path(path_doc);
+        let doc = v1::Graph::from_path(path_doc);
         let json = doc.to_json_pretty().unwrap();
-        let parsed = v1::Document::from_json(&json).unwrap();
-        match parsed {
-            v1::Document::Path(p) => {
-                let s = p.steps[0].meta.as_ref().unwrap().source.as_ref().unwrap();
-                assert_eq!(s.extra["branch"], serde_json::json!("main"));
-                assert_eq!(s.extra["dirty"], serde_json::json!(true));
-            }
-            _ => panic!("Expected Path"),
-        }
+        let parsed = v1::Graph::from_json(&json).unwrap();
+        let p = parsed.single_path().expect("single-path graph");
+        let s = p.steps[0].meta.as_ref().unwrap().source.as_ref().unwrap();
+        assert_eq!(s.extra["branch"], serde_json::json!("main"));
+        assert_eq!(s.extra["dirty"], serde_json::json!(true));
     }
 
     #[test]
@@ -2167,20 +2144,16 @@ mod tests {
 
         // Export (load strips track state)
         let (path_doc, _) = load_session(&session_path).unwrap();
-        let doc = v1::Document::Path(path_doc);
+        let doc = v1::Graph::from_path(path_doc);
         let json = doc.to_json_pretty().unwrap();
 
         // Parse back and verify source persisted
-        let parsed = v1::Document::from_json(&json).unwrap();
-        match parsed {
-            v1::Document::Path(p) => {
-                let source = p.steps[0].meta.as_ref().unwrap().source.as_ref().unwrap();
-                assert_eq!(source.vcs_type, "git");
-                assert_eq!(source.revision, "def456");
-                assert_eq!(source.change_id.as_deref(), Some("I1234"));
-            }
-            _ => panic!("Expected Path"),
-        }
+        let parsed = v1::Graph::from_json(&json).unwrap();
+        let p = parsed.single_path().expect("single-path graph");
+        let source = p.steps[0].meta.as_ref().unwrap().source.as_ref().unwrap();
+        assert_eq!(source.vcs_type, "git");
+        assert_eq!(source.revision, "def456");
+        assert_eq!(source.change_id.as_deref(), Some("I1234"));
     }
 
     // ── run_annotate ──────────────────────────────────────────────────────

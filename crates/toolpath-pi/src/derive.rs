@@ -8,7 +8,7 @@
 use crate::PiConvo;
 use crate::provider::session_to_view;
 use crate::reader::PiSession;
-use toolpath::v1::{Document, Graph, GraphIdentity, GraphMeta, Path, PathOrRef};
+use toolpath::v1::{Graph, GraphIdentity, GraphMeta, Path, PathOrRef};
 use toolpath_convo::DeriveConfig;
 
 /// Derive a Toolpath [`Path`] from a single Pi session.
@@ -48,16 +48,15 @@ pub fn derive_graph(sessions: &[PiSession], title: Option<&str>, config: &Derive
     }
 }
 
-/// Derive a [`Document::Graph`] from all sessions in a project.
+/// Derive a [`Graph`] from all sessions in a project.
 pub fn derive_project(
     manager: &PiConvo,
     project: &str,
     title: Option<&str>,
     config: &DeriveConfig,
-) -> crate::Result<Document> {
+) -> crate::Result<Graph> {
     let sessions = manager.read_all_sessions(project)?;
-    let graph = derive_graph(&sessions, title, config);
-    Ok(Document::Graph(graph))
+    Ok(derive_graph(&sessions, title, config))
 }
 
 #[cfg(test)]

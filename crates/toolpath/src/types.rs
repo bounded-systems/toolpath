@@ -1,55 +1,15 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-/// A Toolpath document — either a [`Step`], [`Path`], or [`Graph`].
-///
-/// `Document` is externally tagged: the top-level JSON object has a single key
-/// (`"Step"`, `"Path"`, or `"Graph"`) whose value is the document content.
-/// This makes the document type unambiguous without inspecting the inner fields.
-///
-/// # Minimal JSON for each variant
-///
-/// **Step** — the simplest document:
-/// ```json
-/// {
-///   "Step": {
-///     "step": { "id": "s1", "actor": "human:alex", "timestamp": "2026-01-29T10:00:00Z" },
-///     "change": { "src/main.rs": { "raw": "@@ …" } }
-///   }
-/// }
-/// ```
-///
-/// **Path** — a sequence of steps:
-/// ```json
-/// {
-///   "Path": {
-///     "path": { "id": "p1", "head": "s2" },
-///     "steps": [ … ]
-///   }
-/// }
-/// ```
-///
-/// **Graph** — a collection of paths:
-/// ```json
-/// {
-///   "Graph": {
-///     "graph": { "id": "g1" },
-///     "paths": [ … ]
-///   }
-/// }
-/// ```
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum Document {
-    Graph(Graph),
-    Path(Path),
-    Step(Step),
-}
-
 // ============================================================================
-// Graph
+// Graph — the root of every Toolpath document
 // ============================================================================
 
-/// A collection of related paths — for example, all the PRs in a release.
+/// A Toolpath document — a collection of related paths.
+///
+/// `Graph` is the single root type of the format. Every `.path.json` file
+/// deserializes to a `Graph`; a "single PR" or "single conversation" is just
+/// a Graph that happens to contain one path.
 ///
 /// Each entry in `paths` is either an inline [`Path`] or a [`PathRef`]
 /// pointing to an external document (via `$ref`).
@@ -378,23 +338,6 @@ pub struct Signature {
 // Convenience methods
 // ============================================================================
 
-impl Document {
-    /// Parse a Toolpath document from JSON
-    pub fn from_json(json: &str) -> Result<Self, serde_json::Error> {
-        serde_json::from_str(json)
-    }
-
-    /// Serialize to JSON
-    pub fn to_json(&self) -> Result<String, serde_json::Error> {
-        serde_json::to_string(self)
-    }
-
-    /// Serialize to pretty-printed JSON
-    pub fn to_json_pretty(&self) -> Result<String, serde_json::Error> {
-        serde_json::to_string_pretty(self)
-    }
-}
-
 impl Graph {
     /// Create a new graph with the given ID
     pub fn new(id: impl Into<String>) -> Self {
@@ -402,6 +345,56 @@ impl Graph {
             graph: GraphIdentity { id: id.into() },
             paths: Vec::new(),
             meta: None,
+        }
+    }
+
+    /// Create a single-path graph wrapping `path`. The graph's id mirrors the
+    /// path's id so an unwrapped path-shaped derivation has a natural lift to
+    /// the top-level format.
+    pub fn from_path(path: Path) -> Self {
+        Self {
+            graph: GraphIdentity {
+                id: path.path.id.clone(),
+            },
+            paths: vec![PathOrRef::Path(Box::new(path))],
+            meta: None,
+        }
+    }
+
+    /// Parse a Toolpath document from JSON.
+    pub fn from_json(json: &str) -> Result<Self, serde_json::Error> {
+        serde_json::from_str(json)
+    }
+
+    /// Serialize to JSON.
+    pub fn to_json(&self) -> Result<String, serde_json::Error> {
+        serde_json::to_string(self)
+    }
+
+    /// Serialize to pretty-printed JSON.
+    pub fn to_json_pretty(&self) -> Result<String, serde_json::Error> {
+        serde_json::to_string_pretty(self)
+    }
+
+    /// If this graph wraps exactly one inline path, return it.
+    pub fn single_path(&self) -> Option<&Path> {
+        if self.paths.len() != 1 {
+            return None;
+        }
+        match &self.paths[0] {
+            PathOrRef::Path(p) => Some(p),
+            PathOrRef::Ref(_) => None,
+        }
+    }
+
+    /// If this graph wraps exactly one inline path, take it by consuming the graph.
+    pub fn into_single_path(self) -> Option<Path> {
+        if self.paths.len() != 1 {
+            return None;
+        }
+        match self.paths.into_iter().next().unwrap() {
+            PathOrRef::Path(p) => Some(*p),
+            PathOrRef::Ref(_) => None,
         }
     }
 }
@@ -547,24 +540,19 @@ mod tests {
         assert_eq!(toolpath_base.ref_str, None);
     }
 
-    // ── Document serialization ─────────────────────────────────────────
+    // ── Graph serialization ────────────────────────────────────────────
 
     #[test]
-    fn test_document_step_roundtrip() {
-        let step =
-            Step::new("s1", "human:alex", "2026-01-01T00:00:00Z").with_raw_change("f.rs", "@@");
-        let doc = Document::Step(step);
-        let json = doc.to_json().unwrap();
-        assert!(json.contains("\"Step\""));
-        let parsed = Document::from_json(&json).unwrap();
-        match parsed {
-            Document::Step(s) => assert_eq!(s.step.id, "s1"),
-            _ => panic!("Expected Step"),
-        }
+    fn test_graph_roundtrip_empty() {
+        let graph = Graph::new("g1");
+        let json = graph.to_json().unwrap();
+        let parsed = Graph::from_json(&json).unwrap();
+        assert_eq!(parsed.graph.id, "g1");
+        assert!(parsed.paths.is_empty());
     }
 
     #[test]
-    fn test_document_path_roundtrip() {
+    fn test_graph_from_path_wraps_single_path() {
         let step =
             Step::new("s1", "human:alex", "2026-01-01T00:00:00Z").with_raw_change("f.rs", "@@");
         let path = Path {
@@ -577,45 +565,54 @@ mod tests {
             steps: vec![step],
             meta: None,
         };
-        let doc = Document::Path(path);
-        let json = doc.to_json().unwrap();
-        assert!(json.contains("\"Path\""));
-        let parsed = Document::from_json(&json).unwrap();
-        match parsed {
-            Document::Path(p) => {
-                assert_eq!(p.path.id, "p1");
-                assert_eq!(p.steps.len(), 1);
-            }
-            _ => panic!("Expected Path"),
-        }
+        let graph = Graph::from_path(path);
+        assert_eq!(graph.graph.id, "p1");
+        let json = graph.to_json().unwrap();
+        let parsed = Graph::from_json(&json).unwrap();
+        let inline = parsed.single_path().unwrap();
+        assert_eq!(inline.path.id, "p1");
+        assert_eq!(inline.steps.len(), 1);
     }
 
     #[test]
-    fn test_document_graph_roundtrip() {
+    fn test_graph_to_json_pretty() {
         let graph = Graph::new("g1");
-        let doc = Document::Graph(graph);
-        let json = doc.to_json().unwrap();
-        assert!(json.contains("\"Graph\""));
-        let parsed = Document::from_json(&json).unwrap();
-        match parsed {
-            Document::Graph(g) => assert_eq!(g.graph.id, "g1"),
-            _ => panic!("Expected Graph"),
-        }
+        let json = graph.to_json_pretty().unwrap();
+        assert!(json.contains('\n'));
+        assert!(json.contains("\"g1\""));
     }
 
     #[test]
-    fn test_document_to_json_pretty() {
-        let step = Step::new("s1", "human:alex", "2026-01-01T00:00:00Z");
-        let doc = Document::Step(step);
-        let json = doc.to_json_pretty().unwrap();
-        assert!(json.contains('\n')); // pretty-printed has newlines
-        assert!(json.contains("\"Step\""));
-    }
-
-    #[test]
-    fn test_document_from_json_invalid() {
-        let result = Document::from_json("not json");
+    fn test_graph_from_json_invalid() {
+        let result = Graph::from_json("not json");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_graph_single_path_none_for_multi() {
+        let p1 = Path::new("p1", None, "s1");
+        let p2 = Path::new("p2", None, "s2");
+        let graph = Graph {
+            graph: GraphIdentity { id: "g".into() },
+            paths: vec![
+                PathOrRef::Path(Box::new(p1)),
+                PathOrRef::Path(Box::new(p2)),
+            ],
+            meta: None,
+        };
+        assert!(graph.single_path().is_none());
+    }
+
+    #[test]
+    fn test_graph_single_path_none_for_ref() {
+        let graph = Graph {
+            graph: GraphIdentity { id: "g".into() },
+            paths: vec![PathOrRef::Ref(PathRef {
+                ref_url: "https://example.com/p.json".into(),
+            })],
+            meta: None,
+        };
+        assert!(graph.single_path().is_none());
     }
 
     // ── Graph::new ─────────────────────────────────────────────────────

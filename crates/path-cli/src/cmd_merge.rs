@@ -1,10 +1,10 @@
 use anyhow::{Context, Result};
-use toolpath::v1::{Document, Graph, GraphIdentity, GraphMeta, PathOrRef};
+use toolpath::v1::{Graph, GraphIdentity, GraphMeta, PathOrRef};
 
-/// Merge multiple Toolpath documents into a single Graph.
+/// Merge multiple Toolpath graphs into a single combined Graph.
 ///
 /// Accepts file paths as arguments. Use `-` to read one document from stdin.
-/// Each input can be a Step, Path, or Graph — paths are extracted and combined.
+/// Each input is a Graph; their `paths` collections are concatenated into one.
 pub fn run(inputs: Vec<String>, title: Option<String>, pretty: bool) -> Result<()> {
     let mut all_paths = Vec::new();
 
@@ -15,12 +15,12 @@ pub fn run(inputs: Vec<String>, title: Option<String>, pretty: bool) -> Result<(
             std::io::stdin()
                 .read_to_string(&mut buf)
                 .context("Failed to read from stdin")?;
-            Document::from_json(&buf).with_context(|| format!("Failed to parse {:?}", input))?
+            Graph::from_json(&buf).with_context(|| format!("Failed to parse {:?}", input))?
         } else {
             crate::io::read_document_auto(std::path::Path::new(input))?
         };
 
-        extract_paths(doc, &mut all_paths);
+        all_paths.extend(doc.paths);
     }
 
     let doc = merge_into_graph(all_paths, title);
@@ -35,45 +35,18 @@ pub fn run(inputs: Vec<String>, title: Option<String>, pretty: bool) -> Result<(
     Ok(())
 }
 
-/// Extract paths from a document and append them to the collector.
-fn extract_paths(doc: Document, paths: &mut Vec<PathOrRef>) {
-    match doc {
-        Document::Graph(g) => {
-            paths.extend(g.paths);
-        }
-        Document::Path(p) => {
-            paths.push(PathOrRef::Path(Box::new(p)));
-        }
-        Document::Step(s) => {
-            // Wrap a bare step in a minimal path
-            let step_id = s.step.id.clone();
-            let path = toolpath::v1::Path {
-                path: toolpath::v1::PathIdentity {
-                    id: format!("path-{}", step_id),
-                    base: None,
-                    head: step_id,
-                    graph_ref: None,
-                },
-                steps: vec![s],
-                meta: None,
-            };
-            paths.push(PathOrRef::Path(Box::new(path)));
-        }
-    }
-}
-
-/// Merge collected paths into a Graph document.
-fn merge_into_graph(paths: Vec<PathOrRef>, title: Option<String>) -> Document {
+/// Merge collected paths into a single Graph document.
+fn merge_into_graph(paths: Vec<PathOrRef>, title: Option<String>) -> Graph {
     let graph_id = format!("graph-merged-{}", paths.len());
 
-    Document::Graph(Graph {
+    Graph {
         graph: GraphIdentity { id: graph_id },
         paths,
         meta: title.map(|t| GraphMeta {
             title: Some(t),
             ..Default::default()
         }),
-    })
+    }
 }
 
 #[cfg(test)]
@@ -104,86 +77,13 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_paths_from_path_doc() {
-        let path = make_path("p1", vec![make_step("s1", "human:alex")]);
-        let doc = Document::Path(path);
-        let mut paths = Vec::new();
-        extract_paths(doc, &mut paths);
-        assert_eq!(paths.len(), 1);
-        if let PathOrRef::Path(p) = &paths[0] {
-            assert_eq!(p.path.id, "p1");
-        } else {
-            panic!("Expected Path, got Ref");
-        }
-    }
-
-    #[test]
-    fn test_extract_paths_from_graph_doc() {
-        let p1 = make_path("p1", vec![make_step("s1", "human:alex")]);
-        let p2 = make_path("p2", vec![make_step("s2", "agent:claude")]);
-        let graph = Graph {
-            graph: GraphIdentity {
-                id: "g1".to_string(),
-            },
-            paths: vec![PathOrRef::Path(Box::new(p1)), PathOrRef::Path(Box::new(p2))],
-            meta: None,
-        };
-        let doc = Document::Graph(graph);
-        let mut paths = Vec::new();
-        extract_paths(doc, &mut paths);
-        assert_eq!(paths.len(), 2);
-    }
-
-    #[test]
-    fn test_extract_paths_from_step_doc() {
-        let step = make_step("s1", "human:alex");
-        let doc = Document::Step(step);
-        let mut paths = Vec::new();
-        extract_paths(doc, &mut paths);
-        assert_eq!(paths.len(), 1);
-        if let PathOrRef::Path(p) = &paths[0] {
-            assert_eq!(p.path.id, "path-s1");
-            assert_eq!(p.steps.len(), 1);
-            assert_eq!(p.path.head, "s1");
-        } else {
-            panic!("Expected Path, got Ref");
-        }
-    }
-
-    #[test]
-    fn test_extract_paths_from_graph_with_refs() {
-        let p1 = make_path("p1", vec![make_step("s1", "human:alex")]);
-        let graph = Graph {
-            graph: GraphIdentity {
-                id: "g1".to_string(),
-            },
-            paths: vec![
-                PathOrRef::Path(Box::new(p1)),
-                PathOrRef::Ref(PathRef {
-                    ref_url: "https://example.com/path.json".to_string(),
-                }),
-            ],
-            meta: None,
-        };
-        let doc = Document::Graph(graph);
-        let mut paths = Vec::new();
-        extract_paths(doc, &mut paths);
-        assert_eq!(paths.len(), 2);
-        assert!(matches!(&paths[1], PathOrRef::Ref(_)));
-    }
-
-    #[test]
     fn test_merge_into_graph_no_title() {
         let p1 = make_path("p1", vec![make_step("s1", "human:alex")]);
         let paths = vec![PathOrRef::Path(Box::new(p1))];
         let doc = merge_into_graph(paths, None);
-        if let Document::Graph(g) = doc {
-            assert_eq!(g.graph.id, "graph-merged-1");
-            assert_eq!(g.paths.len(), 1);
-            assert!(g.meta.is_none());
-        } else {
-            panic!("Expected Graph");
-        }
+        assert_eq!(doc.graph.id, "graph-merged-1");
+        assert_eq!(doc.paths.len(), 1);
+        assert!(doc.meta.is_none());
     }
 
     #[test]
@@ -192,24 +92,30 @@ mod tests {
         let p2 = make_path("p2", vec![make_step("s2", "agent:claude")]);
         let paths = vec![PathOrRef::Path(Box::new(p1)), PathOrRef::Path(Box::new(p2))];
         let doc = merge_into_graph(paths, Some("My Graph".to_string()));
-        if let Document::Graph(g) = doc {
-            assert_eq!(g.graph.id, "graph-merged-2");
-            assert_eq!(g.paths.len(), 2);
-            assert_eq!(g.meta.unwrap().title.unwrap(), "My Graph");
-        } else {
-            panic!("Expected Graph");
-        }
+        assert_eq!(doc.graph.id, "graph-merged-2");
+        assert_eq!(doc.paths.len(), 2);
+        assert_eq!(doc.meta.unwrap().title.unwrap(), "My Graph");
+    }
+
+    #[test]
+    fn test_merge_into_graph_preserves_refs() {
+        let p1 = make_path("p1", vec![make_step("s1", "human:alex")]);
+        let paths = vec![
+            PathOrRef::Path(Box::new(p1)),
+            PathOrRef::Ref(PathRef {
+                ref_url: "https://example.com/path.json".to_string(),
+            }),
+        ];
+        let doc = merge_into_graph(paths, None);
+        assert_eq!(doc.paths.len(), 2);
+        assert!(matches!(&doc.paths[1], PathOrRef::Ref(_)));
     }
 
     #[test]
     fn test_merge_empty() {
         let doc = merge_into_graph(Vec::new(), None);
-        if let Document::Graph(g) = doc {
-            assert_eq!(g.graph.id, "graph-merged-0");
-            assert!(g.paths.is_empty());
-        } else {
-            panic!("Expected Graph");
-        }
+        assert_eq!(doc.graph.id, "graph-merged-0");
+        assert!(doc.paths.is_empty());
     }
 
     #[test]
@@ -218,12 +124,8 @@ mod tests {
         let paths = vec![PathOrRef::Path(Box::new(p1))];
         let doc = merge_into_graph(paths, Some("Test".to_string()));
         let json = doc.to_json().unwrap();
-        let parsed = Document::from_json(&json).unwrap();
-        if let Document::Graph(g) = parsed {
-            assert_eq!(g.paths.len(), 1);
-        } else {
-            panic!("Expected Graph after roundtrip");
-        }
+        let parsed = Graph::from_json(&json).unwrap();
+        assert_eq!(parsed.paths.len(), 1);
     }
 
     #[test]
@@ -234,7 +136,7 @@ mod tests {
         let p1 = make_path("p1", vec![make_step("s1", "human:alex")]);
         let f1 = dir.path().join("doc1.json");
         let mut file1 = std::fs::File::create(&f1).unwrap();
-        write!(file1, "{}", Document::Path(p1).to_json().unwrap()).unwrap();
+        write!(file1, "{}", Graph::from_path(p1).to_json().unwrap()).unwrap();
 
         let result = run(
             vec![f1.to_str().unwrap().to_string()],
@@ -256,10 +158,9 @@ mod tests {
         let f2 = dir.path().join("doc2.json");
         let mut file1 = std::fs::File::create(&f1).unwrap();
         let mut file2 = std::fs::File::create(&f2).unwrap();
-        write!(file1, "{}", Document::Path(p1).to_json().unwrap()).unwrap();
-        write!(file2, "{}", Document::Path(p2).to_json().unwrap()).unwrap();
+        write!(file1, "{}", Graph::from_path(p1).to_json().unwrap()).unwrap();
+        write!(file2, "{}", Graph::from_path(p2).to_json().unwrap()).unwrap();
 
-        // run() prints to stdout — just verify it doesn't error
         let result = run(
             vec![
                 f1.to_str().unwrap().to_string(),

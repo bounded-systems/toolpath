@@ -156,30 +156,29 @@ mod native {
     use git2::{Commit, DiffOptions, Oid, Repository};
     use std::collections::HashMap;
     use toolpath::v1::{
-        ActorDefinition, ArtifactChange, Base, Document, Graph, GraphIdentity, GraphMeta, Identity,
-        Path, PathIdentity, PathMeta, PathOrRef, Step, StepIdentity, StepMeta, VcsSource,
+        ActorDefinition, ArtifactChange, Base, Graph, GraphIdentity, GraphMeta, Identity, Path,
+        PathIdentity, PathMeta, PathOrRef, Step, StepIdentity, StepMeta, VcsSource,
     };
 
     use super::{BranchInfo, BranchSpec, DeriveConfig};
 
-    /// Derive a Toolpath [`Document`] from the given repository and branch names.
+    /// Derive a Toolpath [`Graph`] from the given repository and branch names.
     ///
     /// Branch strings are parsed as [`BranchSpec`]s (supporting `"name:start"` syntax).
-    /// A single branch produces a [`Document::Path`]; multiple branches produce a
-    /// [`Document::Graph`].
+    /// A single branch yields a single-path graph (one entry in `paths`); multiple
+    /// branches yield a multi-path graph.
     pub fn derive(
         repo: &Repository,
         branches: &[String],
         config: &DeriveConfig,
-    ) -> Result<Document> {
+    ) -> Result<Graph> {
         let branch_specs: Vec<BranchSpec> = branches.iter().map(|s| BranchSpec::parse(s)).collect();
 
         if branch_specs.len() == 1 {
             let path_doc = derive_path(repo, &branch_specs[0], config)?;
-            Ok(Document::Path(path_doc))
+            Ok(Graph::from_path(path_doc))
         } else {
-            let graph_doc = derive_graph(repo, &branch_specs, config)?;
-            Ok(Document::Graph(graph_doc))
+            derive_graph(repo, &branch_specs, config)
         }
     }
 
@@ -793,15 +792,12 @@ mod native {
             };
 
             let default = find_default_branch(&repo).unwrap_or("main".to_string());
-            let result = derive(&repo, &[default], &config).unwrap();
-
-            match result {
-                Document::Path(path) => {
-                    assert!(!path.steps.is_empty(), "Expected at least one step");
-                    assert!(path.path.base.is_some());
-                }
-                _ => panic!("Expected Document::Path for single branch"),
-            }
+            let graph = derive(&repo, &[default], &config).unwrap();
+            let path = graph
+                .single_path()
+                .expect("single-branch derive yields a single-path graph");
+            assert!(!path.steps.is_empty(), "Expected at least one step");
+            assert!(path.path.base.is_some());
         }
 
         #[test]
@@ -837,16 +833,10 @@ mod native {
                 base: None,
             };
 
-            let result = derive(&repo, &[default_branch, "feature".to_string()], &config).unwrap();
-
-            match result {
-                Document::Graph(graph) => {
-                    assert_eq!(graph.paths.len(), 2);
-                    assert!(graph.meta.is_some());
-                    assert_eq!(graph.meta.unwrap().title.unwrap(), "Test Graph");
-                }
-                _ => panic!("Expected Document::Graph for multiple branches"),
-            }
+            let graph = derive(&repo, &[default_branch, "feature".to_string()], &config).unwrap();
+            assert_eq!(graph.paths.len(), 2);
+            assert!(graph.meta.is_some());
+            assert_eq!(graph.meta.unwrap().title.unwrap(), "Test Graph");
         }
 
         #[test]
@@ -891,13 +881,11 @@ mod native {
                 base: Some(oid1.to_string()),
             };
 
-            let result = derive(&repo, &[default], &config).unwrap();
-            match result {
-                Document::Path(path) => {
-                    assert!(!path.steps.is_empty());
-                }
-                _ => panic!("Expected Document::Path"),
-            }
+            let graph = derive(&repo, &[default], &config).unwrap();
+            let path = graph
+                .single_path()
+                .expect("single-branch derive yields a single-path graph");
+            assert!(!path.steps.is_empty());
         }
 
         #[test]
@@ -965,7 +953,7 @@ mod native {
                 base: Some(oid1.to_string()),
             };
 
-            let result = derive(
+            let g = derive(
                 &repo,
                 &[
                     "b1".to_string(),
@@ -977,12 +965,7 @@ mod native {
             )
             .unwrap();
 
-            match result {
-                Document::Graph(g) => {
-                    assert!(g.graph.id.contains("4-branches"));
-                }
-                _ => panic!("Expected Graph"),
-            }
+            assert!(g.graph.id.contains("4-branches"));
         }
 
         #[test]

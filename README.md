@@ -220,7 +220,7 @@ path list codex --format tsv \
 ### Core types
 
 ```rust
-use toolpath::{Step, Path, Base, Document};
+use toolpath::{Step, Path, Base, Graph};
 
 let step = Step::new("step-001", "human:alex", "2026-01-29T10:00:00Z")
     .with_parent("step-000")
@@ -232,6 +232,11 @@ let path = Path::new(
     Some(Base::vcs("github:org/repo", "abc123")),
     "step-001",
 );
+
+// Graph is the single root type of every Toolpath document. Wrap a single
+// Path as a one-path Graph for serialization:
+let graph = Graph::from_path(path);
+let json = graph.to_json_pretty()?;
 ```
 
 ### Query operations

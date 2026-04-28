@@ -235,7 +235,7 @@ fn test_cli_project_command() {
         meta: None,
     };
 
-    let doc = toolpath::v1::Document::Path(path);
+    let doc = toolpath::v1::Graph::from_path(path);
 
     // 2. Write the Path document to a temp file.
     let temp = tempfile::TempDir::new().unwrap();

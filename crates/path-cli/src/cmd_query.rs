@@ -1,7 +1,7 @@
 use anyhow::Result;
 use clap::Subcommand;
 use std::path::PathBuf;
-use toolpath::v1::{Document, query};
+use toolpath::v1::{Graph, PathOrRef, query};
 
 #[derive(Subcommand, Debug)]
 pub enum QueryOp {
@@ -59,24 +59,18 @@ pub fn run(op: QueryOp, pretty: bool) -> Result<()> {
     }
 }
 
-fn read_doc(path: &std::path::Path) -> Result<Document> {
+fn read_doc(path: &std::path::Path) -> Result<Graph> {
     crate::io::read_document_auto(path)
 }
 
-fn extract_steps(doc: &Document) -> (&[toolpath::v1::Step], Option<&str>) {
-    match doc {
-        Document::Path(p) => (p.steps.as_slice(), Some(p.path.head.as_str())),
-        Document::Graph(g) => {
-            // For graphs, use the first inline path
-            for p in &g.paths {
-                if let toolpath::v1::PathOrRef::Path(path) = p {
-                    return (path.steps.as_slice(), Some(path.path.head.as_str()));
-                }
-            }
-            (&[], None)
+/// Returns (steps, head) extracted from the graph's first inline path.
+fn extract_steps(doc: &Graph) -> (&[toolpath::v1::Step], Option<&str>) {
+    for entry in &doc.paths {
+        if let PathOrRef::Path(path) = entry {
+            return (path.steps.as_slice(), Some(path.path.head.as_str()));
         }
-        Document::Step(_) => (&[], None),
     }
+    (&[], None)
 }
 
 fn print_steps(steps: &[&toolpath::v1::Step], pretty: bool) -> Result<()> {
@@ -156,7 +150,7 @@ mod tests {
     use std::io::Write;
     use toolpath::v1::{Base, Path, PathIdentity, Step};
 
-    fn make_path_doc() -> Document {
+    fn make_path_doc() -> Graph {
         let s1 = Step::new("s1", "human:alex", "2026-01-01T10:00:00Z")
             .with_raw_change("src/main.rs", "@@");
         let s2 = Step::new("s2", "agent:claude", "2026-01-01T11:00:00Z")
@@ -168,7 +162,7 @@ mod tests {
         let s3 = Step::new("s3", "human:alex", "2026-01-01T12:00:00Z")
             .with_parent("s2")
             .with_raw_change("src/main.rs", "@@");
-        Document::Path(Path {
+        Graph::from_path(Path {
             path: PathIdentity {
                 id: "p1".into(),
                 base: Some(Base::vcs("github:org/repo", "abc")),
@@ -180,7 +174,7 @@ mod tests {
         })
     }
 
-    fn write_temp_doc(doc: &Document) -> tempfile::NamedTempFile {
+    fn write_temp_doc(doc: &Graph) -> tempfile::NamedTempFile {
         let mut f = tempfile::NamedTempFile::new().unwrap();
         write!(f, "{}", doc.to_json().unwrap()).unwrap();
         f.flush().unwrap();
@@ -188,7 +182,7 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_steps_from_path() {
+    fn test_extract_steps_from_single_path_graph() {
         let doc = make_path_doc();
         let (steps, head) = extract_steps(&doc);
         assert_eq!(steps.len(), 4);
@@ -196,36 +190,11 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_steps_from_step() {
-        let doc = Document::Step(Step::new("s1", "human:alex", "2026-01-01T00:00:00Z"));
+    fn test_extract_steps_from_empty_graph() {
+        let doc = Graph::new("g1");
         let (steps, head) = extract_steps(&doc);
         assert!(steps.is_empty());
         assert!(head.is_none());
-    }
-
-    #[test]
-    fn test_extract_steps_from_graph() {
-        let s1 =
-            Step::new("s1", "human:alex", "2026-01-01T00:00:00Z").with_raw_change("f.rs", "@@");
-        let path = Path {
-            path: PathIdentity {
-                id: "p1".into(),
-                base: None,
-                head: "s1".into(),
-                graph_ref: None,
-            },
-            steps: vec![s1],
-            meta: None,
-        };
-        let graph = toolpath::v1::Graph {
-            graph: toolpath::v1::GraphIdentity { id: "g1".into() },
-            paths: vec![toolpath::v1::PathOrRef::Path(Box::new(path))],
-            meta: None,
-        };
-        let doc = Document::Graph(graph);
-        let (steps, head) = extract_steps(&doc);
-        assert_eq!(steps.len(), 1);
-        assert_eq!(head, Some("s1"));
     }
 
     #[test]
@@ -313,11 +282,11 @@ mod tests {
     }
 
     #[test]
-    fn test_run_dead_ends_on_step_doc() {
-        let doc = Document::Step(Step::new("s1", "human:alex", "2026-01-01T00:00:00Z"));
+    fn test_run_dead_ends_on_empty_graph() {
+        let doc = Graph::new("g1");
         let f = write_temp_doc(&doc);
         let result = run_dead_ends(f.path().to_path_buf(), false);
-        // Should fail because Step has no head
+        // Empty graphs have no head step.
         assert!(result.is_err());
     }
 

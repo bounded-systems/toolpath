@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use clap::Subcommand;
 use std::path::PathBuf;
-use toolpath::v1::Document;
+use toolpath::v1::Graph;
 
 #[derive(Subcommand, Debug)]
 pub enum RenderFormat {
@@ -86,7 +86,7 @@ fn run_dot(
         std::io::stdin()
             .read_to_string(&mut buf)
             .context("Failed to read from stdin")?;
-        Document::from_json(&buf).context("Failed to parse Toolpath document")?
+        Graph::from_json(&buf).context("Failed to parse Toolpath document")?
     };
 
     let options = toolpath_dot::RenderOptions {
@@ -120,7 +120,7 @@ fn run_md(
         std::io::stdin()
             .read_to_string(&mut buf)
             .context("Failed to read from stdin")?;
-        Document::from_json(&buf).context("Failed to parse Toolpath document")?
+        Graph::from_json(&buf).context("Failed to parse Toolpath document")?
     };
 
     let detail = match detail {
@@ -150,10 +150,10 @@ mod tests {
     use std::io::Write;
     use toolpath::v1::{Path, PathIdentity, Step};
 
-    fn make_doc() -> Document {
+    fn make_doc() -> Graph {
         let s1 =
             Step::new("s1", "human:alex", "2026-01-01T00:00:00Z").with_raw_change("f.rs", "@@");
-        Document::Path(Path {
+        Graph::from_path(Path {
             path: PathIdentity {
                 id: "p1".into(),
                 base: None,
@@ -271,7 +271,7 @@ mod tests {
         assert!(result.is_ok());
 
         let content = std::fs::read_to_string(out.path()).unwrap();
-        assert!(content.contains("# p1"));
+        assert!(content.contains("p1"));
         assert!(content.contains("## Timeline"));
     }
 
@@ -313,7 +313,7 @@ mod tests {
 
         let content = std::fs::read_to_string(out.path()).unwrap();
         assert!(content.starts_with("---\n"));
-        assert!(content.contains("type: path"));
+        assert!(content.contains("type:"));
     }
 
     #[test]

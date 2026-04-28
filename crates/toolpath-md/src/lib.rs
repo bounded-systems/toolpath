@@ -5,7 +5,7 @@ mod source;
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write;
 
-use toolpath::v1::{ArtifactChange, Document, Graph, Path, PathOrRef, Step, query};
+use toolpath::v1::{ArtifactChange, Graph, Path, PathOrRef, Step, query};
 
 /// Detail level for the rendered markdown.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -34,28 +34,39 @@ impl Default for RenderOptions {
     }
 }
 
-/// Render any Toolpath [`Document`] variant to a Markdown string.
+/// Render a Toolpath [`Graph`] as a Markdown string. Single-path graphs use
+/// the path-focused layout, multi-path graphs use the cross-path layout.
 ///
 /// # Examples
 ///
 /// ```
-/// use toolpath::v1::{Document, Step};
+/// use toolpath::v1::{Graph, Path, PathIdentity, Step};
 /// use toolpath_md::{render, RenderOptions};
 ///
 /// let step = Step::new("s1", "human:alex", "2026-01-29T10:00:00Z")
 ///     .with_raw_change("src/main.rs", "@@ -1 +1 @@\n-old\n+new")
 ///     .with_intent("Fix greeting");
-/// let doc = Document::Step(step);
-/// let md = render(&doc, &RenderOptions::default());
-/// assert!(md.contains("# s1"));
+/// let path = Path {
+///     path: PathIdentity {
+///         id: "p1".into(),
+///         base: None,
+///         head: "s1".into(),
+///         graph_ref: None,
+///     },
+///     steps: vec![step],
+///     meta: None,
+/// };
+/// let graph = Graph::from_path(path);
+/// let md = render(&graph, &RenderOptions::default());
 /// assert!(md.contains("human:alex"));
 /// ```
-pub fn render(doc: &Document, options: &RenderOptions) -> String {
-    match doc {
-        Document::Graph(g) => render_graph(g, options),
-        Document::Path(p) => render_path(p, options),
-        Document::Step(s) => render_step(s, options),
+pub fn render(graph: &Graph, options: &RenderOptions) -> String {
+    if graph.paths.len() == 1
+        && let PathOrRef::Path(p) = &graph.paths[0]
+    {
+        return render_path(p, options);
     }
+    render_graph(graph, options)
 }
 
 /// Render a single [`Step`] as Markdown.
@@ -1517,15 +1528,7 @@ mod tests {
     // ── render (dispatch) ────────────────────────────────────────────────
 
     #[test]
-    fn test_render_dispatches_step() {
-        let step = make_step("s1", "human:alex", &[]);
-        let doc = Document::Step(step);
-        let md = render(&doc, &RenderOptions::default());
-        assert!(md.contains("# s1"));
-    }
-
-    #[test]
-    fn test_render_dispatches_path() {
+    fn test_render_single_path_graph_uses_path_layout() {
         let s1 = make_step("s1", "human:alex", &[]);
         let path = Path {
             path: PathIdentity {
@@ -1537,13 +1540,13 @@ mod tests {
             steps: vec![s1],
             meta: None,
         };
-        let doc = Document::Path(path);
-        let md = render(&doc, &RenderOptions::default());
+        let graph = Graph::from_path(path);
+        let md = render(&graph, &RenderOptions::default());
         assert!(md.contains("## Timeline"));
     }
 
     #[test]
-    fn test_render_dispatches_graph() {
+    fn test_render_empty_graph_uses_graph_layout() {
         let graph = Graph {
             graph: GraphIdentity { id: "g1".into() },
             paths: vec![],
@@ -1552,8 +1555,7 @@ mod tests {
                 ..Default::default()
             }),
         };
-        let doc = Document::Graph(graph);
-        let md = render(&doc, &RenderOptions::default());
+        let md = render(&graph, &RenderOptions::default());
         assert!(md.contains("# My Graph"));
     }
 
