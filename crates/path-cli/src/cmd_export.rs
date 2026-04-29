@@ -11,6 +11,9 @@
 //! - `export codex` projects a Path document into Codex CLI's rollout
 //!   JSONL under `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl`,
 //!   loadable via `codex resume <session-uuid>`.
+//! - `export opencode` projects a Path document into rows in opencode's
+//!   `~/.local/share/opencode/opencode.db` so the session is visible to
+//!   the `opencode` CLI; or to a JSON file / stdout.
 //! - `export pathbase` uploads the document to a Pathbase server.
 
 use anyhow::{Context, Result};
@@ -89,6 +92,24 @@ pub enum ExportTarget {
         project: Option<PathBuf>,
 
         /// Output JSONL to this file. Mutually exclusive with --project.
+        #[arg(short, long, conflicts_with = "project")]
+        output: Option<PathBuf>,
+    },
+    /// Project a toolpath document into an opencode session
+    Opencode {
+        /// Input: cache id (e.g. `claude-abc`) or path to a toolpath JSON file
+        #[arg(short, long)]
+        input: String,
+
+        /// Target project directory. With this flag, inserts session,
+        /// message, and part rows into `~/.local/share/opencode/opencode.db`
+        /// so the `opencode` CLI sees the session in its picker.
+        /// Defaults to cwd when neither --project nor --output is given.
+        #[arg(short, long)]
+        project: Option<PathBuf>,
+
+        /// Output the projected `Session` (with messages and parts)
+        /// as pretty JSON to this file. Mutually exclusive with --project.
         #[arg(short, long, conflicts_with = "project")]
         output: Option<PathBuf>,
     },
@@ -172,6 +193,11 @@ pub fn run(target: ExportTarget) -> Result<()> {
             project,
             output,
         } => run_codex(input, project, output),
+        ExportTarget::Opencode {
+            input,
+            project,
+            output,
+        } => run_opencode(input, project, output),
         ExportTarget::Pathbase {
             input,
             url,
@@ -930,6 +956,247 @@ fn serialize_codex_jsonl(session: &toolpath_codex::Session) -> Result<String> {
     Ok(out)
 }
 
+
+// ── Opencode ──────────────────────────────────────────────────────────
+
+fn run_opencode(input: String, project: Option<PathBuf>, output: Option<PathBuf>) -> Result<()> {
+    #[cfg(target_os = "emscripten")]
+    {
+        let _ = (input, project, output);
+        anyhow::bail!("'path export opencode' requires a native environment");
+    }
+
+    #[cfg(not(target_os = "emscripten"))]
+    {
+        let path = load_path_doc(&input)?;
+        match (project, output) {
+            (Some(project_dir), None) => {
+                let session = build_opencode_session(&path, Some(&project_dir))?;
+                write_into_opencode_db(&session, &project_dir)?;
+            }
+            (None, Some(out_path)) => {
+                let session = build_opencode_session(&path, None)?;
+                write_opencode_to_output_path(&session, &out_path)?;
+            }
+            (None, None) => {
+                let cwd = std::env::current_dir().ok();
+                let session = build_opencode_session(&path, cwd.as_deref())?;
+                write_opencode_to_stdout(&session)?;
+            }
+            (Some(_), Some(_)) => unreachable!("clap enforces conflicts_with"),
+        }
+        Ok(())
+    }
+}
+
+#[cfg(not(target_os = "emscripten"))]
+fn build_opencode_session(
+    path: &toolpath::v1::Path,
+    project_dir: Option<&std::path::Path>,
+) -> Result<toolpath_opencode::Session> {
+    use toolpath_convo::ConversationProjector;
+    use toolpath_opencode::project::OpencodeProjector;
+
+    let view = toolpath_convo::extract_conversation(path);
+    let mut projector = OpencodeProjector::new();
+    if let Some(dir) = project_dir {
+        let canonical = std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
+        projector = projector.with_directory(canonical);
+    }
+    projector
+        .project(&view)
+        .map_err(|e| anyhow::anyhow!("Projection failed: {}", e))
+}
+
+#[cfg(not(target_os = "emscripten"))]
+fn write_into_opencode_db(
+    session: &toolpath_opencode::Session,
+    project_dir: &std::path::Path,
+) -> Result<()> {
+    use toolpath_opencode::PathResolver;
+
+    let project_dir = std::fs::canonicalize(project_dir)
+        .with_context(|| format!("resolve project path {}", project_dir.display()))?;
+
+    let resolver = PathResolver::new();
+    let db_path = resolver
+        .db_path()
+        .map_err(|e| anyhow::anyhow!("Cannot resolve opencode db path: {}", e))?;
+    if !db_path.exists() {
+        anyhow::bail!(
+            "opencode database not found at {} — has opencode been run on this machine?",
+            db_path.display()
+        );
+    }
+
+    let mut conn = rusqlite::Connection::open(&db_path)
+        .with_context(|| format!("open {}", db_path.display()))?;
+    let tx = conn.transaction()?;
+
+    ensure_opencode_project(&tx, &session.project_id, &project_dir, session.time_created)?;
+    insert_opencode_session(&tx, session)?;
+    let mut message_count = 0_usize;
+    let mut part_count = 0_usize;
+    for message in &session.messages {
+        insert_opencode_message(&tx, message)?;
+        message_count += 1;
+        for part in &message.parts {
+            insert_opencode_part(&tx, part)?;
+            part_count += 1;
+        }
+    }
+    tx.commit()?;
+
+    eprintln!(
+        "Exported opencode session {} ({} messages, {} parts) → {}",
+        session.id,
+        message_count,
+        part_count,
+        db_path.display()
+    );
+    eprintln!();
+    eprintln!("Loadable via:");
+    eprintln!("  path import opencode --session {}", session.id);
+    eprintln!();
+    eprintln!("Open conversation with:");
+    eprintln!("  opencode --session {}", session.id);
+    Ok(())
+}
+
+#[cfg(not(target_os = "emscripten"))]
+fn ensure_opencode_project(
+    tx: &rusqlite::Transaction<'_>,
+    project_id: &str,
+    worktree: &std::path::Path,
+    time_now: i64,
+) -> Result<()> {
+    use rusqlite::OptionalExtension;
+    let exists: bool = tx
+        .query_row(
+            "SELECT 1 FROM project WHERE id = ?1",
+            rusqlite::params![project_id],
+            |_| Ok(true),
+        )
+        .optional()?
+        .unwrap_or(false);
+    if exists {
+        return Ok(());
+    }
+    tx.execute(
+        "INSERT INTO project (id, worktree, vcs, name, time_created, time_updated, sandboxes)
+         VALUES (?1, ?2, 'git', NULL, ?3, ?3, '[]')",
+        rusqlite::params![project_id, worktree.to_string_lossy(), time_now],
+    )?;
+    Ok(())
+}
+
+#[cfg(not(target_os = "emscripten"))]
+fn insert_opencode_session(
+    tx: &rusqlite::Transaction<'_>,
+    session: &toolpath_opencode::Session,
+) -> Result<()> {
+    tx.execute(
+        "INSERT OR REPLACE INTO session
+            (id, project_id, workspace_id, parent_id, slug, directory, title,
+             version, share_url, summary_additions, summary_deletions, summary_files,
+             time_created, time_updated, time_compacting, time_archived)
+         VALUES
+            (?1, ?2, ?3, ?4, ?5, ?6, ?7,
+             ?8, ?9, ?10, ?11, ?12,
+             ?13, ?14, ?15, ?16)",
+        rusqlite::params![
+            session.id,
+            session.project_id,
+            session.workspace_id,
+            session.parent_id,
+            session.slug,
+            session.directory.to_string_lossy(),
+            session.title,
+            session.version,
+            session.share_url,
+            session.summary_additions,
+            session.summary_deletions,
+            session.summary_files,
+            session.time_created,
+            session.time_updated,
+            session.time_compacting,
+            session.time_archived,
+        ],
+    )?;
+    Ok(())
+}
+
+#[cfg(not(target_os = "emscripten"))]
+fn insert_opencode_message(
+    tx: &rusqlite::Transaction<'_>,
+    message: &toolpath_opencode::Message,
+) -> Result<()> {
+    let data = serde_json::to_string(&message.data)
+        .with_context(|| format!("serialize message {}", message.id))?;
+    tx.execute(
+        "INSERT OR REPLACE INTO message (id, session_id, time_created, time_updated, data)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        rusqlite::params![
+            message.id,
+            message.session_id,
+            message.time_created,
+            message.time_updated,
+            data,
+        ],
+    )?;
+    Ok(())
+}
+
+#[cfg(not(target_os = "emscripten"))]
+fn insert_opencode_part(
+    tx: &rusqlite::Transaction<'_>,
+    part: &toolpath_opencode::Part,
+) -> Result<()> {
+    let data =
+        serde_json::to_string(&part.data).with_context(|| format!("serialize part {}", part.id))?;
+    tx.execute(
+        "INSERT OR REPLACE INTO part
+            (id, message_id, session_id, time_created, time_updated, data)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        rusqlite::params![
+            part.id,
+            part.message_id,
+            part.session_id,
+            part.time_created,
+            part.time_updated,
+            data,
+        ],
+    )?;
+    Ok(())
+}
+
+#[cfg(not(target_os = "emscripten"))]
+fn write_opencode_to_output_path(
+    session: &toolpath_opencode::Session,
+    out_path: &std::path::Path,
+) -> Result<()> {
+    if let Some(parent) = out_path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
+    }
+    let json = serde_json::to_string_pretty(session)?;
+    std::fs::write(out_path, &json).with_context(|| format!("write {}", out_path.display()))?;
+    eprintln!(
+        "Wrote {} bytes to {} ({} messages)",
+        json.len(),
+        out_path.display(),
+        session.messages.len()
+    );
+    Ok(())
+}
+
+#[cfg(not(target_os = "emscripten"))]
+fn write_opencode_to_stdout(session: &toolpath_opencode::Session) -> Result<()> {
+    let json = serde_json::to_string_pretty(session)?;
+    println!("{}", json);
+    Ok(())
+}
 
 // ── Pathbase ──────────────────────────────────────────────────────────
 
@@ -2129,5 +2396,130 @@ mod tests {
             })
         };
         assert_ne!(derive_slug(&mk("a")), derive_slug(&mk("b")));
+    }
+    #[test]
+    fn opencode_output_to_file_writes_session_json() {
+        let temp = tempfile::tempdir().unwrap();
+        let input_path = temp.path().join("input.json");
+        let out_path = temp.path().join("session.json");
+
+        std::fs::write(
+            &input_path,
+            serde_json::to_string(&make_path_doc()).unwrap(),
+        )
+        .unwrap();
+
+        run_opencode(
+            input_path.to_string_lossy().to_string(),
+            None,
+            Some(out_path.clone()),
+        )
+        .unwrap();
+
+        assert!(out_path.exists());
+        let body = std::fs::read_to_string(&out_path).unwrap();
+        let session: toolpath_opencode::Session = serde_json::from_str(&body).unwrap();
+        assert!(session.id.starts_with("ses_"));
+        assert_eq!(session.messages.len(), 1);
+        assert!(matches!(
+            session.messages[0].data,
+            toolpath_opencode::MessageData::User(_)
+        ));
+    }
+
+    #[test]
+    fn opencode_writes_into_db_with_project() {
+        let temp = tempfile::tempdir().unwrap();
+        let fake_home = temp.path().join("home");
+        std::fs::create_dir_all(&fake_home).unwrap();
+        let project_dir = temp.path().join("myproj");
+        std::fs::create_dir_all(&project_dir).unwrap();
+        let data_dir = fake_home.join(".local/share/opencode");
+        std::fs::create_dir_all(&data_dir).unwrap();
+
+        let conn = rusqlite::Connection::open(data_dir.join("opencode.db")).unwrap();
+        conn.execute_batch(
+            r#"
+            CREATE TABLE project (
+              id text PRIMARY KEY, worktree text NOT NULL, vcs text, name text,
+              icon_url text, icon_color text,
+              time_created integer NOT NULL, time_updated integer NOT NULL,
+              time_initialized integer, sandboxes text NOT NULL, commands text
+            );
+            CREATE TABLE session (
+              id text PRIMARY KEY, project_id text NOT NULL, parent_id text,
+              slug text NOT NULL, directory text NOT NULL, title text NOT NULL,
+              version text NOT NULL, share_url text,
+              summary_additions integer, summary_deletions integer,
+              summary_files integer, summary_diffs text, revert text, permission text,
+              time_created integer NOT NULL, time_updated integer NOT NULL,
+              time_compacting integer, time_archived integer, workspace_id text
+            );
+            CREATE TABLE message (
+              id text PRIMARY KEY, session_id text NOT NULL,
+              time_created integer NOT NULL, time_updated integer NOT NULL,
+              data text NOT NULL
+            );
+            CREATE TABLE part (
+              id text PRIMARY KEY, message_id text NOT NULL, session_id text NOT NULL,
+              time_created integer NOT NULL, time_updated integer NOT NULL,
+              data text NOT NULL
+            );
+            "#,
+        )
+        .unwrap();
+        drop(conn);
+
+        let input_path = temp.path().join("input.json");
+        std::fs::write(
+            &input_path,
+            serde_json::to_string(&make_path_doc()).unwrap(),
+        )
+        .unwrap();
+
+        let _g = crate::config::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        unsafe {
+            std::env::set_var("HOME", &fake_home);
+            std::env::remove_var("XDG_DATA_HOME");
+        }
+        let result = run_opencode(
+            input_path.to_string_lossy().to_string(),
+            Some(project_dir.clone()),
+            None,
+        );
+        unsafe {
+            std::env::remove_var("HOME");
+        }
+        result.expect("export opencode --project");
+
+        let conn = rusqlite::Connection::open(data_dir.join("opencode.db")).unwrap();
+        let session_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM session", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(session_count, 1);
+        let message_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM message", [], |r| r.get(0))
+            .unwrap();
+        assert!(message_count >= 1);
+        let part_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM part", [], |r| r.get(0))
+            .unwrap();
+        assert!(part_count >= 1);
+    }
+
+    #[test]
+    fn opencode_rejects_non_single_path_graph() {
+        let temp = tempfile::tempdir().unwrap();
+        let input_path = temp.path().join("input.json");
+        let empty_graph = serde_json::json!({
+            "graph": { "id": "g1" },
+            "paths": [],
+        });
+        std::fs::write(&input_path, empty_graph.to_string()).unwrap();
+
+        let err = run_opencode(input_path.to_string_lossy().to_string(), None, None).unwrap_err();
+        assert!(err.to_string().contains("single-path"));
     }
 }

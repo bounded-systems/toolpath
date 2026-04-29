@@ -16,6 +16,7 @@ pub use types::{
 };
 
 pub mod provider;
-pub use provider::{OpencodeConvo, to_view, tool_category};
+pub use provider::{OpencodeConvo, native_name, to_view, tool_category};
 
 pub mod derive;
+pub mod project;
