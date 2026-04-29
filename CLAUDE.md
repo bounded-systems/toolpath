@@ -24,7 +24,9 @@ crates/
   toolpath-md/                  # Markdown rendering for LLM consumption
   path-cli/                     # unified CLI (binary: path)
   toolpath-cli/                 # deprecated shim that re-exports path-cli (excluded from the workspace; see below)
-schema/toolpath.schema.json     # JSON Schema for the format
+  pathbase-client/              # progenitor-derived client for the Pathbase HTTP API
+                                # (spec at crates/pathbase-client/openapi.json; refresh via scripts/refresh-pathbase-openapi.sh)
+schema/toolpath.schema.json     # JSON Schema for the toolpath format
 examples/*.json                 # 12 example documents (step, path, graph)
 RFC.md                          # full format specification
 FAQ.md                          # design rationale, FAQ, and open questions
@@ -45,6 +47,8 @@ path-cli (binary: path)
  ├── toolpath-pi      → toolpath, toolpath-convo
  ├── toolpath-dot     → toolpath
  └── toolpath-md      → toolpath
+
+pathbase-client      (no toolpath deps; built from schema/pathbase-openapi.json)
 
 toolpath-cli (deprecated shim, binary: path)
  └── path-cli
@@ -77,7 +81,7 @@ cargo run -p path-cli -- import gemini --project /path/to/project
 cargo run -p path-cli -- import codex --session <uuid>
 cargo run -p path-cli -- import opencode --session ses_<id>
 cargo run -p path-cli -- import pi --project /path/to/project
-cargo run -p path-cli -- import pathbase <trace-id-or-url>
+cargo run -p path-cli -- import pathbase <pathbase-url-or-owner/repo/slug>
 cargo run -p path-cli -- import claude --project . --no-cache | path render md --input -
 
 # Export toolpath documents into external formats. <ref> is a cache id or a file path.
@@ -113,7 +117,7 @@ cargo run -p path-cli -- auth logout
 
 `path derive`, `path incept`, and `path project` are deprecated aliases for `path import` / `path export claude` and print a deprecation warning to stderr. They will be removed in the release after next.
 
-The **cache** at `~/.toolpath/documents/<cache-id>.json` is the single landing zone for every `import` (and for `import pathbase` downloads). Cache id is `<source>-<inner-id>` — e.g. `claude-abc123`, `git-main`, `pathbase-trc_01H…`. Files are `0600`, parent directory `0700`. `$TOOLPATH_CONFIG_DIR` overrides the root. Default behavior: error on cache hit; pass `--force` to overwrite. `--no-cache` sends the JSON to stdout for shell composition.
+The **cache** at `~/.toolpath/documents/<cache-id>.json` is the single landing zone for every `import` (and for `import pathbase` downloads). Cache id is `<source>-<inner-id>` — e.g. `claude-abc123`, `git-main`, `pathbase-alex-pathstash-path-pr-42` (Pathbase paths key on `<owner>-<repo>-<slug>`, anon paths on `anon-pathstash-<uuid>`). Files are `0600`, parent directory `0700`. `$TOOLPATH_CONFIG_DIR` overrides the root. Default behavior: error on cache hit; pass `--force` to overwrite. `--no-cache` sends the JSON to stdout for shell composition.
 
 `path auth login` prints `<base>/auth/cli`; the user opens it, logs in, and
 pastes the 8-character code back into the CLI. The CLI calls
@@ -122,6 +126,13 @@ writes to `~/.toolpath/credentials.json` (0600, parent dir 0700) and sends as
 `Authorization: Bearer <token>` on future requests. `$TOOLPATH_CONFIG_DIR`
 overrides the credentials directory. Server URL comes from `--url`, then
 `$PATHBASE_URL`, then `https://pathbase.dev`.
+
+The CLI redeem endpoint (`POST /api/v1/auth/cli/redeem`) is real and works
+in production but is **not listed in `schema/pathbase-openapi.json`** — the
+OpenAPI spec only covers the documented surface. Don't be surprised that
+the progenitor-derived `pathbase-client` lacks a `redeem` method; the
+hand-rolled redeem call in `cmd_pathbase.rs` is the source of truth until
+the server publishes that operation.
 
 ## Key conventions
 
@@ -145,7 +156,7 @@ Tests live alongside the code (`#[cfg(test)] mod tests`), plus `path-cli` has in
 - `toolpath-opencode`: 43 unit + 1 doc test (SQLite reader, JSON payload serde, provider assembly, snapshot-based derive, tool-input fallback for gitignored paths)
 - `toolpath-pi`: 123 unit + 4 doc tests (types, paths, error, reader, io, provider)
 - `toolpath-dot`: 30 unit + 2 doc tests (render, visual conventions, escaping)
-- `path-cli`: 174 unit + 26 integration tests (import/export/cache, track sessions, merge, validate, roundtrip, render-md snapshots, deprecation aliases, pathbase HTTP mock-server tests, fzf-friendly TSV output)
+- `path-cli`: 187 unit + 31 integration tests (import/export/cache, track sessions, merge, validate, roundtrip, render-md snapshots, deprecation aliases, pathbase HTTP mock-server tests, fzf-friendly TSV output). For an end-to-end check against a real Pathbase deployment, run `scripts/test-pathbase-live.sh <url>` — it does an anon round-trip in a sandboxed config dir and, if you're logged into that URL, an authed pathstash round-trip too.
 - `toolpath-cli`: 0 tests (it's a one-line `path_cli::run()` shim crate that exists only so `cargo install toolpath-cli` keeps installing the `path` binary)
 
 Validate example documents: `for f in examples/*.json; do cargo run -p path-cli -- validate --input "$f"; done`

@@ -2,6 +2,48 @@
 
 All notable changes to the Toolpath workspace are documented here.
 
+## Pathbase rewire
+
+**Breaking** (pre-1.0). `path import pathbase` / `path export pathbase`
+rewire to the real Pathbase HTTP surface — the previous
+`/api/v1/traces` endpoints were never implemented server-side. New
+typed `pathbase-client` crate, generated at build time from the
+committed OpenAPI spec.
+
+### pathbase-client 0.1.0 (new crate)
+
+- New workspace member: an auto-generated typed Rust client for the [Pathbase](https://pathbase.dev) HTTP API. Derived at build time from `schema/pathbase-openapi.json` (also new in this release) via [progenitor](https://github.com/oxidecomputer/progenitor). Spec drift surfaces as a `cargo build` failure rather than runtime HTML-instead-of-JSON.
+- `build.rs` downgrades the spec from OAS 3.1 to 3.0 in-memory (nullable arrays → `nullable: true`, permissive schemas for empty media-type bodies) before handing it to the generator. The committed spec stays faithful to what the server publishes.
+- `scripts/refresh-pathbase-openapi.sh` repulls the spec (default `https://pathbase.dev`; override via `$PATHBASE_URL`) and pretty-prints it for stable diffs. Writes to `crates/pathbase-client/openapi.json` so the spec ships inside the published crate.
+- The CLI auth-redeem endpoint (`POST /api/v1/auth/cli/redeem`) is real in production but absent from the OpenAPI spec, so it is **not** available through this client; `path-cli`'s hand-rolled redeem call remains the source of truth.
+
+### path-cli 0.7.0 → 0.8.0
+
+- **Breaking:** the previous `POST/GET /api/v1/traces[/:id]` endpoints were never implemented server-side. Replaced with the real surface:
+  - `POST /api/v1/anon/paths` for unauthenticated public uploads (5 MB cap, rate-limited, **not listable**).
+  - `POST /api/v1/repos/{owner}/{repo}/paths` for authenticated repo-scoped uploads, with `is_public` controlling visibility.
+  - `POST /api/v1/repos` to create repos (used to ensure `pathstash` exists on first authed upload).
+  - `GET /api/v1/repos/{owner}/{repo}/paths/{slug}/download` for fetching path contents.
+- **Breaking:** `path import pathbase` no longer accepts the legacy `trc_<id>` shape. The new positional ref is either a full URL like `https://pathbase.dev/<owner>/<repo>/<slug>` or a bare `<owner>/<repo>/<slug>` triple. URLs that wrap the slug as `…/<owner>/<repo>/paths/<slug>` (the shape the anon endpoint returns) are recognized too.
+- New `path export pathbase` behavior:
+  - Default (logged in): writes a **secret** path under your `pathstash` repo. The repo is auto-created on first upload. Listable from your account; not publicly visible.
+  - Default (not logged in): falls through to the anonymous endpoint with a stderr advisory suggesting `path auth login` for a listable upload.
+  - `--anon`: force the anonymous endpoint regardless of credentials.
+  - `--repo owner/name`: target a specific repo instead of `<you>/pathstash`.
+  - `--slug`: override the auto-derived slug (otherwise sanitized from the toolpath document id).
+  - `--public`: flip `is_public` to `true` (default: secret/unlisted).
+- The URL printed on stdout now reflects how the path is actually shareable:
+  - Secret upload (default): `<base>/<owner>/<repo>/paths/<uuid>` — the UUID is the share token; the slug URL would be a dead stub for non-owners.
+  - Public upload (`--public`): `<base>/<owner>/<repo>/<slug>` — the listable canonical address.
+  - Anonymous: whatever URL the server returns from `AnonUploadResponse` (always UUID-shaped).
+- The auth flow (`path auth login` / `whoami` / `logout`) is unchanged; the redeem endpoint stays hand-rolled because the OpenAPI spec doesn't list it.
+- Internally, the four documented path operations now go through the typed `pathbase-client` crate. A `OnceLock`-cached current-thread tokio runtime in `cmd_pathbase.rs` bridges sync callers into the async generated client. The whole module — auth, paths, downloads, async upload — runs on a single reqwest version (the workspace dep was unified to 0.13 to match what `pathbase-client`/`progenitor-client 0.14` generate against).
+- `scripts/test-pathbase-live.sh <url>`: live-server smoke test. Always runs the same two scenarios in the same order (anon roundtrip, then authed pathstash roundtrip). Preconditions (server reachable, logged into the URL) are checked up-front; failure modes are explicit; no environment-conditional branching.
+
+### toolpath-cli 0.7.0 → 0.8.0 (deprecation shim)
+
+- Lockstep bump with `path-cli` 0.8.0. No behavioral change.
+
 ## `path.base` reconciliation — `branch` field, schema-validating `path validate`
 
 **Breaking** (pre-1.0). `path.base` gains a `branch` field and `ref`'s

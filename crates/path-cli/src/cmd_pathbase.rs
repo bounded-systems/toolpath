@@ -35,11 +35,31 @@ pub(crate) struct User {
     pub avatar_url: Option<String>,
 }
 
-/// Reference returned after uploading a trace.
+/// Response from `POST /api/v1/anon/paths` (matches the OpenAPI
+/// `AnonUploadResponse` shape).
 #[derive(Debug, Clone, Deserialize)]
-pub(crate) struct TraceRef {
+pub(crate) struct AnonUploadResponse {
     pub id: String,
     pub url: String,
+}
+
+/// Subset of the `TracePath` response from `POST /api/v1/repos/{owner}/{repo}/paths`
+/// that the CLI actually uses. The spec carries more fields (timestamps,
+/// step_count, repo_id, …); we only deserialize what we need.
+///
+/// `id` is the public share-token UUID. For secret paths the canonical
+/// share URL is `<base>/<owner>/<repo>/paths/<id>` — the slug URL is the
+/// owner-facing stub and isn't a reliable share link.
+///
+/// `is_public` is echoed from the server response (not the request) so
+/// the caller can react to server-side overrides (rate limits, policy,
+/// future feature flags) instead of trusting that what we asked for is
+/// what landed.
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct CreatedPath {
+    pub id: String,
+    pub slug: String,
+    pub is_public: bool,
 }
 
 // ── URL + prompt helpers ────────────────────────────────────────────────
@@ -139,40 +159,202 @@ pub(crate) fn api_me(base_url: &str, token: &str) -> Result<User> {
     Ok(user)
 }
 
-/// `POST /api/v1/traces` — upload a toolpath document.
-pub(crate) fn traces_post(base_url: &str, token: &str, body: &str) -> Result<TraceRef> {
-    let client = http_client()?;
-    let resp = client
-        .post(format!("{base_url}/api/v1/traces"))
-        .bearer_auth(token)
-        .header(reqwest::header::CONTENT_TYPE, "application/json")
-        .body(body.to_string())
-        .send()
-        .with_context(|| format!("connect to {base_url}"))?;
+// ── pathbase-client bridge ─────────────────────────────────────────────
+//
+// Pathbase's documented surface is talked to through the typed
+// `pathbase-client` crate, generated at build time from `openapi.json`.
+// The generated client is async; the rest of path-cli is sync, so we
+// tunnel through a `OnceLock`-cached current-thread tokio runtime via
+// [`block_on`]. The whole module — auth, paths, downloads, async upload
+// — runs on a single reqwest version (0.13). The auth flow stays
+// hand-rolled only because the redeem endpoint isn't in the OpenAPI
+// spec, not because of any HTTP-stack difference.
 
-    let status = resp.status();
-    let text = resp.text().unwrap_or_default();
-
-    if status == reqwest::StatusCode::UNAUTHORIZED {
-        bail!("stored session is no longer valid — run `path auth login` again");
-    }
-    if !status.is_success() {
-        let msg = serde_json::from_str::<serde_json::Value>(&text)
-            .ok()
-            .and_then(|v| v.get("error").and_then(|e| e.as_str()).map(String::from))
-            .unwrap_or_else(|| text.clone());
-        bail!("upload failed ({status}): {msg}");
-    }
-
-    serde_json::from_str(&text).with_context(|| format!("parsing upload response: {text}"))
+fn block_on<F: std::future::Future>(f: F) -> F::Output {
+    use std::sync::OnceLock;
+    static RT: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
+    let rt = RT.get_or_init(|| {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build tokio runtime")
+    });
+    rt.block_on(f)
 }
 
-/// `GET /api/v1/traces/{id}` — download a toolpath document body (JSON).
-pub(crate) fn traces_get(base_url: &str, token: &str, id: &str) -> Result<String> {
+/// Build a `pathbase_client::Client` whose underlying reqwest client
+/// carries a default `Authorization: Bearer <token>` header when one is
+/// supplied. Progenitor doesn't expose a bearer-token setter, so we
+/// pre-bake the header into the http client and hand it via
+/// `Client::new_with_client`.
+fn pathbase_client(base_url: &str, token: Option<&str>) -> Result<pathbase_client::Client> {
+    let mut builder = reqwest::Client::builder()
+        .user_agent(concat!("path-cli/", env!("CARGO_PKG_VERSION")))
+        .timeout(std::time::Duration::from_secs(30));
+    if let Some(t) = token {
+        let mut headers = reqwest::header::HeaderMap::new();
+        let mut auth = reqwest::header::HeaderValue::from_str(&format!("Bearer {t}"))
+            .context("invalid characters in auth token")?;
+        auth.set_sensitive(true);
+        headers.insert(reqwest::header::AUTHORIZATION, auth);
+        builder = builder.default_headers(headers);
+    }
+    let client = builder.build().context("build pathbase http client")?;
+    Ok(pathbase_client::Client::new_with_client(base_url, client))
+}
+
+/// Decode a toolpath JSON string into the `Map` shape the generated
+/// upload bodies expect. All three Document variants (`Step`, `Path`,
+/// `Graph`) are externally-tagged objects, so the top-level is always a
+/// JSON object — the parse can't fail on a well-formed toolpath doc.
+fn parse_document(json: &str) -> Result<serde_json::Map<String, serde_json::Value>> {
+    serde_json::from_str(json).context("parse toolpath document")
+}
+
+/// `POST /api/v1/anon/paths` — public, rate-limited, 5 MB cap. No auth.
+/// Anon paths are URL-addressable share tokens (the UUID in the returned
+/// URL is intentionally public); the trade-off is that they aren't
+/// listable from any user account. For listable uploads use
+/// [`paths_post`] against an authenticated session.
+pub(crate) fn anon_paths_post(base_url: &str, document_json: &str) -> Result<AnonUploadResponse> {
+    let body = pathbase_client::types::AnonUploadBody {
+        document: parse_document(document_json)?,
+    };
+    let client = pathbase_client(base_url, None)?;
+    match block_on(client.create_anon_path(&body)) {
+        Ok(resp) => {
+            let inner = resp.into_inner();
+            Ok(AnonUploadResponse {
+                id: inner.id,
+                url: inner.url,
+            })
+        }
+        Err(pathbase_client::Error::ErrorResponse(resp)) => match resp.status().as_u16() {
+            413 => bail!(
+                "anon upload exceeds the 5 MB cap — log in (`path auth login`) for a listable upload without that limit"
+            ),
+            429 => bail!("anon upload rate-limited; retry shortly or log in"),
+            code => bail!("anon upload failed (HTTP {code})"),
+        },
+        Err(pathbase_client::Error::UnexpectedResponse(resp)) => {
+            bail!(
+                "anon upload returned unexpected status: HTTP {}",
+                resp.status()
+            )
+        }
+        Err(e) => Err(anyhow!("anon upload failed: {e}")),
+    }
+}
+
+/// `POST /api/v1/repos/{owner}/{repo}/paths` — listable upload to a
+/// repo the authenticated user owns. `is_public=false` writes a
+/// pathstash-style secret/unlisted path; the URL is still publicly
+/// addressable (UUIDs are public for both secret and public paths) but
+/// won't appear in any user's listing.
+pub(crate) fn paths_post(
+    base_url: &str,
+    token: &str,
+    owner: &str,
+    repo: &str,
+    slug: &str,
+    document_json: &str,
+    is_public: bool,
+) -> Result<CreatedPath> {
+    let body = pathbase_client::types::UploadPathBody {
+        document: parse_document(document_json)?,
+        is_public: Some(is_public),
+        slug: slug.to_string(),
+    };
+    let client = pathbase_client(base_url, Some(token))?;
+    match block_on(client.create_path(owner, repo, &body)) {
+        Ok(resp) => {
+            let inner = resp.into_inner();
+            Ok(CreatedPath {
+                id: inner.id.to_string(),
+                slug: inner.slug,
+                is_public: inner.is_public,
+            })
+        }
+        Err(pathbase_client::Error::ErrorResponse(resp)) => match resp.status().as_u16() {
+            401 => bail!("stored session is no longer valid — run `path auth login` again"),
+            code => bail!("upload to {owner}/{repo} failed (HTTP {code})"),
+        },
+        Err(pathbase_client::Error::UnexpectedResponse(resp)) => {
+            let status = resp.status();
+            let body = block_on(resp.text()).unwrap_or_default();
+            let msg = error_message(&body).unwrap_or(body);
+            if msg.is_empty() {
+                bail!("upload to {owner}/{repo} returned unexpected status: HTTP {status}")
+            } else {
+                bail!("upload to {owner}/{repo} failed ({status}): {msg}")
+            }
+        }
+        Err(e) => Err(anyhow!("upload to {owner}/{repo} failed: {e}")),
+    }
+}
+
+fn error_message(body: &str) -> Option<String> {
+    serde_json::from_str::<serde_json::Value>(body)
+        .ok()
+        .and_then(|v| v.get("error").and_then(|e| e.as_str()).map(String::from))
+}
+
+/// `POST /api/v1/repos` — create a repo owned by the authenticated user.
+/// Treats 409 (already exists) as success so callers can use this
+/// idempotently to ensure pathstash exists before uploading to it.
+pub(crate) fn repos_post(base_url: &str, token: &str, name: &str) -> Result<()> {
+    let body = pathbase_client::types::CreateRepoBody {
+        name: name.to_string(),
+        description: None,
+    };
+    let client = pathbase_client(base_url, Some(token))?;
+    match block_on(client.create_repo(&body)) {
+        Ok(_) => Ok(()),
+        Err(pathbase_client::Error::ErrorResponse(resp)) => match resp.status().as_u16() {
+            401 => bail!("stored session is no longer valid — run `path auth login` again"),
+            409 => Ok(()),
+            code => bail!("creating repo {name} failed (HTTP {code})"),
+        },
+        Err(pathbase_client::Error::UnexpectedResponse(resp)) => match resp.status().as_u16() {
+            // The OpenAPI spec only documents 200 and 401 for create_repo,
+            // so a 409 lands in UnexpectedResponse rather than ErrorResponse.
+            // Treat it as success — repo already exists.
+            409 => Ok(()),
+            code => bail!("creating repo {name} returned unexpected status: HTTP {code}"),
+        },
+        Err(e) => Err(anyhow!("creating repo {name} failed: {e}")),
+    }
+}
+
+/// `GET /api/v1/repos/{owner}/{repo}/paths/{slug}/download` — fetch the
+/// raw toolpath JSON for a path. Public paths and unlisted-but-shared
+/// paths both download without authentication; only fully private paths
+/// (gated by an ACL beyond `is_public=false`) require auth.
+///
+/// **Why this doesn't go through `pathbase-client`.** progenitor's
+/// generated client decodes the response body into
+/// `serde_json::Map<String, Value>` (per the spec's
+/// `application/json` content type) and we'd then re-serialize to get a
+/// String back. That's a wasted round-trip — and the BTreeMap-backed
+/// `serde_json::Map` reorders keys, so the bytes the caller sees aren't
+/// the bytes the server sent. For a "give me back the document I just
+/// uploaded" endpoint, byte-fidelity matters. We use blocking reqwest
+/// directly and forward the response body verbatim.
+pub(crate) fn paths_download(
+    base_url: &str,
+    token: Option<&str>,
+    owner: &str,
+    repo: &str,
+    slug: &str,
+) -> Result<String> {
     let client = http_client()?;
-    let resp = client
-        .get(format!("{base_url}/api/v1/traces/{id}"))
-        .bearer_auth(token)
+    let mut req = client.get(format!(
+        "{base_url}/api/v1/repos/{owner}/{repo}/paths/{slug}/download"
+    ));
+    if let Some(t) = token {
+        req = req.bearer_auth(t);
+    }
+    let resp = req
         .send()
         .with_context(|| format!("connect to {base_url}"))?;
 
@@ -180,19 +362,17 @@ pub(crate) fn traces_get(base_url: &str, token: &str, id: &str) -> Result<String
     let text = resp.text().unwrap_or_default();
 
     if status == reqwest::StatusCode::UNAUTHORIZED {
-        bail!("stored session is no longer valid — run `path auth login` again");
+        bail!(
+            "this path is private and requires authentication — run `path auth login --url {base_url}` and retry"
+        );
     }
     if status == reqwest::StatusCode::NOT_FOUND {
-        bail!("trace {id} not found on {base_url}");
+        bail!("path {owner}/{repo}/{slug} not found on {base_url}");
     }
     if !status.is_success() {
-        let msg = serde_json::from_str::<serde_json::Value>(&text)
-            .ok()
-            .and_then(|v| v.get("error").and_then(|e| e.as_str()).map(String::from))
-            .unwrap_or_else(|| text.clone());
-        bail!("download failed ({status}): {msg}");
+        let msg = error_message(&text).unwrap_or(text);
+        bail!("download of {owner}/{repo}/{slug} failed ({status}): {msg}");
     }
-
     Ok(text)
 }
 
@@ -241,12 +421,6 @@ pub(crate) fn clear_session(path: &Path) -> Result<()> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(e) => Err(anyhow!("remove {}: {e}", path.display())),
     }
-}
-
-/// Load the stored session or bail with a helpful message.
-pub(crate) fn require_session() -> Result<StoredSession> {
-    let path = credentials_path()?;
-    load_session(&path)?.ok_or_else(|| anyhow!("Not logged in. Run `path auth login`."))
 }
 
 #[cfg(test)]
@@ -397,51 +571,123 @@ mod tests {
         }
     }
 
+    /// A complete `TracePath` JSON body for mock-server responses. Progenitor
+    /// strictly validates response shapes against the OpenAPI schema, so the
+    /// mock has to return every required field even though the CLI only reads
+    /// `slug`. Centralized here so tests don't drift when the schema changes.
+    fn trace_path_json() -> &'static str {
+        r#"{
+            "id": "00000000-0000-0000-0000-000000000001",
+            "repo_id": "00000000-0000-0000-0000-000000000002",
+            "slug": "my-path",
+            "toolpath_id": "tp-1",
+            "document": {"Step": {}},
+            "step_count": 0,
+            "is_public": false,
+            "created_at": "2024-01-01T00:00:00Z",
+            "updated_at": "2024-01-01T00:00:00Z"
+        }"#
+    }
+
     #[test]
-    fn traces_post_returns_id_and_url_on_success() {
-        let server = MockServer::start(
-            "HTTP/1.1 200 OK",
-            r#"{"id":"trc_01H","url":"https://pathbase.dev/traces/trc_01H"}"#,
-        );
-        let trace = traces_post(&server.base(), "tok", r#"{"Step":{}}"#).unwrap();
-        assert_eq!(trace.id, "trc_01H");
-        assert_eq!(trace.url, "https://pathbase.dev/traces/trc_01H");
+    fn paths_post_wraps_document_with_slug_and_is_public() {
+        let server = MockServer::start("HTTP/1.1 201 Created", trace_path_json());
+        let created = paths_post(
+            &server.base(),
+            "tok",
+            "alex",
+            "pathstash",
+            "my-path",
+            r#"{"Step":{}}"#,
+            false,
+        )
+        .unwrap();
+        assert_eq!(created.slug, "my-path");
 
         let req = String::from_utf8(server.request()).unwrap();
-        assert!(req.starts_with("POST /api/v1/traces "), "got: {req}");
+        assert!(
+            req.starts_with("POST /api/v1/repos/alex/pathstash/paths "),
+            "got: {req}"
+        );
         assert!(
             req.to_lowercase().contains("authorization: bearer tok"),
             "got: {req}"
         );
-        assert!(req.contains(r#"{"Step":{}}"#));
+        assert!(req.contains(r#""slug":"my-path""#), "got: {req}");
+        assert!(req.contains(r#""is_public":false"#), "got: {req}");
+        assert!(req.contains(r#""document":{"Step":{}}"#), "got: {req}");
     }
 
     #[test]
-    fn traces_post_401_surfaces_relogin_message() {
+    fn paths_post_401_surfaces_relogin_message() {
         let server = MockServer::start("HTTP/1.1 401 Unauthorized", r#"{"error":"bad"}"#);
-        let err = traces_post(&server.base(), "tok", "{}").unwrap_err();
+        let err =
+            paths_post(&server.base(), "tok", "alex", "pathstash", "s", "{}", false).unwrap_err();
         assert!(err.to_string().contains("run `path auth login`"));
     }
 
     #[test]
-    fn traces_post_5xx_includes_server_message() {
+    fn paths_post_5xx_includes_server_message() {
         let server = MockServer::start(
             "HTTP/1.1 500 Internal Server Error",
             r#"{"error":"database is on fire"}"#,
         );
-        let err = traces_post(&server.base(), "tok", "{}").unwrap_err();
+        let err =
+            paths_post(&server.base(), "tok", "alex", "pathstash", "s", "{}", false).unwrap_err();
         assert!(err.to_string().contains("database is on fire"), "{err}");
     }
 
     #[test]
-    fn traces_get_returns_body_on_success() {
+    fn anon_paths_post_wraps_document_and_omits_auth() {
+        let server = MockServer::start(
+            "HTTP/1.1 201 Created",
+            r#"{"id":"abc","url":"https://pathbase.dev/anon/abc"}"#,
+        );
+        let resp = anon_paths_post(&server.base(), r#"{"Step":{}}"#).unwrap();
+        assert_eq!(resp.id, "abc");
+        assert_eq!(resp.url, "https://pathbase.dev/anon/abc");
+
+        let req = String::from_utf8(server.request()).unwrap();
+        assert!(req.starts_with("POST /api/v1/anon/paths "), "got: {req}");
+        assert!(
+            !req.to_lowercase().contains("authorization:"),
+            "anon must not send auth header: {req}"
+        );
+        assert!(req.contains(r#""document":{"Step":{}}"#), "got: {req}");
+    }
+
+    #[test]
+    fn anon_paths_post_413_advises_login() {
+        let server = MockServer::start("HTTP/1.1 413 Payload Too Large", "");
+        let err = anon_paths_post(&server.base(), "{}").unwrap_err();
+        assert!(err.to_string().contains("5 MB"), "{err}");
+        assert!(err.to_string().contains("path auth login"), "{err}");
+    }
+
+    #[test]
+    fn repos_post_treats_409_as_success() {
+        let server = MockServer::start("HTTP/1.1 409 Conflict", r#"{"error":"already exists"}"#);
+        repos_post(&server.base(), "tok", "pathstash").unwrap();
+    }
+
+    #[test]
+    fn paths_download_returns_body_byte_for_byte() {
+        // Key ordering matters: the server's bytes must come back unmodified.
+        // With the round-trip removed (raw blocking GET, no Map decode), this
+        // is a straight string equality. If progenitor ever sneaks back in
+        // for this endpoint, the BTreeMap-backed Map reorders keys and this
+        // assertion catches it.
         let body = r#"{"Step":{"step":{"id":"s1","actor":"human:x","timestamp":"2024-01-01T00:00:00Z"},"change":{}}}"#;
         let server = MockServer::start("HTTP/1.1 200 OK", body);
-        let got = traces_get(&server.base(), "tok", "trc_01H").unwrap();
+        let got =
+            paths_download(&server.base(), Some("tok"), "alex", "pathstash", "my-path").unwrap();
         assert_eq!(got, body);
 
         let req = String::from_utf8(server.request()).unwrap();
-        assert!(req.starts_with("GET /api/v1/traces/trc_01H "), "got: {req}");
+        assert!(
+            req.starts_with("GET /api/v1/repos/alex/pathstash/paths/my-path/download "),
+            "got: {req}"
+        );
         assert!(
             req.to_lowercase().contains("authorization: bearer tok"),
             "got: {req}"
@@ -449,9 +695,10 @@ mod tests {
     }
 
     #[test]
-    fn traces_get_404_says_not_found() {
+    fn paths_download_404_says_not_found() {
         let server = MockServer::start("HTTP/1.1 404 Not Found", "");
-        let err = traces_get(&server.base(), "tok", "trc_nope").unwrap_err();
+        let err = paths_download(&server.base(), Some("tok"), "alex", "pathstash", "missing")
+            .unwrap_err();
         assert!(err.to_string().contains("not found"));
     }
 }
