@@ -577,6 +577,9 @@ fn write_into_pi_project(session: &toolpath_pi::PiSession, cwd: &str) -> Result<
         "  path import pi --session {} --project {}",
         session.header.id, cwd
     );
+    eprintln!();
+    eprintln!("Open conversation with:");
+    eprintln!("  pi --session {}", session.header.id);
     Ok(())
 }
 
