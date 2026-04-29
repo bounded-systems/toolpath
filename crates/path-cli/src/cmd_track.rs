@@ -190,15 +190,22 @@ fn session_dir(explicit: Option<&PathBuf>) -> PathBuf {
     explicit.cloned().unwrap_or_else(std::env::temp_dir)
 }
 
-/// Load a session file. The file is a `.path.jsonl` stream with the
-/// tracking bookkeeping stored in `meta.extra["track"]`. Returns the Path
-/// (with track state removed from meta) and the extracted TrackState.
+/// Load a session file. The file is a `.path.jsonl` stream (a single-path
+/// [`v1::Graph`] at the file boundary) with the tracking bookkeeping stored
+/// in the inner path's `meta.extra["track"]`. Returns the Path (with track
+/// state removed from meta) and the extracted TrackState.
 fn load_session(path: &std::path::Path) -> Result<(v1::Path, TrackState)> {
     let file = std::fs::File::open(path)
         .with_context(|| format!("failed to read session file: {}", path.display()))?;
     let reader = std::io::BufReader::new(file);
-    let mut path_doc = v1::Path::from_jsonl_reader(reader)
+    let graph = v1::Graph::from_jsonl_reader(reader)
         .with_context(|| format!("failed to parse session file: {}", path.display()))?;
+    let mut path_doc = graph.into_single_path().with_context(|| {
+        format!(
+            "session file is not a single-path graph: {}",
+            path.display()
+        )
+    })?;
     let track_value = path_doc
         .meta
         .as_mut()
@@ -216,7 +223,8 @@ fn load_session(path: &std::path::Path) -> Result<(v1::Path, TrackState)> {
 }
 
 /// Save a session file atomically. Injects TrackState into
-/// `meta.extra["track"]` and writes the Path as a `.path.jsonl` stream.
+/// `meta.extra["track"]` and writes the Path as a `.path.jsonl` stream
+/// (wrapped at the file boundary as a single-path [`v1::Graph`]).
 ///
 /// Writes are atomic via tempfile + persist. Any tool that reads the
 /// session mid-operation will either see the pre-write version or the
@@ -231,7 +239,7 @@ fn save_session(path: &std::path::Path, doc: &v1::Path, state: &TrackState) -> R
         "track".to_string(),
         serde_json::to_value(state).context("failed to serialize track state")?,
     );
-    let jsonl = doc
+    let jsonl = v1::Graph::from_path(doc)
         .to_jsonl_string()
         .context("failed to serialize session as JSONL")?;
 
@@ -887,7 +895,8 @@ mod tests {
         let path = make_session(dir.path(), "hello\n");
 
         let data = std::fs::read_to_string(&path).unwrap();
-        let p = v1::Path::from_jsonl_str(&data).unwrap();
+        let graph = v1::Graph::from_jsonl_str(&data).unwrap();
+        let p = graph.single_path().unwrap();
         assert_eq!(p.path.id, "track-test-1");
         // meta.extra["track"] is present (tracking bookkeeping)
         assert!(p.meta.as_ref().unwrap().extra.contains_key("track"));
@@ -1826,9 +1835,10 @@ mod tests {
         let session_path = dir.path().join("track-test-doc.path.jsonl");
         save_session(&session_path, &path_doc, &state).unwrap();
 
-        // Read raw file as JSONL Path — should work
+        // Read raw file as a single-path JSONL Graph — should work
         let data = std::fs::read_to_string(&session_path).unwrap();
-        let p = v1::Path::from_jsonl_str(&data).unwrap();
+        let graph = v1::Graph::from_jsonl_str(&data).unwrap();
+        let p = graph.single_path().unwrap();
         assert_eq!(p.path.id, "track-test-doc");
         assert_eq!(p.path.head, "step-001");
         assert_eq!(p.path.base.as_ref().unwrap().uri, "github:org/repo");
@@ -1990,9 +2000,10 @@ mod tests {
         .unwrap();
         assert_eq!(r3, StepResult::Created("step-003".to_string()));
 
-        // Verify the session is a valid JSONL Path mid-session
+        // Verify the session is a valid single-path JSONL Graph mid-session
         let data = std::fs::read_to_string(&init_path).unwrap();
-        let p = v1::Path::from_jsonl_str(&data).unwrap();
+        let graph = v1::Graph::from_jsonl_str(&data).unwrap();
+        let p = graph.single_path().unwrap();
         assert_eq!(p.steps.len(), 3);
         assert_eq!(p.path.head, "step-003");
         // Can run queries on the live session

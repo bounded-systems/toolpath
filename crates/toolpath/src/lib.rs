@@ -119,12 +119,13 @@ pub mod v1 {
         };
     }
 
-    /// JSONL streaming format for `Path` documents.
+    /// JSONL streaming format for single-path [`Graph`] documents.
     ///
     /// See the module-level docs in [`crate::jsonl`] for the on-wire shape.
-    /// Read a file with [`Path::from_jsonl_reader`] /
-    /// [`Path::from_jsonl_str`], write with [`Path::to_jsonl_writer`] /
-    /// [`Path::to_jsonl_string`].
+    /// Read a file with [`Graph::from_jsonl_reader`] /
+    /// [`Graph::from_jsonl_str`], write with [`Graph::to_jsonl_writer`] /
+    /// [`Graph::to_jsonl_string`]. The Path-level methods of the same name
+    /// remain available for callers operating directly on an inner `Path`.
     pub mod jsonl {
         pub use crate::jsonl::{
             ActorDefBody, HeadBody, JsonlError, JsonlLine, PathCloseBody, PathMetaBody,
