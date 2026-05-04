@@ -32,6 +32,9 @@ culting.
 - **[`opencode.md`](opencode.md)** — opencode's SQLite database
   (`~/.local/share/opencode/opencode.db`), its 12 typed message-part
   variants, and the sibling bare-git snapshot repo used for file diffs.
+- **[`pi.md`](pi.md)** — Pi (pi.dev) terminal coding agent sessions
+  under `~/.pi/agent/sessions/--<encoded-cwd>--/`, JSONL with a
+  session header line plus tree-shaped entries.
 
 The Claude Code reference is the most detailed because it's the
 longest-standing provider and has the most moving parts (JSONL

@@ -26,7 +26,12 @@ use toolpath_convo::{
 
 // ── Classification helpers ───────────────────────────────────────────
 
-fn classify_tool(name: &str) -> Option<ToolCategory> {
+/// Classify a Pi tool name into toolpath's category ontology.
+///
+/// Pi tool names are case-insensitive in the wild; we lowercase before
+/// matching and let names containing `task` / `agent` collapse to
+/// [`ToolCategory::Delegation`]. Unknown names return `None`.
+pub fn classify_tool(name: &str) -> Option<ToolCategory> {
     let lower = name.to_lowercase();
     if lower.contains("task") || lower.contains("agent") {
         return Some(ToolCategory::Delegation);
@@ -38,6 +43,43 @@ fn classify_tool(name: &str) -> Option<ToolCategory> {
         "grep" | "glob" | "find" | "ls" => Some(ToolCategory::FileSearch),
         "webfetch" | "websearch" | "fetch" => Some(ToolCategory::Network),
         _ => None,
+    }
+}
+
+/// Reverse of [`classify_tool`]: pick Pi's preferred native tool name
+/// for a generic [`ToolCategory`], disambiguating by call args when
+/// multiple Pi tools share the same category.
+///
+/// Used by [`crate::project::PiProjector`] when projecting tool calls
+/// from foreign harnesses (Claude, Gemini, etc.) — we know the
+/// category from the source's classifier and need to pick a Pi name
+/// whose arg shape matches the call's actual args. Returns `None` for
+/// categories with no obvious Pi analog.
+pub fn native_name(category: ToolCategory, args: &Value) -> Option<&'static str> {
+    match category {
+        ToolCategory::Shell => Some("bash"),
+        ToolCategory::FileRead => Some("read"),
+        ToolCategory::FileSearch => Some(if args.get("pattern").is_some() {
+            "grep"
+        } else {
+            "glob"
+        }),
+        // Edit-shape calls carry old_string/new_string (or `edits[]` for
+        // multi-edit); whole-file writes carry `content`. Pi has both
+        // `write` and `edit`; pick `edit` for in-place mutations.
+        ToolCategory::FileWrite => Some(
+            if args.get("old_string").is_some() || args.get("edits").is_some() {
+                "edit"
+            } else {
+                "write"
+            },
+        ),
+        ToolCategory::Network => Some(if args.get("url").is_some() {
+            "webfetch"
+        } else {
+            "websearch"
+        }),
+        ToolCategory::Delegation => Some("task"),
     }
 }
 
