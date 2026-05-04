@@ -3,6 +3,7 @@
 pub mod error;
 pub mod io;
 pub mod paths;
+pub mod project;
 pub mod reader;
 pub mod types;
 
