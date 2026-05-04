@@ -120,6 +120,32 @@ pub fn tool_category(name: &str) -> Option<ToolCategory> {
     }
 }
 
+/// Reverse of `tool_category`: pick opencode's native tool name for a
+/// given category, disambiguating by `args` shape where needed
+/// (e.g. `edit` vs `write`, `glob` vs `grep`).
+pub fn native_name(category: ToolCategory, args: &Value) -> Option<&'static str> {
+    match category {
+        ToolCategory::Shell => Some("bash"),
+        ToolCategory::FileRead => Some("read"),
+        ToolCategory::FileSearch => Some(if args.get("pattern").is_some() {
+            "grep"
+        } else {
+            "glob"
+        }),
+        ToolCategory::FileWrite => Some(if args.get("old_string").is_some() {
+            "edit"
+        } else {
+            "write"
+        }),
+        ToolCategory::Network => Some(if args.get("url").is_some() {
+            "webfetch"
+        } else {
+            "websearch"
+        }),
+        ToolCategory::Delegation => Some("task"),
+    }
+}
+
 // ── Session → ConversationView ─────────────────────────────────────
 
 /// Convert a parsed opencode [`Session`] to the provider-agnostic
