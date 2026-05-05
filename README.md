@@ -31,10 +31,14 @@ step-1 -- step-2 --+
 ## Install
 
 ```bash
+# Prebuilt binary (macOS arm64, Linux x86_64/arm64)
+curl -fsSL https://raw.githubusercontent.com/empathic/toolpath/main/scripts/install.sh | bash
+
+# from source
 cargo install path-cli
 ```
 
-This installs a binary called `path`.
+Both install a binary called `path`.
 
 > The older `toolpath-cli` crate name still works — `cargo install toolpath-cli` is now a thin shim that pulls in `path-cli` and installs the same binary. New users should reach for `path-cli` directly; the shim will eventually be retired.
 
