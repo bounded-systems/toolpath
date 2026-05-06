@@ -9,11 +9,11 @@
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
 
-use serde_json::{Value, json};
+use serde_json::Value;
 use toolpath::v1::Graph;
 use toolpath_convo::{
-    ConversationProjector, ConversationView, DeriveConfig, Role, TokenUsage, ToolCategory,
-    ToolInvocation, ToolResult, Turn, derive_path, extract_conversation,
+    ConversationProjector, ConversationView, DeriveConfig, Role, Turn, derive_path,
+    extract_conversation,
 };
 
 trait Harness {
@@ -394,150 +394,6 @@ fn ir_roundtrip(view: &ConversationView) -> ConversationView {
     let back = Graph::from_json(&json).expect("parse Graph");
     let path = back.into_single_path().expect("single path");
     extract_conversation(&path)
-}
-
-fn canonical_source_view() -> ConversationView {
-    // Strict user/assistant alternation: codex's protocol has no notion of
-    // two consecutive assistant turns, so a fixture without alternation
-    // would fail the codex cell on a structural-merge artefact rather than
-    // a real translation bug.
-    ConversationView {
-        id: "matrix-test-session".into(),
-        started_at: None,
-        last_activity: None,
-        turns: vec![
-            user_turn("u1", None, "List the files in src/", "2026-05-04T10:00:00Z"),
-            assistant_turn(
-                "a1",
-                Some("u1"),
-                "I'll list the files for you.",
-                Some("simple ls request"),
-                vec![ToolInvocation {
-                    id: "call_001".into(),
-                    name: "Bash".into(),
-                    input: json!({"command": "ls src/", "description": "list src"}),
-                    result: Some(ToolResult {
-                        content: "main.rs\nlib.rs\n".into(),
-                        is_error: false,
-                    }),
-                    category: Some(ToolCategory::Shell),
-                }],
-                "tool_use",
-                "2026-05-04T10:00:01Z",
-                Some(TokenUsage {
-                    input_tokens: Some(1500),
-                    output_tokens: Some(40),
-                    cache_read_tokens: Some(800),
-                    cache_write_tokens: Some(200),
-                }),
-            ),
-            user_turn("u2", Some("a1"), "Now read src/main.rs", "2026-05-04T10:00:02Z"),
-            assistant_turn(
-                "a2",
-                Some("u2"),
-                "",
-                None,
-                vec![ToolInvocation {
-                    id: "call_002".into(),
-                    name: "Read".into(),
-                    input: json!({"file_path": "/tmp/missing.rs"}),
-                    result: Some(ToolResult {
-                        content: "file not found".into(),
-                        is_error: true,
-                    }),
-                    category: Some(ToolCategory::FileRead),
-                }],
-                "tool_use",
-                "2026-05-04T10:00:03Z",
-                Some(TokenUsage {
-                    input_tokens: Some(1620),
-                    output_tokens: Some(15),
-                    cache_read_tokens: Some(1500),
-                    cache_write_tokens: None,
-                }),
-            ),
-            user_turn("u3", Some("a2"), "Try /tmp/main.rs instead", "2026-05-04T10:00:04Z"),
-            assistant_turn(
-                "a3",
-                Some("u3"),
-                "Done — replaced the greeting.",
-                None,
-                vec![ToolInvocation {
-                    id: "call_003".into(),
-                    name: "Edit".into(),
-                    input: json!({
-                        "file_path": "/tmp/main.rs",
-                        "old_string": "println!(\"hi\")",
-                        "new_string": "println!(\"hello\")",
-                    }),
-                    result: Some(ToolResult {
-                        content: "edited successfully".into(),
-                        is_error: false,
-                    }),
-                    category: Some(ToolCategory::FileWrite),
-                }],
-                "end_turn",
-                "2026-05-04T10:00:05Z",
-                Some(TokenUsage {
-                    input_tokens: Some(1800),
-                    output_tokens: Some(60),
-                    cache_read_tokens: Some(1620),
-                    cache_write_tokens: None,
-                }),
-            ),
-        ],
-        total_usage: None,
-        provider_id: None,
-        files_changed: vec![],
-        session_ids: vec![],
-        events: vec![],
-    }
-}
-
-fn user_turn(id: &str, parent: Option<&str>, text: &str, ts: &str) -> Turn {
-    Turn {
-        id: id.into(),
-        parent_id: parent.map(str::to_string),
-        role: Role::User,
-        timestamp: ts.into(),
-        text: text.into(),
-        thinking: None,
-        tool_uses: vec![],
-        model: None,
-        stop_reason: None,
-        token_usage: None,
-        environment: None,
-        delegations: vec![],
-        extra: Default::default(),
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn assistant_turn(
-    id: &str,
-    parent: Option<&str>,
-    text: &str,
-    thinking: Option<&str>,
-    tool_uses: Vec<ToolInvocation>,
-    stop_reason: &str,
-    ts: &str,
-    token_usage: Option<TokenUsage>,
-) -> Turn {
-    Turn {
-        id: id.into(),
-        parent_id: parent.map(str::to_string),
-        role: Role::Assistant,
-        timestamp: ts.into(),
-        text: text.into(),
-        thinking: thinking.map(str::to_string),
-        tool_uses,
-        model: Some("claude-sonnet-4-6".into()),
-        stop_reason: Some(stop_reason.into()),
-        token_usage,
-        environment: None,
-        delegations: vec![],
-        extra: Default::default(),
-    }
 }
 
 // ── Invariants ───────────────────────────────────────────────────────
@@ -1032,54 +888,62 @@ fn run_matrix(label: &str, sources: &[(String, ConversationView)]) {
     }
 }
 
-#[test]
-fn matrix_synthetic() {
-    let canonical = canonical_source_view();
-    // Every source uses the same synthetic IR — controlled minimal
-    // input that stresses the projector + invariant set without the
-    // diversity of a real session.
-    let sources: Vec<(String, ConversationView)> = ["claude", "codex", "pi", "gemini", "opencode"]
-        .iter()
-        .map(|n| (n.to_string(), canonical.clone()))
-        .collect();
-    run_matrix("matrix (synthetic IR)", &sources);
-}
-
-#[test]
-fn matrix_schema_validation() {
-    // For each harness, project both the synthetic IR and (when on
-    // disk) its real fixture through the harness's projector,
-    // serialize the result to its on-disk wire format, and re-parse
-    // it through the harness's own reader. Catches projector output
-    // that's "valid IR" but produces native bytes the reader rejects
-    // — the class of bug that surfaces only at `path import …` time
-    // or live in the harness's CLI.
-    let harnesses: Vec<Box<dyn Harness>> = vec![
+fn all_harnesses() -> Vec<Box<dyn Harness>> {
+    vec![
         Box::new(ClaudeHarness),
         Box::new(CodexHarness),
         Box::new(PiHarness),
         Box::new(GeminiHarness),
         Box::new(OpencodeHarness),
-    ];
-    let synthetic = canonical_source_view();
+    ]
+}
+
+#[test]
+fn matrix_translation() {
+    // Each source uses its own captured real-world session as input.
+    // Cell shape: A → IR → B → IR → B. After one A→B translation, B's
+    // projector + forward must be a fixed point on the resulting IR.
+    let harnesses = all_harnesses();
+    let mut sources: Vec<(String, ConversationView)> = Vec::new();
+    for h in &harnesses {
+        let view = h.load_fixture().unwrap_or_else(|| {
+            panic!(
+                "{} fixture missing — run scripts/capture-elicit-fixtures.sh {}",
+                h.name(),
+                h.name()
+            )
+        });
+        eprintln!("loaded {} fixture: {} turns", h.name(), view.turns.len());
+        sources.push((h.name().to_string(), view));
+    }
+    run_matrix("matrix (real fixtures)", &sources);
+}
+
+#[test]
+fn matrix_schema_validation() {
+    // For each harness, project its real fixture, serialize the native
+    // output to its on-disk wire format, and re-parse it through the
+    // harness's own reader. Catches projector output that's "valid IR"
+    // but produces native bytes the reader rejects — the class of bug
+    // that surfaces only at `path import …` time or live in the
+    // harness's CLI.
+    let harnesses = all_harnesses();
 
     let mut failures: Vec<String> = Vec::new();
     eprintln!("══ schema validation ══");
     for h in &harnesses {
-        match h.schema_validates(&synthetic) {
-            Ok(()) => eprintln!("✓ {} (synthetic)", h.name()),
+        let view = h.load_fixture().unwrap_or_else(|| {
+            panic!(
+                "{} fixture missing — run scripts/capture-elicit-fixtures.sh {}",
+                h.name(),
+                h.name()
+            )
+        });
+        match h.schema_validates(&view) {
+            Ok(()) => eprintln!("✓ {}", h.name()),
             Err(e) => {
-                eprintln!("✗ {} (synthetic): {}", h.name(), e);
-                failures.push(format!("{} (synthetic): {}", h.name(), e));
-            }
-        }
-        if let Some(view) = h.load_fixture() {
-            match h.schema_validates(&view) {
-                Ok(()) => eprintln!("✓ {} (real fixture)", h.name()),
-                Err(e) => {
-                    eprintln!("✗ {} (real fixture): {}", h.name(), e);
-                    failures.push(format!("{} (real fixture): {}", h.name(), e));
-                }
+                eprintln!("✗ {}: {}", h.name(), e);
+                failures.push(format!("{}: {}", h.name(), e));
             }
         }
     }
@@ -1090,37 +954,4 @@ fn matrix_schema_validation() {
             failures.len()
         );
     }
-}
-
-#[test]
-fn matrix_real_fixtures() {
-    // Each source uses its own captured real-world session as input.
-    // This is the corpus-diversity test — feature breadth a hand-built
-    // synthetic fixture can't match.
-    let harnesses: Vec<Box<dyn Harness>> = vec![
-        Box::new(ClaudeHarness),
-        Box::new(CodexHarness),
-        Box::new(PiHarness),
-        Box::new(GeminiHarness),
-        Box::new(OpencodeHarness),
-    ];
-    let mut sources: Vec<(String, ConversationView)> = Vec::new();
-    for h in &harnesses {
-        match h.load_fixture() {
-            Some(view) => {
-                eprintln!(
-                    "loaded {} fixture: {} turns",
-                    h.name(),
-                    view.turns.len()
-                );
-                sources.push((h.name().to_string(), view));
-            }
-            None => eprintln!("(no fixture for {}; skipping its source row)", h.name()),
-        }
-    }
-    if sources.is_empty() {
-        eprintln!("no real fixtures on disk; run scripts/capture-elicit-fixtures.sh");
-        return;
-    }
-    run_matrix("matrix (real fixtures)", &sources);
 }
