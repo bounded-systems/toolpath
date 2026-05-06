@@ -55,7 +55,7 @@ impl std::fmt::Display for Role {
 }
 
 /// Token usage for a single turn.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TokenUsage {
     /// Tokens sent to the model (prompt + context).
     pub input_tokens: Option<u32>,
