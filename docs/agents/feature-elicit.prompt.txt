@@ -1,0 +1,13 @@
+You're going to walk through a small set of tasks designed to exercise every common tool category. Stay inside the current working directory — do not touch anything outside it. Take the steps in order. Briefly think out loud before each tool call so the reasoning is captured. Tool-selection rule: if a step mentions a dedicated tool *and* that tool is available to you, use it; otherwise, use whatever shell-based equivalent you have (e.g. `ls`, `cat`, `sed`, `find`, `grep`). Don't skip steps because a dedicated tool is missing.
+
+1. List the files in the current directory (prefer a dedicated list/directory tool; `bash ls` is fine).
+2. Using a dedicated write/create-file tool if available (otherwise a shell heredoc), write `notes.md` with exactly these two lines:
+       scratch — feature elicitation
+       this file will be edited and searched.
+3. Read `notes.md` back using a dedicated read-file tool (preferred) or `bash cat`. Confirm both lines are present.
+4. Using a dedicated edit/replace/string-replace tool if available (otherwise `sed -i` or rewrite via the write tool), change the word "scratch" to "fixture" in `notes.md`.
+5. Find every file in the current directory whose name starts with "note". Prefer a dedicated glob/find-files tool; otherwise `bash find . -maxdepth 1 -name 'note*'`.
+6. Search the contents of files in the current directory for the word "fixture". Prefer a dedicated grep/content-search tool; otherwise `bash grep -r fixture .`. It should appear in `notes.md`.
+7. Read a file that does not exist: `does-not-exist.txt`. Use a read-file tool (or `cat does-not-exist.txt`) — the call MUST fail and the failure MUST be reported as a tool result, not silently swallowed. Acknowledge the error in one sentence and move on.
+8. Write a shell script `count.sh` that prints the numbers 1 through 5 on separate lines (one `echo` per line is fine). Run it with `bash count.sh` and confirm the output is exactly five lines.
+9. Briefly summarize in 2–3 sentences what you did. Stop without asking for further work.
