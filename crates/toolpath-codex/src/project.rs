@@ -383,6 +383,23 @@ fn emit_assistant(
         ));
     }
 
+    // The forward path's `pending_token_usage` attaches to the next turn
+    // pushed, so this `token_count` event must precede the assistant
+    // message line below.
+    if let Some(usage) = &turn.token_usage {
+        lines.push(event_msg_line(
+            &turn.timestamp,
+            json!({
+                "type": "token_count",
+                "info": {
+                    "total_token_usage": convo_usage_to_codex_json(usage),
+                    "last_token_usage": convo_usage_to_codex_json(usage),
+                },
+                "rate_limits": Value::Null,
+            }),
+        ));
+    }
+
     // The TUI gates scrollback rendering on `final_answer` exactly —
     // `final` would silently drop the closing message from view.
     let phase = Some(if is_final_assistant {
@@ -390,9 +407,21 @@ fn emit_assistant(
     } else {
         "commentary".to_string()
     });
+    // The forward path uses `response_item.message` as the turn anchor:
+    // tool calls without a preceding message attach to whatever assistant
+    // turn was last seen, even across user messages. Emit a message line
+    // for every non-empty assistant turn so consecutive cross-harness
+    // assistants don't merge. `thinking: Some("")` is treated as absent —
+    // codex's forward path drops empty thinking, so emitting on the
+    // first pass and not the second would be non-idempotent.
+    let has_thinking = turn
+        .thinking
+        .as_ref()
+        .is_some_and(|s| !s.is_empty());
     if is_final_assistant
         || !turn.text.is_empty()
-        || (turn.tool_uses.is_empty() && turn.thinking.is_none())
+        || !turn.tool_uses.is_empty()
+        || has_thinking
     {
         let msg = Message {
             role: "assistant".to_string(),
@@ -471,10 +500,14 @@ fn emit_tool_call(
             serde_json::to_value(&call).unwrap_or(Value::Null),
         ));
         if let Some(result) = &tu.result {
+            let mut out_extra = HashMap::new();
+            if result.is_error {
+                out_extra.insert("is_error".to_string(), Value::Bool(true));
+            }
             let out = CustomToolCallOutput {
                 call_id: tu.id.clone(),
                 output: result.content.clone(),
-                extra: HashMap::new(),
+                extra: out_extra,
             };
             lines.push(response_item_line(
                 &turn.timestamp,
@@ -510,10 +543,18 @@ fn emit_tool_call(
             serde_json::to_value(&call).unwrap_or(Value::Null),
         ));
         if let Some(result) = &tu.result {
+            // Codex's wire format has no first-class error flag for
+            // non-shell tools (only `exec_command_end.exit_code`). Stash
+            // it on the function_call_output's extras so the forward
+            // path can recover it.
+            let mut out_extra = HashMap::new();
+            if result.is_error {
+                out_extra.insert("is_error".to_string(), Value::Bool(true));
+            }
             let out = FunctionCallOutput {
                 call_id: tu.id.clone(),
                 output: result.content.clone(),
-                extra: HashMap::new(),
+                extra: out_extra,
             };
             lines.push(response_item_line(
                 &turn.timestamp,
@@ -601,6 +642,20 @@ fn event_msg_line(timestamp: &str, payload: Value) -> RolloutLine {
         payload,
         extra: HashMap::new(),
     }
+}
+
+fn convo_usage_to_codex_json(u: &toolpath_convo::TokenUsage) -> Value {
+    let mut m = Map::new();
+    if let Some(v) = u.input_tokens {
+        m.insert("input_tokens".to_string(), Value::from(v));
+    }
+    if let Some(v) = u.cache_read_tokens {
+        m.insert("cached_input_tokens".to_string(), Value::from(v));
+    }
+    if let Some(v) = u.output_tokens {
+        m.insert("output_tokens".to_string(), Value::from(v));
+    }
+    Value::Object(m)
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────
@@ -745,15 +800,16 @@ mod tests {
             .project(&view_with(vec![t]))
             .unwrap();
         let inner = inner_types(&s);
-        // session_meta + turn_context + (message, agent_message)
-        // + (function_call, function_call_output, exec_command_end).
-        // The `agent_message` and `exec_command_end` lines are
-        // event_msg payloads that drive the TUI scrollback.
+        // session_meta + turn_context + token_count + message + agent_message
+        // + function_call + function_call_output + exec_command_end.
+        // The token_count must precede the assistant message so the
+        // forward path's pending_token_usage attaches to this turn.
         assert_eq!(
             inner,
             vec![
                 "",
                 "",
+                "token_count",
                 "message",
                 "agent_message",
                 "function_call",
@@ -763,7 +819,7 @@ mod tests {
         );
 
         // FunctionCall.arguments is a JSON STRING, not a parsed value.
-        let fc_payload = &s.lines[4].payload;
+        let fc_payload = &s.lines[5].payload;
         assert_eq!(fc_payload["type"], "function_call");
         assert_eq!(fc_payload["call_id"], "call_001");
         assert_eq!(fc_payload["name"], "exec_command");
@@ -771,13 +827,13 @@ mod tests {
         let parsed: Value = serde_json::from_str(args).unwrap();
         assert_eq!(parsed["cmd"], "pwd");
 
-        let fco_payload = &s.lines[5].payload;
+        let fco_payload = &s.lines[6].payload;
         assert_eq!(fco_payload["type"], "function_call_output");
         assert_eq!(fco_payload["call_id"], "call_001");
         assert_eq!(fco_payload["output"], "/tmp\n");
 
         // exec_command_end: TUI counterpart with the aggregated output.
-        let exec = &s.lines[6].payload;
+        let exec = &s.lines[7].payload;
         assert_eq!(exec["type"], "exec_command_end");
         assert_eq!(exec["call_id"], "call_001");
         assert_eq!(exec["aggregated_output"], "/tmp\n");
