@@ -35,7 +35,7 @@ The script:
 - Invokes each harness's non-interactive prompt mode with the contents of
   [`feature-elicit.prompt.txt`](./feature-elicit.prompt.txt).
 - Snapshot-diffs the harness's session storage to find the new session file.
-- Copies it into `crates/path-cli/tests/fixtures/<harness>/`.
+- Copies it into `test-fixtures/<harness>/`.
 - Skips harnesses whose CLI isn't on `$PATH` and reports them.
 
 Per-harness invocation (edit `scripts/capture-elicit-fixtures.sh` if your
@@ -62,7 +62,7 @@ rm -rf ./*
 ```
 
 When the run completes, copy the session file out of its harness-native
-location (table above) into `crates/path-cli/tests/fixtures/<harness>/`.
+location (table above) into `test-fixtures/<harness>/`.
 
 ## What the prompt covers
 
@@ -98,7 +98,7 @@ known gap).
 ## Wiring the fixture into the matrix
 
 Once the file lands at
-`crates/path-cli/tests/fixtures/<harness>/convo.{jsonl,json}`,
+`test-fixtures/<harness>/convo.{jsonl,json}` (workspace root),
 each harness's existing reader API (`ConversationReader::read_conversation`,
 `RolloutReader::read_session`, `ConvoIO::read_session`, …) consumes it
 directly. Plug into the `Harness::load_fixture()` slot in

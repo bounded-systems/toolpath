@@ -414,15 +414,8 @@ fn emit_assistant(
     // assistants don't merge. `thinking: Some("")` is treated as absent —
     // codex's forward path drops empty thinking, so emitting on the
     // first pass and not the second would be non-idempotent.
-    let has_thinking = turn
-        .thinking
-        .as_ref()
-        .is_some_and(|s| !s.is_empty());
-    if is_final_assistant
-        || !turn.text.is_empty()
-        || !turn.tool_uses.is_empty()
-        || has_thinking
-    {
+    let has_thinking = turn.thinking.as_ref().is_some_and(|s| !s.is_empty());
+    if is_final_assistant || !turn.text.is_empty() || !turn.tool_uses.is_empty() || has_thinking {
         let msg = Message {
             role: "assistant".to_string(),
             content: vec![ContentPart::OutputText {

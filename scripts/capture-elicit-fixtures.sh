@@ -2,7 +2,7 @@
 #
 # Drive each available harness through docs/agents/feature-elicit.prompt.txt
 # in a fresh scratch directory and copy the resulting session file into
-# crates/path-cli/tests/fixtures/<harness>/.
+# test-fixtures/<harness>/ at the workspace root.
 #
 # Run from a logged-in shell that already has each harness's CLI
 # installed and authenticated. Harnesses whose CLIs aren't on PATH are
@@ -16,7 +16,7 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 PROMPT_FILE="$REPO_ROOT/docs/agents/feature-elicit.prompt.txt"
-FIXTURES_ROOT="$REPO_ROOT/crates/path-cli/tests/fixtures"
+FIXTURES_ROOT="$REPO_ROOT/test-fixtures"
 
 if [[ ! -f "$PROMPT_FILE" ]]; then
     echo "missing prompt: $PROMPT_FILE" >&2
@@ -107,7 +107,7 @@ drive_claude() {
     fi
     mkdir -p "$FIXTURES_ROOT/claude"
     cp "$session" "$FIXTURES_ROOT/claude/convo.jsonl"
-    echo "claude: OK → fixtures/claude/convo.jsonl"
+    echo "claude: OK → test-fixtures/claude/convo.jsonl"
 }
 
 drive_codex() {
@@ -135,7 +135,7 @@ drive_codex() {
     fi
     mkdir -p "$FIXTURES_ROOT/codex"
     cp "$session" "$FIXTURES_ROOT/codex/convo.jsonl"
-    echo "codex: OK → fixtures/codex/convo.jsonl"
+    echo "codex: OK → test-fixtures/codex/convo.jsonl"
 }
 
 drive_gemini() {
@@ -181,7 +181,7 @@ drive_gemini() {
     if [[ -d "$sub_dir" ]]; then
         cp -r "$sub_dir" "$FIXTURES_ROOT/gemini/"
     fi
-    echo "gemini: OK → fixtures/gemini/convo.${out_ext}"
+    echo "gemini: OK → test-fixtures/gemini/convo.${out_ext}"
 }
 
 drive_pi() {
@@ -217,7 +217,7 @@ drive_pi() {
     fi
     mkdir -p "$FIXTURES_ROOT/pi"
     cp "$session" "$FIXTURES_ROOT/pi/convo.jsonl"
-    echo "pi: OK → fixtures/pi/convo.jsonl"
+    echo "pi: OK → test-fixtures/pi/convo.jsonl"
 }
 
 drive_opencode() {
@@ -247,7 +247,7 @@ drive_opencode() {
     if ! opencode export "$session_id" 2>/dev/null > "$FIXTURES_ROOT/opencode/convo.json"; then
         echo "opencode: FAIL (opencode export $session_id failed)"; return 1
     fi
-    echo "opencode: OK → fixtures/opencode/convo.json"
+    echo "opencode: OK → test-fixtures/opencode/convo.json"
 }
 
 # ── Driver dispatch ──────────────────────────────────────────────────
@@ -269,6 +269,6 @@ echo
 echo "summary: ok=$ok fail=$fail (scratch left at $SCRATCH_BASE)"
 echo
 echo "Next: walk the completeness checklist in docs/agents/feature-elicit.md"
-echo "for each captured fixture, then commit fixtures/."
+echo "for each captured fixture, then commit test-fixtures/."
 
 exit $(( fail > 0 ? 1 : 0 ))

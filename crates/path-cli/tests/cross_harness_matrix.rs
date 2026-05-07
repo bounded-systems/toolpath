@@ -23,8 +23,8 @@ trait Harness {
     /// would see after this harness's native session round-tripped.
     fn roundtrip(&self, view: &ConversationView) -> ConversationView;
     /// Load this harness's captured real-world fixture (from
-    /// `crates/path-cli/tests/fixtures/<harness>/convo.{jsonl,json}`)
-    /// through the harness's native reader and forward it to IR.
+    /// `test-fixtures/<harness>/convo.{jsonl,json}` at the workspace
+    /// root) through the harness's native reader and forward it to IR.
     /// Returns `None` if the fixture isn't on disk.
     fn load_fixture(&self) -> Option<ConversationView>;
     /// Project the IR view, serialize the native output to its on-disk
@@ -38,8 +38,9 @@ trait Harness {
 
 fn fixtures_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests")
-        .join("fixtures")
+        .join("..")
+        .join("..")
+        .join("test-fixtures")
 }
 
 struct ClaudeHarness;
@@ -99,13 +100,15 @@ impl Harness for CodexHarness {
         if !path.exists() {
             return None;
         }
-        let session = toolpath_codex::RolloutReader::read_session(&path)
-            .expect("codex fixture parse");
+        let session =
+            toolpath_codex::RolloutReader::read_session(&path).expect("codex fixture parse");
         Some(toolpath_codex::to_view(&session))
     }
     fn schema_validates(&self, view: &ConversationView) -> Result<(), String> {
         let projector = toolpath_codex::project::CodexProjector::new();
-        let session = projector.project(view).map_err(|e| format!("project: {}", e))?;
+        let session = projector
+            .project(view)
+            .map_err(|e| format!("project: {}", e))?;
         let mut lines: Vec<String> = Vec::new();
         for line in &session.lines {
             lines.push(serde_json::to_string(line).map_err(|e| format!("line: {}", e))?);
@@ -136,13 +139,14 @@ impl Harness for PiHarness {
         if !path.exists() {
             return None;
         }
-        let session = toolpath_pi::reader::read_session_from_file(&path)
-            .expect("pi fixture parse");
+        let session = toolpath_pi::reader::read_session_from_file(&path).expect("pi fixture parse");
         Some(toolpath_pi::session_to_view(&session))
     }
     fn schema_validates(&self, view: &ConversationView) -> Result<(), String> {
         let projector = toolpath_pi::project::PiProjector::new();
-        let session = projector.project(view).map_err(|e| format!("project: {}", e))?;
+        let session = projector
+            .project(view)
+            .map_err(|e| format!("project: {}", e))?;
         let mut lines: Vec<String> = Vec::new();
         for entry in &session.entries {
             lines.push(serde_json::to_string(entry).map_err(|e| format!("entry: {}", e))?);
@@ -203,9 +207,11 @@ impl Harness for GeminiHarness {
     }
     fn schema_validates(&self, view: &ConversationView) -> Result<(), String> {
         let projector = toolpath_gemini::project::GeminiProjector::default();
-        let convo = projector.project(view).map_err(|e| format!("project: {}", e))?;
-        let json = serde_json::to_string_pretty(&convo.main)
-            .map_err(|e| format!("serialize: {}", e))?;
+        let convo = projector
+            .project(view)
+            .map_err(|e| format!("project: {}", e))?;
+        let json =
+            serde_json::to_string_pretty(&convo.main).map_err(|e| format!("serialize: {}", e))?;
         let tmp = tempfile::Builder::new()
             .suffix(".json")
             .tempfile()
@@ -246,7 +252,9 @@ impl Harness for OpencodeHarness {
         // (de)serializable as JSON, which is the actual format
         // `path export opencode --output` produces.
         let projector = toolpath_opencode::project::OpencodeProjector::new();
-        let session = projector.project(view).map_err(|e| format!("project: {}", e))?;
+        let session = projector
+            .project(view)
+            .map_err(|e| format!("project: {}", e))?;
         let json = serde_json::to_string(&session).map_err(|e| format!("serialize: {}", e))?;
         let _back: toolpath_opencode::Session =
             serde_json::from_str(&json).map_err(|e| format!("re-parse: {}", e))?;
@@ -416,7 +424,10 @@ mod invariants {
     }
 
     fn meaningful_turns(view: &ConversationView) -> Vec<&Turn> {
-        view.turns.iter().filter(|t| !is_system_envelope(t)).collect()
+        view.turns
+            .iter()
+            .filter(|t| !is_system_envelope(t))
+            .collect()
     }
 
     pub fn turn_count_and_role_sequence(
@@ -752,9 +763,8 @@ mod invariants {
         final_: &ConversationView,
         failures: &mut Vec<String>,
     ) {
-        let count = |v: &ConversationView| -> usize {
-            v.turns.iter().map(|t| t.delegations.len()).sum()
-        };
+        let count =
+            |v: &ConversationView| -> usize { v.turns.iter().map(|t| t.delegations.len()).sum() };
         let o = count(original);
         let f = count(final_);
         if o != f {
@@ -770,8 +780,9 @@ mod invariants {
         final_: &ConversationView,
         failures: &mut Vec<String>,
     ) {
-        let set_of =
-            |v: &ConversationView| -> BTreeSet<String> { v.files_changed.iter().cloned().collect() };
+        let set_of = |v: &ConversationView| -> BTreeSet<String> {
+            v.files_changed.iter().cloned().collect()
+        };
         let o = set_of(original);
         let f = set_of(final_);
         if o != f {
