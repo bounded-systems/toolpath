@@ -758,6 +758,13 @@ mod invariants {
         }
     }
 
+    /// Per-delegation content equality (idempotence). Beyond total count
+    /// (the previous bar), this asserts each delegation's `agent_id`,
+    /// child-turn count, and prompt text survive byte-for-byte across a
+    /// no-op B→B pass. Today's fixtures carry zero delegations, so this
+    /// passes vacuously; the assertion fires the moment a fixture
+    /// (refreshed via `scripts/capture-elicit-fixtures.sh` after the
+    /// elicit prompt was extended to dispatch sub-agents) carries one.
     pub fn delegations(
         original: &ConversationView,
         final_: &ConversationView,
@@ -771,6 +778,97 @@ mod invariants {
             failures.push(format!(
                 "delegation count diverged: first={} second={}",
                 o, f
+            ));
+            return;
+        }
+
+        for (i, (a, b)) in original.turns.iter().zip(final_.turns.iter()).enumerate() {
+            if a.delegations.len() != b.delegations.len() {
+                failures.push(format!(
+                    "turn {} delegation count diverged: first={} second={}",
+                    i,
+                    a.delegations.len(),
+                    b.delegations.len()
+                ));
+                continue;
+            }
+            let a_ids: BTreeSet<&str> = a.delegations.iter().map(|d| d.agent_id.as_str()).collect();
+            let b_ids: BTreeSet<&str> = b.delegations.iter().map(|d| d.agent_id.as_str()).collect();
+            if a_ids != b_ids {
+                failures.push(format!(
+                    "turn {} delegation agent_id set diverged\n      first:  {:?}\n      second: {:?}",
+                    i, a_ids, b_ids
+                ));
+                continue;
+            }
+            for da in &a.delegations {
+                let db = match b.delegations.iter().find(|d| d.agent_id == da.agent_id) {
+                    Some(d) => d,
+                    None => continue,
+                };
+                if norm(&da.prompt) != norm(&db.prompt) {
+                    failures.push(format!(
+                        "delegation {} prompt diverged at turn {}\n      first:  {:?}\n      second: {:?}",
+                        da.agent_id, i, da.prompt, db.prompt
+                    ));
+                }
+                if da.turns.len() != db.turns.len() {
+                    failures.push(format!(
+                        "delegation {} child-turn count diverged at turn {}: first={} second={}",
+                        da.agent_id,
+                        i,
+                        da.turns.len(),
+                        db.turns.len()
+                    ));
+                }
+            }
+        }
+    }
+
+    /// Cross-leg survival: every source delegation's `agent_id` must
+    /// remain findable in the target IR — either as a delegation
+    /// (preferred — preserves the structural "sub-agent" semantics) or
+    /// as a regular `tool_use` call_id (acceptable — the user-visible
+    /// tool call is still present even if the harness can't natively
+    /// model delegation).
+    ///
+    /// The looser bar here matches the "good UX" goal: when you open
+    /// a Claude session in a harness without first-class sub-agents
+    /// (Codex, opencode), you still see the dispatch tool call and
+    /// its result; you just lose the metadata that says "this was a
+    /// delegation." A flat-out drop of the call_id would be the
+    /// regression — the parent tool call disappearing is what would
+    /// confuse a reader.
+    pub fn delegations_survive(
+        before_target: &ConversationView,
+        after_target: &ConversationView,
+        failures: &mut Vec<String>,
+    ) {
+        let agent_ids = |v: &ConversationView| -> BTreeSet<String> {
+            v.turns
+                .iter()
+                .flat_map(|t| t.delegations.iter().map(|d| d.agent_id.clone()))
+                .collect()
+        };
+        let tool_use_ids = |v: &ConversationView| -> BTreeSet<String> {
+            v.turns
+                .iter()
+                .flat_map(|t| t.tool_uses.iter().map(|tu| tu.id.clone()))
+                .collect()
+        };
+
+        let pre = agent_ids(before_target);
+        let post_delegations = agent_ids(after_target);
+        let post_tool_uses = tool_use_ids(after_target);
+
+        let truly_dropped: Vec<&String> = pre
+            .difference(&post_delegations)
+            .filter(|id| !post_tool_uses.contains(id.as_str()))
+            .collect();
+        if !truly_dropped.is_empty() {
+            failures.push(format!(
+                "delegations dropped on translation leg (not preserved as delegation or tool_use): {:?}",
+                truly_dropped
             ));
         }
     }
@@ -845,6 +943,7 @@ fn run_cell(
     invariants::parent_id_graph(&view_first, &view_second, &mut failures);
     invariants::environment(&view_first, &view_second, &mut failures);
     invariants::delegations(&view_first, &view_second, &mut failures);
+    invariants::delegations_survive(&view_after_source, &view_first, &mut failures);
     invariants::files_changed(&view_first, &view_second, &mut failures);
     invariants::no_foreign_extras(&view_second, source.name(), target.name(), &mut failures);
     failures
