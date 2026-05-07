@@ -66,11 +66,12 @@ location (table above) into `test-fixtures/<harness>/`.
 
 ## What the prompt covers
 
-Nine tasks, no harness-specific tool names, no network access required.
+Ten tasks, no harness-specific tool names, no network access required.
 Every common category gets touched: shell exec (1, 8), file write (2, 8),
 file read (3), file edit (4), file search by name (5), file search by
-content (6), errored read (7), reflection / thinking (throughout), final
-summary (9). The full prompt body lives in
+content (6), errored read (7), sub-agent dispatch / delegation (9, where
+the harness supports it), reflection / thinking (throughout), final
+summary (10). The full prompt body lives in
 [`feature-elicit.prompt.txt`](./feature-elicit.prompt.txt) so the doc
 and the script stay in sync — edit one place.
 
@@ -88,6 +89,7 @@ the harness's session contains at least:
 - [ ] **1+ file search by name** (`glob` / `list_directory`)
 - [ ] **1+ file search by content** (`grep` / `search`)
 - [ ] **1+ errored tool result** (the missing file in step 7)
+- [ ] **1+ delegation event** (sub-agent dispatch in step 9, where the harness supports it; note as a known gap if not)
 - [ ] **1+ thinking / reasoning block** (if the harness supports it)
 - [ ] Final assistant message with the summary
 
