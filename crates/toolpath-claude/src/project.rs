@@ -58,55 +58,257 @@ impl ConversationProjector for ClaudeProjector {
 
 // ── Projection logic ─────────────────────────────────────────────────
 
+/// Headerless preamble types that live above `entries` in Claude's JSONL —
+/// they have no `uuid` and don't carry a message. The projector routes
+/// these events back to `convo.preamble`; everything else becomes an entry.
+const PREAMBLE_EVENT_TYPES: &[&str] = &[
+    "ai-title",
+    "last-prompt",
+    "queue-operation",
+    "permission-mode",
+    "file-history-snapshot",
+];
+
+fn is_preamble_event(event_type: &str) -> bool {
+    PREAMBLE_EVENT_TYPES.contains(&event_type)
+}
+
+/// Marker used by Claude's derive to preserve tool-result user entries as
+/// events. Their UUID is what the next assistant turn's `parentUuid`
+/// points at — synthesizing a new one breaks the chain.
+const TOOL_RESULT_USER_EVENT: &str = "tool_result_user";
+
 fn project_view(view: &ConversationView) -> std::result::Result<Conversation, String> {
     let mut convo = Conversation::new(view.id.clone());
 
-    // Emit permission-mode preamble as raw JSON (not a ConversationEntry —
-    // real permission-mode lines have only type/permissionMode/sessionId)
-    convo.preamble.push(json!({
-        "type": "permission-mode",
-        "permissionMode": "default",
-        "sessionId": view.id,
-    }));
+    let mut emitted_preamble = false;
+    for event in &view.events {
+        if is_preamble_event(&event.event_type) {
+            convo.preamble.push(preamble_event_to_value(event));
+            emitted_preamble = true;
+        }
+    }
+    // Cross-harness views won't carry a Claude preamble; emit a default
+    // permission-mode line so Claude Code can resume them.
+    if !emitted_preamble {
+        convo.preamble.push(json!({
+            "type": "permission-mode",
+            "permissionMode": "default",
+            "sessionId": view.id,
+        }));
+    }
+
+    // Index tool_result_user events by parent_id so we can re-emit them
+    // inline right after the assistant turn they responded to. This keeps
+    // every downstream `parentUuid` reference valid.
+    let mut tool_result_events_by_parent: HashMap<String, Vec<&toolpath_convo::ConversationEvent>> =
+        HashMap::new();
+    for event in &view.events {
+        if event.event_type != TOOL_RESULT_USER_EVENT {
+            continue;
+        }
+        if let Some(pid) = &event.parent_id {
+            tool_result_events_by_parent
+                .entry(pid.clone())
+                .or_default()
+                .push(event);
+        }
+    }
+    let mut consumed_event_ids: std::collections::HashSet<String> =
+        std::collections::HashSet::new();
+    // For cross-harness sources whose IR doesn't model intermediate tool-
+    // result turns, the next assistant's `parent_id` points at the prior
+    // assistant. Claude expects it to point at the tool_result entry that
+    // ran in between. Track those rewrites so we can patch the chain.
+    let mut parent_rewrites: HashMap<String, String> = HashMap::new();
 
     for turn in &view.turns {
+        // Pre-rewrite this turn's parent_id if a synthesized tool_result
+        // was emitted between it and its IR-recorded parent.
+        let effective_parent = turn
+            .parent_id
+            .as_ref()
+            .and_then(|pid| parent_rewrites.get(pid).cloned())
+            .or_else(|| turn.parent_id.clone());
+
         match &turn.role {
             Role::User => {
                 let mut entry = user_turn_to_entry(turn, &view.id);
                 apply_turn_metadata(&mut entry, turn);
+                entry.parent_uuid = effective_parent;
                 convo.add_entry(entry);
             }
             Role::Assistant => {
                 let mut assistant_entry = assistant_turn_to_entry(turn, &view.id);
                 apply_turn_metadata(&mut assistant_entry, turn);
+                assistant_entry.parent_uuid = effective_parent;
                 convo.add_entry(assistant_entry);
 
-                // Emit a separate tool-result user entry if any tool uses have results
-                if let Some(mut result_entry) = tool_result_entry(turn, &view.id) {
-                    apply_turn_metadata(&mut result_entry, turn);
-                    convo.add_entry(result_entry);
+                // Prefer the original tool-result user entries (preserved
+                // as events with their source UUIDs) over synthesizing.
+                // Synthesizing rewrites the UUID, which breaks the
+                // parentUuid chain on every subsequent assistant turn.
+                let real = tool_result_events_by_parent.remove(&turn.id);
+                if let Some(events) = real {
+                    let mut last_uuid = turn.id.clone();
+                    for event in events {
+                        let entry = tool_result_event_to_entry(event, &view.id);
+                        last_uuid = entry.uuid.clone();
+                        convo.add_entry(entry);
+                        consumed_event_ids.insert(event.id.clone());
+                    }
+                    // Anything in the IR that pointed at this assistant
+                    // turn should now point at the last tool-result entry
+                    // we emitted, matching Claude's wire convention.
+                    if last_uuid != turn.id {
+                        parent_rewrites.insert(turn.id.clone(), last_uuid);
+                    }
+                } else {
+                    // Cross-harness fallback: synthesize per-tool-use
+                    // result entries.
+                    let mut last_uuid = turn.id.clone();
+                    for mut result_entry in tool_result_entries(turn, &view.id) {
+                        apply_turn_metadata(&mut result_entry, turn);
+                        last_uuid = result_entry.uuid.clone();
+                        convo.add_entry(result_entry);
+                    }
+                    if last_uuid != turn.id {
+                        parent_rewrites.insert(turn.id.clone(), last_uuid);
+                    }
                 }
             }
             Role::System => {
                 let mut entry = system_turn_to_entry(turn, &view.id);
                 apply_turn_metadata(&mut entry, turn);
+                entry.parent_uuid = effective_parent;
                 convo.add_entry(entry);
             }
             Role::Other(_) => {
                 let mut entry = other_turn_to_entry(turn, &view.id);
                 apply_turn_metadata(&mut entry, turn);
+                entry.parent_uuid = effective_parent;
                 convo.add_entry(entry);
             }
         }
     }
 
-    // Emit non-message events
+    // Emit non-preamble events (attachments, etc.) as entries.
     for event in &view.events {
+        if is_preamble_event(&event.event_type) {
+            continue;
+        }
+        if consumed_event_ids.contains(&event.id) {
+            continue;
+        }
+        // Tool-result events without a matching parent turn — emit them
+        // anyway (rare; happens when the assistant turn is dropped).
+        if event.event_type == TOOL_RESULT_USER_EVENT {
+            let entry = tool_result_event_to_entry(event, &view.id);
+            convo.add_entry(entry);
+            continue;
+        }
         let entry = project_event(event, &view.id);
         convo.add_entry(entry);
     }
 
     Ok(convo)
+}
+
+/// Rebuild a Claude tool-result user entry verbatim from a preserved event.
+///
+/// The event was emitted by [`crate::derive::derive_path`] when reading the
+/// source JSONL — it carries the original UUID, parent UUID, the
+/// `toolUseResult` blob, and any `entry_extra` fields (promptId, slug, …).
+/// Reconstructing those preserves the UUID chain that Claude's UI traverses.
+fn tool_result_event_to_entry(
+    event: &toolpath_convo::ConversationEvent,
+    session_id: &str,
+) -> ConversationEntry {
+    let mut content_parts: Vec<ContentPart> = Vec::new();
+    if let Some(arr) = event.data.get("tool_results").and_then(|v| v.as_array()) {
+        for v in arr {
+            let tool_use_id = v
+                .get("tool_use_id")
+                .and_then(|x| x.as_str())
+                .unwrap_or_default()
+                .to_string();
+            let content_text = v
+                .get("content")
+                .and_then(|x| x.as_str())
+                .unwrap_or_default()
+                .to_string();
+            let is_error = v.get("is_error").and_then(|x| x.as_bool()).unwrap_or(false);
+            content_parts.push(ContentPart::ToolResult {
+                tool_use_id,
+                content: ToolResultContent::Text(content_text),
+                is_error,
+            });
+        }
+    }
+
+    let mut extra: HashMap<String, serde_json::Value> = HashMap::new();
+    if let Some(map) = event.data.get("entry_extra").and_then(|v| v.as_object()) {
+        for (k, v) in map {
+            extra.insert(k.clone(), v.clone());
+        }
+    }
+
+    ConversationEntry {
+        uuid: event.id.clone(),
+        parent_uuid: event.parent_id.clone(),
+        is_sidechain: false,
+        entry_type: "user".to_string(),
+        timestamp: event.timestamp.clone(),
+        session_id: Some(session_id.to_string()),
+        cwd: event
+            .data
+            .get("cwd")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string()),
+        git_branch: event
+            .data
+            .get("git_branch")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string()),
+        message: Some(Message {
+            role: MessageRole::User,
+            content: Some(MessageContent::Parts(content_parts)),
+            model: None,
+            id: None,
+            message_type: None,
+            stop_reason: None,
+            stop_sequence: None,
+            usage: None,
+        }),
+        version: event
+            .data
+            .get("version")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string()),
+        user_type: event
+            .data
+            .get("user_type")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string()),
+        request_id: None,
+        tool_use_result: event.data.get("tool_use_result").cloned(),
+        snapshot: None,
+        message_id: None,
+        extra,
+    }
+}
+
+/// Rebuild the JSONL preamble line from an event: `{type: event_type, ...data}`.
+fn preamble_event_to_value(event: &toolpath_convo::ConversationEvent) -> serde_json::Value {
+    let mut obj = serde_json::Map::new();
+    obj.insert(
+        "type".into(),
+        serde_json::Value::String(event.event_type.clone()),
+    );
+    for (k, v) in &event.data {
+        obj.insert(k.clone(), v.clone());
+    }
+    serde_json::Value::Object(obj)
 }
 
 /// Apply Claude-specific metadata from a [`Turn`] onto a [`ConversationEntry`].
@@ -260,69 +462,427 @@ fn build_assistant_content(turn: &Turn) -> MessageContent {
     }
 
     for tu in &turn.tool_uses {
+        // Rename non-Claude tools to Claude's canonical names so the UI's
+        // tool-specific renderers (Bash output panel, Edit diff view, Read
+        // file viewer, Glob/Grep result lists) actually fire. Without
+        // this, names like Codex's `exec_command` / `read_file` /
+        // `write_file` come through as opaque blocks even when their
+        // toolUseResult is well-formed.
+        let name = canonical_claude_tool_name(tu);
+        let input = canonical_claude_tool_input(tu, &name);
         parts.push(ContentPart::ToolUse {
             id: tu.id.clone(),
-            name: tu.name.clone(),
-            input: tu.input.clone(),
+            name,
+            input,
         });
     }
 
     MessageContent::Parts(parts)
 }
 
-/// Build a tool-result user entry for tool uses that have results.
-///
-/// Returns `None` if no tool use has a result.
-fn tool_result_entry(turn: &Turn, session_id: &str) -> Option<ConversationEntry> {
-    let result_parts: Vec<ContentPart> = turn
-        .tool_uses
-        .iter()
-        .filter_map(build_tool_result_part)
-        .collect();
-
-    if result_parts.is_empty() {
-        return None;
+/// Pick Claude's native tool name. Same shape as `tool_native_name` on
+/// codex / opencode / gemini / pi: keep the source name when it's
+/// already Claude-canonical, otherwise route through the IR's
+/// `category` plus [`crate::provider::native_name`] to land on a Claude
+/// tool name; otherwise pass through verbatim. The rename makes
+/// Claude's UI fire its rich result panes (diff view, shell output
+/// box, file viewer) for cross-harness sources.
+fn canonical_claude_tool_name(tu: &ToolInvocation) -> String {
+    if crate::provider::tool_category(&tu.name).is_some() {
+        return tu.name.clone();
     }
-
-    let mut extra: HashMap<String, serde_json::Value> = HashMap::new();
-    extra.insert("sourceToolAssistantUUID".to_string(), json!(turn.id));
-
-    Some(ConversationEntry {
-        uuid: format!("{}-result", turn.id),
-        parent_uuid: Some(turn.id.clone()),
-        is_sidechain: false,
-        entry_type: "user".to_string(),
-        timestamp: turn.timestamp.clone(),
-        session_id: Some(session_id.to_string()),
-        cwd: None,
-        git_branch: None,
-        message: Some(Message {
-            role: MessageRole::User,
-            content: Some(MessageContent::Parts(result_parts)),
-            model: None,
-            id: None,
-            message_type: None,
-            stop_reason: None,
-            stop_sequence: None,
-            usage: None,
-        }),
-        version: None,
-        user_type: None,
-        request_id: None,
-        tool_use_result: None,
-        snapshot: None,
-        message_id: None,
-        extra,
-    })
+    if let Some(cat) = tu.category
+        && let Some(remap) = crate::provider::native_name(cat, &tu.input)
+    {
+        return remap.to_string();
+    }
+    tu.name.clone()
 }
 
-/// Build a `ContentPart::ToolResult` from a `ToolInvocation` if it has a result.
-fn build_tool_result_part(tu: &ToolInvocation) -> Option<ContentPart> {
-    tu.result.as_ref().map(|r| ContentPart::ToolResult {
-        tool_use_id: tu.id.clone(),
-        content: ToolResultContent::Text(r.content.clone()),
-        is_error: r.is_error,
-    })
+/// Translate a non-Claude tool input map to Claude's expected input keys.
+///
+/// Claude's UI renders rich panes by reading specific keys from the input
+/// (`Bash` reads `command`, `Edit` reads `file_path`/`old_string`/
+/// `new_string`, `Read` reads `file_path`). Cross-harness inputs use
+/// different keys (`path` vs `file_path`, etc.); without renaming, the
+/// pane has nothing to display.
+fn canonical_claude_tool_input(tu: &ToolInvocation, claude_name: &str) -> serde_json::Value {
+    let get_str = |keys: &[&str]| -> Option<String> {
+        for k in keys {
+            if let Some(v) = tu.input.get(*k).and_then(|v| v.as_str()) {
+                return Some(v.to_string());
+            }
+        }
+        None
+    };
+    let path_alts = ["file_path", "filePath", "path", "absolute_path", "filename"];
+    match claude_name {
+        "Bash" => {
+            let mut obj = serde_json::Map::new();
+            if let Some(cmd) = get_str(&["command", "cmd"]) {
+                obj.insert("command".into(), serde_json::Value::String(cmd));
+            }
+            if let Some(desc) = get_str(&["description", "summary"]) {
+                obj.insert("description".into(), serde_json::Value::String(desc));
+            }
+            if !obj.is_empty() {
+                serde_json::Value::Object(obj)
+            } else {
+                tu.input.clone()
+            }
+        }
+        "Read" => {
+            let mut obj = serde_json::Map::new();
+            if let Some(p) = get_str(&path_alts) {
+                obj.insert("file_path".into(), serde_json::Value::String(p));
+            }
+            if let Some(off) = tu.input.get("offset").or_else(|| tu.input.get("startLine")) {
+                obj.insert("offset".into(), off.clone());
+            }
+            if let Some(lim) = tu.input.get("limit").or_else(|| tu.input.get("numLines")) {
+                obj.insert("limit".into(), lim.clone());
+            }
+            if !obj.is_empty() {
+                serde_json::Value::Object(obj)
+            } else {
+                tu.input.clone()
+            }
+        }
+        "Write" => {
+            let mut obj = serde_json::Map::new();
+            if let Some(p) = get_str(&path_alts) {
+                obj.insert("file_path".into(), serde_json::Value::String(p));
+            }
+            if let Some(c) = get_str(&["content", "text"]) {
+                obj.insert("content".into(), serde_json::Value::String(c));
+            }
+            if !obj.is_empty() {
+                serde_json::Value::Object(obj)
+            } else {
+                tu.input.clone()
+            }
+        }
+        "Edit" | "MultiEdit" => {
+            let mut obj = serde_json::Map::new();
+            if let Some(p) = get_str(&path_alts) {
+                obj.insert("file_path".into(), serde_json::Value::String(p));
+            }
+            if let Some(o) = get_str(&["old_string", "oldString"]) {
+                obj.insert("old_string".into(), serde_json::Value::String(o));
+            }
+            if let Some(n) = get_str(&["new_string", "newString"]) {
+                obj.insert("new_string".into(), serde_json::Value::String(n));
+            }
+            if let Some(r) = tu
+                .input
+                .get("replace_all")
+                .or_else(|| tu.input.get("replaceAll"))
+            {
+                obj.insert("replace_all".into(), r.clone());
+            }
+            if !obj.is_empty() {
+                serde_json::Value::Object(obj)
+            } else {
+                tu.input.clone()
+            }
+        }
+        "Glob" | "Grep" => {
+            let mut obj = serde_json::Map::new();
+            if let Some(p) = get_str(&["pattern", "query", "regex"]) {
+                obj.insert("pattern".into(), serde_json::Value::String(p));
+            }
+            if let Some(p) = get_str(&path_alts) {
+                obj.insert("path".into(), serde_json::Value::String(p));
+            }
+            if !obj.is_empty() {
+                serde_json::Value::Object(obj)
+            } else {
+                tu.input.clone()
+            }
+        }
+        _ => tu.input.clone(),
+    }
+}
+
+/// Build one tool-result user entry per `ToolInvocation` that has a result.
+///
+/// Claude's wire format uses a separate user entry per tool result so that
+/// the top-level `toolUseResult` field (which carries the rich UI display
+/// blob — Bash stdout/stderr, Edit's structuredPatch, etc.) is unambiguous.
+fn tool_result_entries(turn: &Turn, session_id: &str) -> Vec<ConversationEntry> {
+    turn.tool_uses
+        .iter()
+        .filter_map(|tu| {
+            let result = tu.result.as_ref()?;
+            let part = ContentPart::ToolResult {
+                tool_use_id: tu.id.clone(),
+                content: ToolResultContent::Text(result.content.clone()),
+                is_error: result.is_error,
+            };
+
+            let mut extra: HashMap<String, serde_json::Value> = HashMap::new();
+            extra.insert("sourceToolAssistantUUID".to_string(), json!(turn.id));
+
+            Some(ConversationEntry {
+                uuid: format!("{}-result-{}", turn.id, tu.id),
+                parent_uuid: Some(turn.id.clone()),
+                is_sidechain: false,
+                entry_type: "user".to_string(),
+                timestamp: turn.timestamp.clone(),
+                session_id: Some(session_id.to_string()),
+                cwd: None,
+                git_branch: None,
+                message: Some(Message {
+                    role: MessageRole::User,
+                    content: Some(MessageContent::Parts(vec![part])),
+                    model: None,
+                    id: None,
+                    message_type: None,
+                    stop_reason: None,
+                    stop_sequence: None,
+                    usage: None,
+                }),
+                version: None,
+                user_type: None,
+                request_id: None,
+                tool_use_result: tool_use_result_from_invocation(tu),
+                snapshot: None,
+                message_id: None,
+                extra,
+            })
+        })
+        .collect()
+}
+
+/// Reconstruct Claude's `toolUseResult` JSON from the tool's name, input,
+/// and result content.
+///
+/// This is what drives Claude Code's diff view, shell output box, and
+/// agent stat panel. The data was already in the IR — `name` says what
+/// kind of tool it was, `input` carries the args (file path, command,
+/// pattern, …), and `result.content` is the model-visible text. We just
+/// switch on the name and fan the fields out to Claude's expected shape.
+///
+/// For unrecognized tools we fall back to the content as a plain string
+/// so the UI at least shows *something*.
+fn tool_use_result_from_invocation(tu: &ToolInvocation) -> Option<serde_json::Value> {
+    use toolpath_convo::ToolCategory;
+
+    let str_field = |k: &str| -> Option<String> {
+        tu.input
+            .get(k)
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+    };
+    // Cross-harness tool inputs name the same concept differently —
+    // Claude has `file_path`, Codex has `path`, Gemini has `absolute_path`,
+    // opencode uses `filePath` / `path` depending on tool. Try each.
+    let path_field = || -> Option<String> {
+        ["file_path", "filePath", "path", "absolute_path", "filename"]
+            .iter()
+            .find_map(|k| str_field(k))
+    };
+    let result_text = || {
+        tu.result
+            .as_ref()
+            .map(|r| r.content.clone())
+            .unwrap_or_default()
+    };
+
+    // Pick the dispatch key: name takes precedence (lets us recognize
+    // Claude-specific quirks like Read's offset/limit), category is the
+    // cross-harness fallback so Codex's `exec_command` and opencode's
+    // `bash` and Pi's `bash` all land on the shell shape.
+    enum Kind {
+        Shell,
+        Write,
+        Edit,
+        Read,
+        Search,
+        Other,
+    }
+    let kind = match tu.name.as_str() {
+        "Bash" => Kind::Shell,
+        "Write" => Kind::Write,
+        "Edit" | "MultiEdit" => Kind::Edit,
+        "Read" => Kind::Read,
+        "Glob" | "Grep" => Kind::Search,
+        _ => match tu.category {
+            Some(ToolCategory::Shell) => Kind::Shell,
+            Some(ToolCategory::FileWrite) => {
+                // Disambiguate write vs edit by input shape: presence of
+                // `old_string` signals an in-place edit.
+                if tu.input.get("old_string").is_some() || tu.input.get("oldString").is_some() {
+                    Kind::Edit
+                } else {
+                    Kind::Write
+                }
+            }
+            Some(ToolCategory::FileRead) => Kind::Read,
+            Some(ToolCategory::FileSearch) => Kind::Search,
+            _ => Kind::Other,
+        },
+    };
+
+    match kind {
+        Kind::Shell => Some(json!({
+            "stdout": result_text(),
+            "stderr": "",
+            "interrupted": false,
+            "isImage": false,
+            "noOutputExpected": false,
+        })),
+        Kind::Write => {
+            let path = path_field()?;
+            let content = str_field("content").unwrap_or_default();
+            Some(json!({
+                "type": "update",
+                "filePath": path,
+                "content": content,
+            }))
+        }
+        Kind::Edit => {
+            let path = path_field()?;
+            let old = str_field("old_string")
+                .or_else(|| str_field("oldString"))
+                .unwrap_or_default();
+            let new_ = str_field("new_string")
+                .or_else(|| str_field("newString"))
+                .unwrap_or_default();
+            let replace_all = tu
+                .input
+                .get("replace_all")
+                .or_else(|| tu.input.get("replaceAll"))
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            Some(json!({
+                "filePath": path,
+                "oldString": old,
+                "newString": new_,
+                "originalFile": "",
+                "replaceAll": replace_all,
+                "userModified": false,
+                "structuredPatch": structured_patch_hunks(&old, &new_),
+            }))
+        }
+        Kind::Read => {
+            let Some(path) = path_field() else {
+                return Some(json!(result_text()));
+            };
+            let content = result_text();
+            let stripped = strip_line_numbers(&content);
+            let total_lines = stripped.lines().count();
+            Some(json!({
+                "type": "text",
+                "file": {
+                    "filePath": path,
+                    "content": stripped,
+                    "numLines": total_lines,
+                    "startLine": tu.input.get("offset").and_then(|v| v.as_u64()).unwrap_or(1),
+                    "totalLines": total_lines,
+                }
+            }))
+        }
+        Kind::Search => {
+            let pattern = str_field("pattern")
+                .or_else(|| str_field("query"))
+                .unwrap_or_default();
+            let filenames: Vec<String> = tu
+                .result
+                .as_ref()
+                .map(|r| {
+                    r.content
+                        .lines()
+                        .filter(|l| !l.is_empty())
+                        .map(|s| s.to_string())
+                        .collect()
+                })
+                .unwrap_or_default();
+            let num_files = filenames.len();
+            Some(json!({
+                "filenames": filenames,
+                "numFiles": num_files,
+                "pattern": pattern,
+            }))
+        }
+        Kind::Other => tu.result.as_ref().map(|r| json!(r.content)),
+    }
+}
+
+/// Build Claude's `structuredPatch` array — a list of hunks each containing
+/// `{oldStart, oldLines, newStart, newLines, lines: ["-…", "+…", " …"]}` —
+/// from `old_string` and `new_string`.
+///
+/// Drives the side-by-side diff view in Claude Code's UI. Without this the
+/// diff panel renders empty even though the change went through.
+fn structured_patch_hunks(old: &str, new_: &str) -> serde_json::Value {
+    use similar::{ChangeTag, TextDiff};
+    let diff = TextDiff::from_lines(old, new_);
+    let mut hunks = Vec::new();
+    for group in diff.grouped_ops(3) {
+        if group.is_empty() {
+            continue;
+        }
+        let first = group.first().unwrap();
+        let last = group.last().unwrap();
+        let old_start = first.old_range().start + 1;
+        let old_lines = last.old_range().end - first.old_range().start;
+        let new_start = first.new_range().start + 1;
+        let new_lines = last.new_range().end - first.new_range().start;
+        let mut lines: Vec<String> = Vec::new();
+        for op in &group {
+            for change in diff.iter_changes(op) {
+                let prefix = match change.tag() {
+                    ChangeTag::Delete => "-",
+                    ChangeTag::Insert => "+",
+                    ChangeTag::Equal => " ",
+                };
+                let text: &str = change.value();
+                let trimmed = text.trim_end_matches('\n');
+                lines.push(format!("{prefix}{trimmed}"));
+            }
+        }
+        hunks.push(json!({
+            "oldStart": old_start,
+            "oldLines": old_lines,
+            "newStart": new_start,
+            "newLines": new_lines,
+            "lines": lines,
+        }));
+    }
+    serde_json::Value::Array(hunks)
+}
+
+/// Strip Claude's `cat -n`-style line numbering ("    1\tfoo") from a Read
+/// result so the round-tripped `file.content` is the raw file text.
+/// Leaves content alone when no leading-number pattern is detected.
+fn strip_line_numbers(s: &str) -> String {
+    let lines: Vec<&str> = s.lines().collect();
+    let mut all_match = !lines.is_empty();
+    for line in &lines {
+        let trimmed = line.trim_start();
+        let mut chars = trimmed.chars();
+        let has_digit = chars.next().map(|c| c.is_ascii_digit()).unwrap_or(false);
+        let has_tab = trimmed.contains('\t');
+        if !has_digit || !has_tab {
+            all_match = false;
+            break;
+        }
+    }
+    if !all_match {
+        return s.to_string();
+    }
+    lines
+        .iter()
+        .map(|l| {
+            let trimmed = l.trim_start();
+            match trimmed.find('\t') {
+                Some(idx) => trimmed[idx + 1..].to_string(),
+                None => l.to_string(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// Build a user entry for a System turn.
@@ -685,7 +1245,7 @@ mod tests {
 
         let result_entry = &entries[2];
         assert_eq!(result_entry.entry_type, "user");
-        assert_eq!(result_entry.uuid, "a1-result");
+        assert_eq!(result_entry.uuid, "a1-result-t1");
         assert_eq!(result_entry.parent_uuid.as_deref(), Some("a1"));
 
         let msg = result_entry.message.as_ref().unwrap();
@@ -870,14 +1430,13 @@ mod tests {
         let convo = ClaudeProjector.project(&view).unwrap();
 
         let entries = content_entries(&convo);
-        // assistant + tool-result entry
-        assert_eq!(entries.len(), 2);
+        // assistant + one tool-result entry per tool_use
+        assert_eq!(entries.len(), 3);
 
-        let result_entry = &entries[1];
-        let msg = result_entry.message.as_ref().unwrap();
-        match msg.content.as_ref().unwrap() {
+        let r1 = &entries[1];
+        match r1.message.as_ref().unwrap().content.as_ref().unwrap() {
             MessageContent::Parts(parts) => {
-                assert_eq!(parts.len(), 2);
+                assert_eq!(parts.len(), 1);
                 match &parts[0] {
                     ContentPart::ToolResult {
                         tool_use_id,
@@ -890,7 +1449,15 @@ mod tests {
                     }
                     _ => panic!("Expected ToolResult at index 0"),
                 }
-                match &parts[1] {
+            }
+            other => panic!("Expected Parts, got {:?}", other),
+        }
+
+        let r2 = &entries[2];
+        match r2.message.as_ref().unwrap().content.as_ref().unwrap() {
+            MessageContent::Parts(parts) => {
+                assert_eq!(parts.len(), 1);
+                match &parts[0] {
                     ContentPart::ToolResult {
                         tool_use_id,
                         content,
@@ -900,7 +1467,7 @@ mod tests {
                         assert_eq!(content.text(), "file b");
                         assert!(is_error);
                     }
-                    _ => panic!("Expected ToolResult at index 1"),
+                    _ => panic!("Expected ToolResult at index 0"),
                 }
             }
             other => panic!("Expected Parts, got {:?}", other),

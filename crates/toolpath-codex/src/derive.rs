@@ -217,6 +217,35 @@ fn build_step(
         convo_extra.insert("thinking".into(), json!(th));
     }
     if !turn.tool_uses.is_empty() {
+        // `tool_uses` array shape matches what `toolpath_convo::extract`
+        // reads (id, name, input, category, result). Without this the
+        // tool calls vanish on extract → ConversationView → ClaudeProjector
+        // and Claude's UI shows assistant text only — no tool calls, no
+        // results. Keep the name+call_id+summary aliases too so existing
+        // consumers don't break.
+        let uses: Vec<Value> = turn
+            .tool_uses
+            .iter()
+            .map(|tu| {
+                let mut obj = serde_json::Map::new();
+                obj.insert("id".into(), json!(tu.id));
+                obj.insert("name".into(), json!(tu.name));
+                obj.insert("input".into(), tu.input.clone());
+                if let Some(cat) = tu.category {
+                    obj.insert("category".into(), json!(cat));
+                }
+                if let Some(r) = tu.result.as_ref() {
+                    obj.insert(
+                        "result".into(),
+                        json!({"content": r.content, "is_error": r.is_error}),
+                    );
+                }
+                Value::Object(obj)
+            })
+            .collect();
+        convo_extra.insert("tool_uses".into(), Value::Array(uses));
+
+        // Legacy summary for human-readable consumers / displays.
         let calls: Vec<Value> = turn
             .tool_uses
             .iter()

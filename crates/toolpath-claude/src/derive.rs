@@ -189,6 +189,70 @@ pub fn derive_path(conversation: &Conversation, config: &DeriveConfig) -> Path {
         steps.push(init);
     }
 
+    // Emit headerless preamble lines (ai-title, last-prompt, queue-operation,
+    // permission-mode, file-history-snapshot) as conversation.event steps so
+    // they survive the Path round-trip. These don't have a uuid or a message,
+    // so they live on `conversation.preamble`, not `entries`.
+    for (idx, raw) in conversation.preamble.iter().enumerate() {
+        let event_type = raw
+            .get("type")
+            .and_then(|v| v.as_str())
+            .unwrap_or("preamble")
+            .to_string();
+        let timestamp = raw
+            .get("timestamp")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+
+        actors
+            .entry("tool:claude-code".to_string())
+            .or_insert_with(|| ActorDefinition {
+                name: Some("Claude Code".to_string()),
+                ..Default::default()
+            });
+
+        let mut event_extra: HashMap<String, serde_json::Value> = HashMap::new();
+        event_extra.insert("entry_type".to_string(), json!(event_type));
+        // Carry the original line's fields verbatim (minus the redundant `type`).
+        if let Some(obj) = raw.as_object() {
+            for (k, v) in obj {
+                if k != "type" {
+                    event_extra.insert(k.clone(), v.clone());
+                }
+            }
+        }
+
+        let parents = last_step_id
+            .as_ref()
+            .map(|s| vec![s.clone()])
+            .unwrap_or_default();
+        let step = Step {
+            step: StepIdentity {
+                id: format!("{}-preamble-{}", conversation.session_id, idx),
+                parents,
+                actor: "tool:claude-code".into(),
+                timestamp,
+            },
+            change: {
+                let mut m = HashMap::new();
+                m.insert(
+                    convo_artifact.clone(),
+                    ArtifactChange {
+                        raw: None,
+                        structural: Some(StructuralChange {
+                            change_type: "conversation.event".to_string(),
+                            extra: event_extra,
+                        }),
+                    },
+                );
+                m
+            },
+            meta: None,
+        };
+        steps.push(step);
+    }
+
     for (entry_idx, entry) in conversation.entries.iter().enumerate() {
         // Determine if this is a conversational entry (user/assistant with message)
         // or a non-message event entry
@@ -332,6 +396,11 @@ pub fn derive_path(conversation: &Conversation, config: &DeriveConfig) -> Path {
         let mut text_parts: Vec<String> = Vec::new();
         let mut thinking_parts: Vec<String> = Vec::new();
         let mut tool_use_infos: Vec<ToolUseInfo> = Vec::new();
+        // Track whether the entry had a Thinking content part at all,
+        // independent of whether its plaintext was empty. Encrypted-
+        // reasoning blocks ship with `thinking: ""` and a signature, so
+        // text-emptiness alone isn't a reliable "skip this entry" signal.
+        let mut had_thinking_part = false;
 
         match &message.content {
             Some(MessageContent::Parts(parts)) => {
@@ -341,6 +410,7 @@ pub fn derive_path(conversation: &Conversation, config: &DeriveConfig) -> Path {
                             text_parts.push(text.clone());
                         }
                         ContentPart::Thinking { thinking, .. } => {
+                            had_thinking_part = true;
                             if config.include_thinking && !thinking.trim().is_empty() {
                                 thinking_parts.push(thinking.clone());
                             }
@@ -365,8 +435,115 @@ pub fn derive_path(conversation: &Conversation, config: &DeriveConfig) -> Path {
         // Collect tool name list for the summary field
         let tool_names: Vec<String> = tool_use_infos.iter().map(|t| t.name.clone()).collect();
 
-        // Skip entries with no conversation content and no tool uses
-        if text_parts.is_empty() && thinking_parts.is_empty() && tool_use_infos.is_empty() {
+        // Tool-result-only user entries — no human text, no thinking, no
+        // tool_use parts, but they DO have tool_result parts whose UUID is
+        // referenced by the next assistant turn's parentUuid. Emit them
+        // as conversation.event steps so the UUID survives the round-trip
+        // (and the projector can re-attach the original `toolUseResult`
+        // blob, promptId, slug, etc.). Without this the parent chain
+        // breaks and Claude's UI orphans every tool result.
+        let is_tool_result_user = matches!(message.role, MessageRole::User)
+            && text_parts.is_empty()
+            && thinking_parts.is_empty()
+            && !had_thinking_part
+            && tool_use_infos.is_empty()
+            && message
+                .content
+                .as_ref()
+                .map(|c| {
+                    matches!(c, MessageContent::Parts(parts) if parts.iter().any(|p| matches!(p, ContentPart::ToolResult { .. })))
+                })
+                .unwrap_or(false);
+
+        if is_tool_result_user {
+            // Snapshot every part of the tool-result entry so the projector
+            // can rebuild it byte-identical. Each tool_result part lands
+            // under its tool_use_id; outer-entry fields go on the event
+            // itself.
+            let mut event_extra: HashMap<String, serde_json::Value> = HashMap::new();
+            event_extra.insert("entry_type".to_string(), json!("tool_result_user"));
+            if let Some(MessageContent::Parts(parts)) = &message.content {
+                let mut results: Vec<serde_json::Value> = Vec::new();
+                for part in parts {
+                    if let ContentPart::ToolResult {
+                        tool_use_id,
+                        content,
+                        is_error,
+                    } = part
+                    {
+                        results.push(json!({
+                            "tool_use_id": tool_use_id,
+                            "content": content.text(),
+                            "is_error": is_error,
+                        }));
+                    }
+                }
+                event_extra.insert("tool_results".to_string(), json!(results));
+            }
+            if let Some(tur) = &entry.tool_use_result {
+                event_extra.insert("tool_use_result".to_string(), tur.clone());
+            }
+            if let Some(cwd) = &entry.cwd {
+                event_extra.insert("cwd".to_string(), json!(cwd));
+            }
+            if let Some(version) = &entry.version {
+                event_extra.insert("version".to_string(), json!(version));
+            }
+            if let Some(git_branch) = &entry.git_branch {
+                event_extra.insert("git_branch".to_string(), json!(git_branch));
+            }
+            if let Some(user_type) = &entry.user_type {
+                event_extra.insert("user_type".to_string(), json!(user_type));
+            }
+            if !entry.extra.is_empty() {
+                event_extra.insert("entry_extra".to_string(), json!(entry.extra));
+            }
+
+            let parents = entry.parent_uuid.iter().cloned().collect::<Vec<_>>();
+            let step = Step {
+                step: StepIdentity {
+                    id: entry.uuid.clone(),
+                    parents,
+                    actor: "tool:claude-code".into(),
+                    timestamp: entry.timestamp.clone(),
+                },
+                change: {
+                    let mut m = HashMap::new();
+                    m.insert(
+                        convo_artifact.clone(),
+                        ArtifactChange {
+                            raw: None,
+                            structural: Some(StructuralChange {
+                                change_type: "conversation.event".to_string(),
+                                extra: event_extra,
+                            }),
+                        },
+                    );
+                    m
+                },
+                meta: None,
+            };
+            actors
+                .entry("tool:claude-code".to_string())
+                .or_insert_with(|| ActorDefinition {
+                    name: Some("Claude Code".to_string()),
+                    ..Default::default()
+                });
+            // Don't advance last_step_id — tool-result entries chain off
+            // the assistant they answered, not each other.
+            steps.push(step);
+            continue;
+        }
+
+        // Skip entries with no conversation content and no tool uses.
+        // A bare thinking part still counts as content — dropping it loses
+        // a step in the conversation graph and Claude's UI shows the model
+        // jumping straight from one tool call to the next.
+        if text_parts.is_empty()
+            && thinking_parts.is_empty()
+            && tool_use_infos.is_empty()
+            && !had_thinking_part
+        {
             continue;
         }
 
@@ -439,10 +616,17 @@ pub fn derive_path(conversation: &Conversation, config: &DeriveConfig) -> Path {
         let mut changes = HashMap::new();
         changes.insert(convo_artifact.clone(), convo_change);
 
-        // Build conversation step using full UUID as step ID
+        // Build conversation step using full UUID as step ID.
+        // Always prefer the entry's actual `parent_uuid` — it points at
+        // the previous JSONL entry the user/assistant turn responded to,
+        // which may be an attachment, a tool_result_user event, or another
+        // conversational entry. Falling back to `last_step_id` would
+        // collapse those into a linear chain and break Claude UI rendering
+        // (the next assistant's `parentUuid` would skip the entry it
+        // actually responded to).
         let step_id = entry.uuid.clone();
-        let parents = if entry.is_sidechain {
-            entry.parent_uuid.as_ref().cloned().into_iter().collect()
+        let parents = if let Some(parent) = &entry.parent_uuid {
+            vec![parent.clone()]
         } else {
             last_step_id.iter().cloned().collect()
         };
@@ -1759,10 +1943,12 @@ mod tests {
         let config = DeriveConfig::default();
         let path = derive_path(&convo, &config);
 
-        // Should produce 2 steps: conversation + tool (tool-result-only entry skipped)
-        assert_eq!(path.steps.len(), 2);
+        // 3 steps: assistant conversation.append, tool.invoke, tool_result_user event.
+        // The tool-result-only entry is now preserved as a `conversation.event`
+        // step so its UUID survives the round-trip.
+        assert_eq!(path.steps.len(), 3);
 
-        // The tool step should have the result assembled
+        // The tool step is the second step.
         let tool_step = &path.steps[1];
         assert_eq!(tool_step.step.id, "uuid-assist-1-tool-Read");
         let change = &tool_step.change["/src/lib.rs"];
