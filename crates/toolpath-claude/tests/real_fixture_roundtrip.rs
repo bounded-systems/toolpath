@@ -239,6 +239,168 @@ fn roundtrip_preserves_total_token_usage_when_present() {
     }
 }
 
+/// Reading + re-projecting a real fixture must preserve every JSONL line.
+///
+/// This is the bluntest possible UX-loss check: count source lines, count
+/// projected lines, expect them equal. Catches dropped attachments,
+/// metadata headers (ai-title, last-prompt, queue-operation), and the
+/// permission-mode preamble — all of which were silently lost before.
+#[test]
+fn read_then_project_preserves_line_count() {
+    let convo = ConversationReader::read_conversation(fixture_path()).expect("read claude fixture");
+    let view = toolpath_claude::provider::to_view(&convo);
+    let projected = ClaudeProjector
+        .project(&view)
+        .expect("project back to claude");
+
+    let source_lines = std::fs::read_to_string(fixture_path())
+        .expect("read fixture")
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .count();
+    let projected_lines = projected.preamble.len() + projected.entries.len();
+
+    assert_eq!(
+        source_lines, projected_lines,
+        "line count diverged on read→project (source={source_lines}, projected={projected_lines}). \
+         Indicates silent drops at the reader, IR-conversion, or projection step."
+    );
+}
+
+/// Header / attachment events survive read → IR → project, byte-for-byte.
+///
+/// `ai-title`, `last-prompt`, `queue-operation`, `attachment` carry user-
+/// visible context. They must come back identical after a self-roundtrip.
+#[test]
+fn read_then_project_preserves_metadata_entries() {
+    let convo = ConversationReader::read_conversation(fixture_path()).expect("read claude fixture");
+    let view = toolpath_claude::provider::to_view(&convo);
+    let projected = ClaudeProjector
+        .project(&view)
+        .expect("project back to claude");
+
+    let source_attachments: usize = convo
+        .entries
+        .iter()
+        .filter(|e| e.entry_type == "attachment")
+        .count();
+    let projected_attachments: usize = projected
+        .entries
+        .iter()
+        .filter(|e| e.entry_type == "attachment")
+        .count();
+    assert_eq!(
+        source_attachments, projected_attachments,
+        "attachment entries dropped on roundtrip ({source_attachments} → {projected_attachments})"
+    );
+
+    assert_eq!(
+        convo.preamble.len(),
+        projected.preamble.len(),
+        "preamble line count diverged ({} → {})",
+        convo.preamble.len(),
+        projected.preamble.len()
+    );
+}
+
+/// `toolUseResult` (Bash stdout/stderr, file edit blob, search results)
+/// drives Claude Code's UI rendering of tool calls. Without it the user
+/// loads a roundtripped session and sees no diffs and no shell output.
+#[test]
+fn read_then_project_preserves_tool_use_result_count() {
+    let convo = ConversationReader::read_conversation(fixture_path()).expect("read claude fixture");
+    let view = toolpath_claude::provider::to_view(&convo);
+    let projected = ClaudeProjector
+        .project(&view)
+        .expect("project back to claude");
+
+    let source_with_tur = convo
+        .entries
+        .iter()
+        .filter(|e| e.tool_use_result.is_some())
+        .count();
+    let projected_with_tur = projected
+        .entries
+        .iter()
+        .filter(|e| e.tool_use_result.is_some())
+        .count();
+
+    assert_eq!(
+        source_with_tur, projected_with_tur,
+        "toolUseResult count diverged: source had {source_with_tur}, projection has \
+         {projected_with_tur}. The Claude UI uses this field for diff/shell-output \
+         rendering, so a drop here means visible regression on resume."
+    );
+    assert!(
+        source_with_tur > 0,
+        "fixture should contain at least one tool result — refresh capture"
+    );
+}
+
+/// End-to-end: Claude JSONL → toolpath_claude::derive::derive_path → cached JSON →
+/// toolpath_convo::extract_conversation → ClaudeProjector → JSONL.
+///
+/// This is the actual `path import` / `path export` flow. Tests headerless
+/// preamble lines (ai-title, last-prompt, file-history-snapshot,
+/// permission-mode), attachments, and assistant entries with bare-thinking
+/// content all survive the cache round-trip — the dimensions that were
+/// dropping ~10–25% of source lines on real sessions.
+#[test]
+fn cache_roundtrip_preserves_line_counts_per_type() {
+    use toolpath::v1::Graph;
+    use toolpath_convo::extract_conversation;
+
+    let convo = ConversationReader::read_conversation(fixture_path()).expect("read claude fixture");
+    let path = toolpath_claude::derive::derive_path(
+        &convo,
+        &toolpath_claude::derive::DeriveConfig {
+            include_thinking: false,
+            ..Default::default()
+        },
+    );
+    let graph = Graph::from_path(path);
+    let json = graph.to_json().expect("serialize cached graph");
+    let back = Graph::from_json(&json).expect("re-parse cached graph");
+    let path = back.into_single_path().expect("single path");
+    let view = extract_conversation(&path);
+    let projected = ClaudeProjector
+        .project(&view)
+        .expect("project back to claude");
+
+    let source = std::fs::read_to_string(fixture_path()).expect("read fixture");
+    let source_types: BTreeSet<String> = source
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+        .filter_map(|v| {
+            v.get("type")
+                .and_then(|t| t.as_str())
+                .map(|s| s.to_string())
+        })
+        .collect();
+
+    // For every type that appears in the source, the export should also
+    // produce at least one entry of that type. Catches whole-category drops
+    // (the ai-title / last-prompt / file-history-snapshot regression).
+    let projected_types: BTreeSet<String> = projected
+        .preamble
+        .iter()
+        .filter_map(|v| {
+            v.get("type")
+                .and_then(|t| t.as_str())
+                .map(|s| s.to_string())
+        })
+        .chain(projected.entries.iter().map(|e| e.entry_type.clone()))
+        .collect();
+
+    let missing: Vec<&String> = source_types.difference(&projected_types).collect();
+    assert!(
+        missing.is_empty(),
+        "Whole entry-type categories dropped on cache round-trip: {missing:?}. \
+         The Claude UI relies on these for resume/title/file-snapshot rendering."
+    );
+}
+
 #[test]
 fn projector_output_is_re_parseable_by_reader() {
     let view = load_fixture_view();
