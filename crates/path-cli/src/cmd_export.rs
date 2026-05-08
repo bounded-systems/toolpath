@@ -153,12 +153,12 @@ pub enum ExportTarget {
 
 /// `owner/name` pair for `--repo`.
 #[derive(Debug, Clone)]
-pub struct RepoSpec {
-    pub owner: String,
-    pub name: String,
+pub(crate) struct RepoSpec {
+    pub(crate) owner: String,
+    pub(crate) name: String,
 }
 
-fn parse_repo_spec(s: &str) -> std::result::Result<RepoSpec, String> {
+pub(crate) fn parse_repo_spec(s: &str) -> std::result::Result<RepoSpec, String> {
     let (owner, name) = s
         .split_once('/')
         .ok_or_else(|| format!("expected owner/name, got `{s}`"))?;
@@ -224,6 +224,19 @@ struct PathbaseExportArgs {
     repo: Option<RepoSpec>,
     slug: Option<String>,
     public: bool,
+}
+
+/// Pathbase upload knobs that don't depend on where the body came from.
+/// Identical to [`PathbaseExportArgs`] minus the `input` field — the body
+/// is supplied by the caller (read from cache, derived in memory, …).
+#[cfg(not(target_os = "emscripten"))]
+#[derive(Debug)]
+pub(crate) struct PathbaseUploadArgs {
+    pub(crate) url: Option<String>,
+    pub(crate) anon: bool,
+    pub(crate) repo: Option<RepoSpec>,
+    pub(crate) slug: Option<String>,
+    pub(crate) public: bool,
 }
 
 fn run_claude(input: String, project: Option<PathBuf>, output: Option<PathBuf>) -> Result<()> {
@@ -1208,39 +1221,62 @@ fn run_pathbase(args: PathbaseExportArgs) -> Result<()> {
 
     #[cfg(not(target_os = "emscripten"))]
     {
-        use crate::cmd_pathbase::{
-            anon_paths_post, api_me, credentials_path, load_session, paths_post, repos_post,
-            resolve_url,
-        };
+        use crate::cmd_pathbase::preflight_auth;
 
         let file = cache_ref(&args.input)?;
         let body = std::fs::read_to_string(&file)
             .with_context(|| format!("Failed to read {}", file.display()))?;
-        // Validate locally so we give a clean error rather than relying on
-        // the server to reject malformed payloads.
-        let doc = toolpath::v1::Graph::from_json(&body)
-            .map_err(|e| anyhow::anyhow!("Invalid toolpath document: {}", e))?;
-
-        let stored = load_session(&credentials_path()?)?;
-        let base_url = match (&args.url, &stored) {
-            (Some(u), _) => resolve_url(Some(u.clone())),
-            (None, Some(s)) => s.url.clone(),
-            (None, None) => resolve_url(None),
+        let upload = PathbaseUploadArgs {
+            url: args.url,
+            anon: args.anon,
+            repo: args.repo,
+            slug: args.slug,
+            public: args.public,
         };
+        let base_url = resolve_upload_base_url(&upload);
+        let needs_auth = upload.repo.is_some() || upload.public || upload.slug.is_some();
+        let auth = preflight_auth(&base_url, upload.anon, needs_auth)?;
+        let summary_source = file.display().to_string();
+        run_pathbase_inner(auth, base_url, upload, &body, &summary_source)
+    }
+}
 
-        // Anonymous mode: explicit --anon, or no credentials at all and no
-        // override flags steering us toward an authed endpoint.
-        let go_anon = args.anon || (stored.is_none() && args.repo.is_none() && args.slug.is_none());
+/// Resolve the upload target URL from the CLI flag, the stored session,
+/// or the default. Mirrors the order used inside `run_pathbase_inner` so
+/// `cmd_share`'s pre-flight resolution agrees with the eventual upload.
+#[cfg(not(target_os = "emscripten"))]
+pub(crate) fn resolve_upload_base_url(args: &PathbaseUploadArgs) -> String {
+    use crate::cmd_pathbase::{credentials_path, load_session, resolve_url};
 
-        if go_anon {
-            if !args.anon && stored.is_none() {
-                eprintln!(
-                    "note: not logged in — uploading anonymously (not listable). Run `path auth login --url {base_url}` for a listable upload."
-                );
-            }
-            let resp = anon_paths_post(&base_url, &body)?;
-            // Server returns either a full URL or a path-only string; in the
-            // latter case prefix the base so the user gets a clickable link.
+    if let Some(u) = &args.url {
+        return resolve_url(Some(u.clone()));
+    }
+    if let Ok(path) = credentials_path()
+        && let Ok(Some(s)) = load_session(&path)
+    {
+        return s.url;
+    }
+    resolve_url(None)
+}
+
+#[cfg(not(target_os = "emscripten"))]
+pub(crate) fn run_pathbase_inner(
+    auth: crate::cmd_pathbase::AuthMode,
+    base_url: String,
+    args: PathbaseUploadArgs,
+    body: &str,
+    summary_source: &str,
+) -> Result<()> {
+    use crate::cmd_pathbase::{AuthMode, anon_paths_post, paths_post, repos_post};
+
+    // Validate locally so we give a clean error rather than relying on
+    // the server to reject malformed payloads.
+    let doc = toolpath::v1::Graph::from_json(body)
+        .map_err(|e| anyhow::anyhow!("Invalid toolpath document: {}", e))?;
+
+    let (token, username) = match auth {
+        AuthMode::Anon => {
+            let resp = anon_paths_post(&base_url, body)?;
             let printable = if resp.url.starts_with("http://") || resp.url.starts_with("https://") {
                 resp.url.clone()
             } else if resp.url.starts_with('/') {
@@ -1248,84 +1284,70 @@ fn run_pathbase(args: PathbaseExportArgs) -> Result<()> {
             } else {
                 format!("{base_url}/{}", resp.url)
             };
-            println!("{printable}");
+            // Summary first on stderr, then the URL on stdout — the
+            // share URL is the primary product, so it's the last line
+            // the user (or a script piping the output) sees.
             eprintln!(
                 "Uploaded {} → anon path {} ({} bytes)",
-                file.display(),
+                summary_source,
                 resp.id,
                 body.len()
             );
+            println!("{printable}");
             return Ok(());
         }
+        AuthMode::Authed { token, username } => (token, username),
+    };
 
-        let session = stored.ok_or_else(|| {
-            anyhow::anyhow!("Not logged in. Run `path auth login` or pass `--anon`.")
-        })?;
-        if host_of(&base_url) != host_of(&session.url) {
-            eprintln!(
-                "warning: uploading to {} with a token issued by {}; expect 401 unless this is the same deployment",
-                base_url, session.url
-            );
+    let (owner, repo) = match args.repo {
+        Some(spec) => (spec.owner, spec.name),
+        None => {
+            // Pathstash default: own the repo "pathstash" under the username
+            // we resolved during preflight. Create it on demand.
+            repos_post(&base_url, &token, "pathstash")?;
+            (username, "pathstash".to_string())
         }
+    };
 
-        let (owner, repo) = match args.repo {
-            Some(spec) => (spec.owner, spec.name),
-            None => {
-                // Pathstash default: own the repo "pathstash" under our username,
-                // creating it on demand. api_me is the source of truth for the
-                // username (display name in stored.user can drift).
-                let user = api_me(&base_url, &session.token)?;
-                repos_post(&base_url, &session.token, "pathstash")?;
-                (user.username, "pathstash".to_string())
-            }
-        };
+    let slug = args.slug.unwrap_or_else(|| derive_slug(&doc));
+    let created = paths_post(&base_url, &token, &owner, &repo, &slug, body, args.public)?;
 
-        let slug = args.slug.unwrap_or_else(|| derive_slug(&doc));
-        let created = paths_post(
-            &base_url,
-            &session.token,
-            &owner,
-            &repo,
-            &slug,
-            &body,
-            args.public,
-        )?;
-
-        // The visibility we surface is what the server actually applied,
-        // not what we requested. If a server-side policy ever clamps
-        // `is_public` (rate limits, account flags, future feature flags),
-        // we render the URL form the path can actually be reached at.
-        if created.is_public != args.public {
-            eprintln!(
-                "note: requested is_public={} but server applied is_public={}",
-                args.public, created.is_public
-            );
-        }
-        let visibility = if created.is_public {
-            "public"
-        } else {
-            "secret"
-        };
-        let url = pathbase_share_url(
-            &base_url,
-            &owner,
-            &repo,
-            &created.slug,
-            &created.id,
-            created.is_public,
-        );
-        println!("{url}");
+    // The visibility we surface is what the server actually applied,
+    // not what we requested. If a server-side policy ever clamps
+    // `is_public` (rate limits, account flags, future feature flags),
+    // we render the URL form the path can actually be reached at.
+    if created.is_public != args.public {
         eprintln!(
-            "Uploaded {} → {}/{}/{} ({} path, {} bytes)",
-            file.display(),
-            owner,
-            repo,
-            created.slug,
-            visibility,
-            body.len()
+            "note: requested is_public={} but server applied is_public={}",
+            args.public, created.is_public
         );
-        Ok(())
     }
+    let visibility = if created.is_public {
+        "public"
+    } else {
+        "secret"
+    };
+    let url = pathbase_share_url(
+        &base_url,
+        &owner,
+        &repo,
+        &created.slug,
+        &created.id,
+        created.is_public,
+    );
+    // Summary first on stderr, URL last on stdout — same ordering as
+    // the anon path so the share URL is consistently the final line.
+    eprintln!(
+        "Uploaded {} → {}/{}/{} ({} path, {} bytes)",
+        summary_source,
+        owner,
+        repo,
+        created.slug,
+        visibility,
+        body.len()
+    );
+    println!("{url}");
+    Ok(())
 }
 
 /// Pick the canonical share URL for a path uploaded via `export pathbase`.
@@ -1390,21 +1412,6 @@ fn derive_slug(doc: &toolpath::v1::Graph) -> String {
     let bytes = serde_json::to_vec(doc).unwrap_or_default();
     let hex = format!("{:x}", Sha256::digest(&bytes));
     format!("path-{}", &hex[..12])
-}
-
-/// Extract `scheme://host[:port]` from a URL, dropping any path/query.
-/// Returns the input unchanged if it doesn't look like a URL.
-#[cfg(not(target_os = "emscripten"))]
-fn host_of(url: &str) -> &str {
-    let after_scheme = match url.find("://") {
-        Some(i) => i + 3,
-        None => return url,
-    };
-    // Find the next `/` after the scheme://; everything before it is host[:port].
-    match url[after_scheme..].find('/') {
-        Some(off) => &url[..after_scheme + off],
-        None => url,
-    }
 }
 
 #[cfg(all(test, not(target_os = "emscripten")))]
@@ -1548,21 +1555,6 @@ mod tests {
         std::fs::write(&input_path, "not json").unwrap();
         let err = run_claude(input_path.to_string_lossy().to_string(), None, None).unwrap_err();
         assert!(err.to_string().contains("parse") || err.to_string().contains("Failed"));
-    }
-
-    #[test]
-    fn host_of_strips_path() {
-        assert_eq!(host_of("https://pathbase.dev"), "https://pathbase.dev");
-        assert_eq!(host_of("https://pathbase.dev/"), "https://pathbase.dev");
-        assert_eq!(
-            host_of("https://pathbase.dev/api/v1/traces"),
-            "https://pathbase.dev"
-        );
-        assert_eq!(
-            host_of("http://127.0.0.1:9000/foo"),
-            "http://127.0.0.1:9000"
-        );
-        assert_eq!(host_of("not-a-url"), "not-a-url");
     }
 
     #[test]

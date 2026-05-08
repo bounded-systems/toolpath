@@ -1,9 +1,13 @@
 //! Shared Pathbase client helpers.
 //!
-//! Hosts the HTTP client and session-storage logic used by `cmd_auth`,
-//! `cmd_import`, and `cmd_export`. Config-dir resolution lives in the
-//! sibling `config` module so `cmd_cache` (which doesn't depend on
-//! reqwest and must build on emscripten) can reuse it.
+//! Wraps the typed `pathbase-client` (generated from
+//! `crates/pathbase-client/openapi.json` — refresh via
+//! `scripts/refresh-pathbase-openapi.sh`) plus session-storage logic
+//! used by `cmd_auth`, `cmd_import`, `cmd_export`, and `cmd_share`.
+//! Every Pathbase HTTP call now goes through the typed client; no
+//! hand-rolled reqwest left in this module. Config-dir resolution lives
+//! in the sibling `config` module so `cmd_cache` (which doesn't depend
+//! on reqwest and must build on emscripten) can reuse it.
 
 use anyhow::{Context, Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
@@ -71,6 +75,21 @@ pub(crate) fn resolve_url(cli_url: Option<String>) -> String {
     raw.trim_end_matches('/').to_string()
 }
 
+/// Extract `scheme://host[:port]` from a URL, dropping any path/query.
+/// Returns the input unchanged if it doesn't look like a URL. Used to
+/// compare a stored session's host against the upload target so we can
+/// warn / fall back when the two don't agree.
+pub(crate) fn host_of(url: &str) -> &str {
+    let after_scheme = match url.find("://") {
+        Some(i) => i + 3,
+        None => return url,
+    };
+    match url[after_scheme..].find('/') {
+        Some(off) => &url[..after_scheme + off],
+        None => url,
+    }
+}
+
 pub(crate) fn prompt_line(prompt: &str) -> Result<String> {
     use std::io::{BufRead, Write};
     let mut stdout = std::io::stdout();
@@ -84,79 +103,195 @@ pub(crate) fn prompt_line(prompt: &str) -> Result<String> {
 
 // ── HTTP layer ──────────────────────────────────────────────────────────
 
-pub(crate) fn http_client() -> Result<reqwest::blocking::Client> {
-    reqwest::blocking::Client::builder()
-        .user_agent(concat!("path-cli/", env!("CARGO_PKG_VERSION")))
-        .timeout(std::time::Duration::from_secs(30))
-        .build()
-        .context("failed to build HTTP client")
-}
-
-#[derive(Deserialize)]
-pub(crate) struct RedeemResponse {
-    pub token: String,
-    pub user: User,
-}
-
 pub(crate) fn api_redeem(base_url: &str, code: &str) -> Result<(String, User)> {
-    let client = http_client()?;
-    let resp = client
-        .post(format!("{base_url}/api/v1/auth/cli/redeem"))
-        .json(&serde_json::json!({ "code": code }))
-        .send()
-        .with_context(|| format!("connect to {base_url}"))?;
-
-    let status = resp.status();
-    let body = resp.text().unwrap_or_default();
-
-    if !status.is_success() {
-        if status == reqwest::StatusCode::UNAUTHORIZED {
-            bail!("code is invalid, already used, or expired — generate a new one");
+    let body = pathbase_client::types::RedeemBody {
+        code: code.to_string(),
+    };
+    let client = pathbase_client(base_url, None)?;
+    match block_on(client.cli_redeem(&body)) {
+        Ok(resp) => {
+            let inner = resp.into_inner();
+            let u = inner.user;
+            Ok((
+                inner.token,
+                User {
+                    id: u.id.to_string(),
+                    username: u.username,
+                    email: u.email,
+                    display_name: u.display_name,
+                    avatar_url: u.avatar_url,
+                },
+            ))
         }
-        if status == reqwest::StatusCode::BAD_REQUEST {
-            let msg = serde_json::from_str::<serde_json::Value>(&body)
-                .ok()
-                .and_then(|v| v.get("error").and_then(|e| e.as_str()).map(String::from))
-                .unwrap_or_else(|| body.clone());
-            bail!("{msg}");
+        Err(pathbase_client::Error::ErrorResponse(resp)) => match resp.status().as_u16() {
+            401 => bail!("code is invalid, already used, or expired — generate a new one"),
+            400 => bail!("invalid code format"),
+            code => bail!("redeem failed (HTTP {code})"),
+        },
+        Err(pathbase_client::Error::UnexpectedResponse(resp)) => {
+            let status = resp.status();
+            let body = block_on(resp.text()).unwrap_or_default();
+            let msg = error_message(&body).unwrap_or_else(|| short_body(&body));
+            if msg.is_empty() {
+                bail!("redeem failed ({status})")
+            } else {
+                bail!("redeem failed ({status}): {msg}")
+            }
         }
-        bail!("redeem failed ({status}): {body}");
+        Err(pathbase_client::Error::CommunicationError(e)) => {
+            bail!("connect to {base_url}: {}", reqwest_hint(&e))
+        }
+        Err(e) => Err(anyhow!("redeem failed: {}", full_chain(&e))),
     }
-
-    let parsed: RedeemResponse =
-        serde_json::from_str(&body).with_context(|| format!("parsing redeem response: {body}"))?;
-    Ok((parsed.token, parsed.user))
 }
 
 pub(crate) fn api_logout(base_url: &str, token: &str) -> Result<()> {
-    let client = http_client()?;
-    let resp = client
-        .post(format!("{base_url}/api/v1/auth/logout"))
-        .bearer_auth(token)
-        .send()
-        .with_context(|| format!("connect to {base_url}"))?;
-    if !resp.status().is_success() && resp.status() != reqwest::StatusCode::NO_CONTENT {
-        bail!("server returned {}", resp.status());
+    let client = pathbase_client(base_url, Some(token))?;
+    match block_on(client.logout()) {
+        Ok(_) => Ok(()),
+        Err(pathbase_client::Error::ErrorResponse(resp)) => {
+            bail!("server returned {}", resp.status())
+        }
+        Err(pathbase_client::Error::UnexpectedResponse(resp)) => {
+            bail!("server returned {}", resp.status())
+        }
+        Err(pathbase_client::Error::CommunicationError(e)) => {
+            bail!("connect to {base_url}: {}", reqwest_hint(&e))
+        }
+        Err(e) => Err(anyhow!("connect to {base_url}: {}", full_chain(&e))),
     }
-    Ok(())
 }
 
+/// Errors are intentionally terse one-liners — callers compose them
+/// into either a fallback notice ("note: <err>; falling back to
+/// anonymous") or a propagated error with actionable next-step hints.
+/// Don't bake the hints in here; otherwise the fallback notice gets
+/// telephone-pole long.
 pub(crate) fn api_me(base_url: &str, token: &str) -> Result<User> {
-    let client = http_client()?;
-    let resp = client
-        .get(format!("{base_url}/api/v1/auth/me"))
-        .bearer_auth(token)
-        .send()
-        .with_context(|| format!("connect to {base_url}"))?;
+    let client = pathbase_client(base_url, Some(token))?;
+    match block_on(client.get_me()) {
+        Ok(resp) => {
+            let u = resp.into_inner();
+            Ok(User {
+                id: u.id.to_string(),
+                username: u.username,
+                email: u.email,
+                display_name: u.display_name,
+                avatar_url: u.avatar_url,
+            })
+        }
+        Err(pathbase_client::Error::ErrorResponse(resp)) => {
+            let status = resp.status();
+            if status == reqwest::StatusCode::UNAUTHORIZED
+                || status == reqwest::StatusCode::FORBIDDEN
+            {
+                bail!("{base_url} rejected the stored credentials ({status})")
+            } else {
+                bail!("{base_url} returned {status} on /api/v1/users/me")
+            }
+        }
+        Err(pathbase_client::Error::UnexpectedResponse(resp)) => {
+            bail!("{base_url} returned {} on /api/v1/users/me", resp.status())
+        }
+        Err(pathbase_client::Error::InvalidResponsePayload(_, _)) => {
+            bail!("{base_url} isn't a Pathbase deployment (non-JSON /api/v1/users/me response)")
+        }
+        Err(pathbase_client::Error::CommunicationError(e)) => {
+            bail!("connect to {base_url}: {}", reqwest_hint(&e))
+        }
+        Err(e) => Err(anyhow!("connect to {base_url}: {}", full_chain(&e))),
+    }
+}
 
-    if resp.status() == reqwest::StatusCode::UNAUTHORIZED {
-        bail!("stored session is no longer valid — run `path auth login` again");
+/// Pre-resolved upload mode. Produced by [`preflight_auth`] before any
+/// expensive work (session pickers, cache writes, derive passes) so that
+/// callers can fail fast or fall back to anonymous mode without making
+/// the user select a session and *then* discover the credentials are bad.
+#[derive(Debug)]
+pub(crate) enum AuthMode {
+    /// Use the public anonymous endpoint. No credentials required;
+    /// 5 MB cap and rate-limited.
+    Anon,
+    /// Use the authenticated endpoint. Credentials have already been
+    /// validated against the target server via `api_me`.
+    Authed { token: String, username: String },
+}
+
+/// Probe credentials and decide whether the upload should go authed or
+/// anonymous, *before* any picker/derive/cache work. Behavior:
+///
+/// - `--anon` → `Anon`, no credentials check.
+/// - No stored credentials and no auth-requiring flags → `Anon` with the
+///   "not logged in — uploading anonymously" notice.
+/// - Stored credentials present → call `api_me` against the target URL.
+///   - On success → `Authed { token, username }`.
+///   - On failure with no auth-requiring flags (`--repo`/`--public`/`--slug`)
+///     → fall back to `Anon` with a stderr notice explaining why.
+///   - On failure with auth-requiring flags → propagate the error so the
+///     user knows their explicit request can't be satisfied.
+///
+/// `host_of(base_url) != host_of(stored.url)` triggers an advisory warning
+/// before the credentials probe so the user sees the mismatch even if
+/// `api_me` happens to succeed.
+pub(crate) fn preflight_auth(base_url: &str, anon: bool, needs_auth: bool) -> Result<AuthMode> {
+    if anon {
+        return Ok(AuthMode::Anon);
     }
-    if !resp.status().is_success() {
-        bail!("server returned {}", resp.status());
+    let stored = load_session(&credentials_path()?)?;
+
+    let go_anon = stored.is_none() && !needs_auth;
+    if go_anon {
+        eprintln!(
+            "note: not logged in — uploading anonymously (not listable). \
+             Run `path auth login --url {base_url}` for a listable upload."
+        );
+        return Ok(AuthMode::Anon);
     }
-    let user: User = resp.json().context("parsing /auth/me response")?;
-    Ok(user)
+
+    let session = match stored {
+        Some(s) => s,
+        None => bail!("Not logged in. Run `path auth login` or pass `--anon`."),
+    };
+
+    if host_of(base_url) != host_of(&session.url) {
+        eprintln!(
+            "warning: stored credentials are for {}, but you're uploading to {}.",
+            session.url, base_url
+        );
+    }
+
+    match api_me(base_url, &session.token) {
+        Ok(user) => Ok(AuthMode::Authed {
+            token: session.token,
+            username: user.username,
+        }),
+        Err(e) if needs_auth => Err(e.context(format!(
+            "--repo / --public / --slug require an authenticated upload. \
+             Run `path auth login --url {base_url}` to authenticate against this \
+             server, or drop those flags to upload anonymously."
+        ))),
+        Err(e) => {
+            eprintln!("note: {e}; falling back to anonymous upload.");
+            Ok(AuthMode::Anon)
+        }
+    }
+}
+
+/// Trim a response body to a single-line snippet for error messages.
+/// Replaces newlines, collapses long bodies down to ~200 chars with an ellipsis.
+fn short_body(body: &str) -> String {
+    const MAX: usize = 200;
+    let cleaned: String = body.replace(['\n', '\r'], " ");
+    let trimmed = cleaned.trim();
+    if trimmed.is_empty() {
+        return "<empty body>".to_string();
+    }
+    if trimmed.chars().count() > MAX {
+        let head: String = trimmed.chars().take(MAX - 1).collect();
+        format!("{head}…")
+    } else {
+        trimmed.to_string()
+    }
 }
 
 // ── pathbase-client bridge ─────────────────────────────────────────────
@@ -226,7 +361,7 @@ pub(crate) fn anon_paths_post(base_url: &str, document_json: &str) -> Result<Ano
             let inner = resp.into_inner();
             Ok(AnonUploadResponse {
                 id: inner.id,
-                url: inner.url,
+                url: inner.share_url,
             })
         }
         Err(pathbase_client::Error::ErrorResponse(resp)) => match resp.status().as_u16() {
@@ -237,20 +372,33 @@ pub(crate) fn anon_paths_post(base_url: &str, document_json: &str) -> Result<Ano
             code => bail!("anon upload failed (HTTP {code})"),
         },
         Err(pathbase_client::Error::UnexpectedResponse(resp)) => {
-            bail!(
-                "anon upload returned unexpected status: HTTP {}",
-                resp.status()
-            )
+            let status = resp.status();
+            let body = block_on(resp.text()).unwrap_or_default();
+            let msg = error_message(&body).unwrap_or_else(|| short_body(&body));
+            if msg.is_empty() {
+                bail!("anon upload failed ({status})")
+            } else {
+                bail!("anon upload failed ({status}): {msg}")
+            }
         }
-        Err(e) => Err(anyhow!("anon upload failed: {e}")),
+        Err(pathbase_client::Error::CommunicationError(e)) => {
+            bail!("anon upload failed: {}", reqwest_hint(&e))
+        }
+        Err(e) => Err(anyhow!("anon upload failed: {}", full_chain(&e))),
     }
 }
 
 /// `POST /api/v1/repos/{owner}/{repo}/paths` — listable upload to a
-/// repo the authenticated user owns. `is_public=false` writes a
-/// pathstash-style secret/unlisted path; the URL is still publicly
-/// addressable (UUIDs are public for both secret and public paths) but
-/// won't appear in any user's listing.
+/// repo the authenticated user owns. Multi-path graphs go to the
+/// sibling `/graphs` endpoint, but `path share` only ever uploads
+/// single-path graphs.
+///
+/// Per the spec, `is_public` defaults to **true** on the server side.
+/// We always pass `Some(is_public)` explicitly so the share command's
+/// default (`--public` unset → `is_public=false`) reliably writes a
+/// secret/unlisted path; the path stays addressable via its UUID
+/// (`/<owner>/<repo>/paths/<id>`) as the unguessable share-by-link
+/// form, but won't appear in any user's listing.
 pub(crate) fn paths_post(
     base_url: &str,
     token: &str,
@@ -276,7 +424,11 @@ pub(crate) fn paths_post(
             })
         }
         Err(pathbase_client::Error::ErrorResponse(resp)) => match resp.status().as_u16() {
-            401 => bail!("stored session is no longer valid — run `path auth login` again"),
+            401 => bail!(
+                "{base_url} rejected your stored credentials (HTTP 401). \
+                 Run `path auth login --url {base_url}` to authenticate against this server, \
+                 or pass `--anon` to upload anonymously."
+            ),
             code => bail!("upload to {owner}/{repo} failed (HTTP {code})"),
         },
         Err(pathbase_client::Error::UnexpectedResponse(resp)) => {
@@ -289,7 +441,10 @@ pub(crate) fn paths_post(
                 bail!("upload to {owner}/{repo} failed ({status}): {msg}")
             }
         }
-        Err(e) => Err(anyhow!("upload to {owner}/{repo} failed: {e}")),
+        Err(pathbase_client::Error::CommunicationError(e)) => {
+            bail!("upload to {owner}/{repo} failed: {}", reqwest_hint(&e))
+        }
+        Err(e) => Err(anyhow!("upload to {owner}/{repo} failed: {}", full_chain(&e))),
     }
 }
 
@@ -297,6 +452,41 @@ fn error_message(body: &str) -> Option<String> {
     serde_json::from_str::<serde_json::Value>(body)
         .ok()
         .and_then(|v| v.get("error").and_then(|e| e.as_str()).map(String::from))
+}
+
+/// Walk an error's `source()` chain and join each link's `Display`
+/// with `: `. progenitor's `CommunicationError(reqwest::Error)`
+/// renders as "error sending request" by default — the actually-useful
+/// detail (timeout / connection refused / TLS handshake) sits two or
+/// three levels down in `source()`. This surfaces it.
+fn full_chain(err: &(dyn std::error::Error + 'static)) -> String {
+    let mut s = err.to_string();
+    let mut cur = err.source();
+    while let Some(c) = cur {
+        s.push_str(": ");
+        s.push_str(&c.to_string());
+        cur = c.source();
+    }
+    s
+}
+
+/// Classify a `reqwest::Error` into a short hint so users can tell
+/// "took too long" from "couldn't connect" from "server hung up." Falls
+/// back to the full source chain when no specific hint applies.
+fn reqwest_hint(err: &reqwest::Error) -> String {
+    if err.is_timeout() {
+        return "request timed out after 30s — try again, or shrink the upload".to_string();
+    }
+    if err.is_connect() {
+        return format!("couldn't connect to server: {}", full_chain(err));
+    }
+    if err.is_body() {
+        return format!("body error: {}", full_chain(err));
+    }
+    if err.is_decode() {
+        return format!("response decode error: {}", full_chain(err));
+    }
+    full_chain(err)
 }
 
 /// `POST /api/v1/repos` — create a repo owned by the authenticated user.
@@ -311,7 +501,11 @@ pub(crate) fn repos_post(base_url: &str, token: &str, name: &str) -> Result<()> 
     match block_on(client.create_repo(&body)) {
         Ok(_) => Ok(()),
         Err(pathbase_client::Error::ErrorResponse(resp)) => match resp.status().as_u16() {
-            401 => bail!("stored session is no longer valid — run `path auth login` again"),
+            401 => bail!(
+                "{base_url} rejected your stored credentials (HTTP 401). \
+                 Run `path auth login --url {base_url}` to authenticate against this server, \
+                 or pass `--anon` to upload anonymously."
+            ),
             409 => Ok(()),
             code => bail!("creating repo {name} failed (HTTP {code})"),
         },
@@ -322,24 +516,26 @@ pub(crate) fn repos_post(base_url: &str, token: &str, name: &str) -> Result<()> 
             409 => Ok(()),
             code => bail!("creating repo {name} returned unexpected status: HTTP {code}"),
         },
-        Err(e) => Err(anyhow!("creating repo {name} failed: {e}")),
+        Err(pathbase_client::Error::CommunicationError(e)) => {
+            bail!("creating repo {name} failed: {}", reqwest_hint(&e))
+        }
+        Err(e) => Err(anyhow!("creating repo {name} failed: {}", full_chain(&e))),
     }
 }
 
 /// `GET /api/v1/repos/{owner}/{repo}/paths/{slug}/download` — fetch the
-/// raw toolpath JSON for a path. Public paths and unlisted-but-shared
-/// paths both download without authentication; only fully private paths
-/// (gated by an ACL beyond `is_public=false`) require auth.
+/// reconstructed Graph document for a path.
 ///
-/// **Why this doesn't go through `pathbase-client`.** progenitor's
-/// generated client decodes the response body into
-/// `serde_json::Map<String, Value>` (per the spec's
-/// `application/json` content type) and we'd then re-serialize to get a
-/// String back. That's a wasted round-trip — and the BTreeMap-backed
-/// `serde_json::Map` reorders keys, so the bytes the caller sees aren't
-/// the bytes the server sent. For a "give me back the document I just
-/// uploaded" endpoint, byte-fidelity matters. We use blocking reqwest
-/// directly and forward the response body verbatim.
+/// Per the spec: private paths return 404 unless the caller is
+/// owner-authenticated *or* addresses the path by its UUID
+/// (the unguessable share-by-link form). The 404 message therefore
+/// hints at both possibilities — "not found, or you're not the owner."
+///
+/// Returns a serialized JSON string. The generated client decodes into
+/// `serde_json::Map`, which we re-serialize on the way out — keys may
+/// be reordered relative to the server's bytes, but the consumer parses
+/// to `Graph` and re-serializes anyway, so byte-fidelity isn't a real
+/// requirement.
 pub(crate) fn paths_download(
     base_url: &str,
     token: Option<&str>,
@@ -347,33 +543,35 @@ pub(crate) fn paths_download(
     repo: &str,
     slug: &str,
 ) -> Result<String> {
-    let client = http_client()?;
-    let mut req = client.get(format!(
-        "{base_url}/api/v1/repos/{owner}/{repo}/paths/{slug}/download"
-    ));
-    if let Some(t) = token {
-        req = req.bearer_auth(t);
+    let client = pathbase_client(base_url, token)?;
+    match block_on(client.download_path(owner, repo, slug)) {
+        Ok(resp) => {
+            let map = resp.into_inner();
+            serde_json::to_string(&map).context("re-serializing downloaded path")
+        }
+        Err(pathbase_client::Error::ErrorResponse(resp)) => match resp.status() {
+            reqwest::StatusCode::NOT_FOUND => bail!(
+                "{owner}/{repo}/{slug} not found on {base_url} (or it's a private path \
+                 and you're not the owner — try the path's UUID instead, or \
+                 `path auth login --url {base_url}`)"
+            ),
+            status => bail!("download of {owner}/{repo}/{slug} failed ({status})"),
+        },
+        Err(pathbase_client::Error::UnexpectedResponse(resp)) => {
+            let status = resp.status();
+            let body = block_on(resp.text()).unwrap_or_default();
+            let msg = error_message(&body).unwrap_or_else(|| short_body(&body));
+            bail!("download of {owner}/{repo}/{slug} failed ({status}): {msg}")
+        }
+        Err(pathbase_client::Error::CommunicationError(e)) => bail!(
+            "download of {owner}/{repo}/{slug} failed: {}",
+            reqwest_hint(&e)
+        ),
+        Err(e) => Err(anyhow!(
+            "download of {owner}/{repo}/{slug} failed: {}",
+            full_chain(&e)
+        )),
     }
-    let resp = req
-        .send()
-        .with_context(|| format!("connect to {base_url}"))?;
-
-    let status = resp.status();
-    let text = resp.text().unwrap_or_default();
-
-    if status == reqwest::StatusCode::UNAUTHORIZED {
-        bail!(
-            "this path is private and requires authentication — run `path auth login --url {base_url}` and retry"
-        );
-    }
-    if status == reqwest::StatusCode::NOT_FOUND {
-        bail!("path {owner}/{repo}/{slug} not found on {base_url}");
-    }
-    if !status.is_success() {
-        let msg = error_message(&text).unwrap_or(text);
-        bail!("download of {owner}/{repo}/{slug} failed ({status}): {msg}");
-    }
-    Ok(text)
 }
 
 // ── File storage ────────────────────────────────────────────────────────
@@ -445,6 +643,40 @@ mod tests {
     fn resolve_url_prefers_cli_flag() {
         let got = resolve_url(Some("https://example.com/".into()));
         assert_eq!(got, "https://example.com");
+    }
+
+    #[test]
+    fn host_of_strips_path() {
+        assert_eq!(host_of("https://pathbase.dev"), "https://pathbase.dev");
+        assert_eq!(host_of("https://pathbase.dev/"), "https://pathbase.dev");
+        assert_eq!(
+            host_of("https://pathbase.dev/api/v1/traces"),
+            "https://pathbase.dev"
+        );
+        assert_eq!(
+            host_of("http://127.0.0.1:9000/foo"),
+            "http://127.0.0.1:9000"
+        );
+        assert_eq!(host_of("not-a-url"), "not-a-url");
+    }
+
+    #[test]
+    fn short_body_handles_empty_and_whitespace() {
+        assert_eq!(short_body(""), "<empty body>");
+        assert_eq!(short_body("   \n\t  "), "<empty body>");
+    }
+
+    #[test]
+    fn short_body_collapses_newlines_to_spaces() {
+        assert_eq!(short_body("line1\nline2\r\nline3"), "line1 line2  line3");
+    }
+
+    #[test]
+    fn short_body_truncates_long_input_with_ellipsis() {
+        let long = "x".repeat(500);
+        let s = short_body(&long);
+        assert_eq!(s.chars().count(), 200);
+        assert!(s.ends_with('…'));
     }
 
     #[test]
@@ -621,9 +853,17 @@ mod tests {
     #[test]
     fn paths_post_401_surfaces_relogin_message() {
         let server = MockServer::start("HTTP/1.1 401 Unauthorized", r#"{"error":"bad"}"#);
-        let err =
-            paths_post(&server.base(), "tok", "alex", "pathstash", "s", "{}", false).unwrap_err();
-        assert!(err.to_string().contains("run `path auth login`"));
+        let base = server.base();
+        let err = paths_post(&base, "tok", "alex", "pathstash", "s", "{}", false).unwrap_err();
+        let msg = err.to_string();
+        // Should name the URL the credentials are being rejected by, point at
+        // `path auth login --url`, and offer `--anon` as the bypass.
+        assert!(msg.contains(&base), "expected base URL in error: {msg}");
+        assert!(
+            msg.contains("path auth login --url"),
+            "expected re-auth hint: {msg}"
+        );
+        assert!(msg.contains("--anon"), "expected --anon hint: {msg}");
     }
 
     #[test]
@@ -637,15 +877,17 @@ mod tests {
         assert!(err.to_string().contains("database is on fire"), "{err}");
     }
 
+    /// Anon upload returns `{id, path, share_url}` per the OpenAPI spec.
+    /// We expose `share_url` to callers as the canonical share link.
     #[test]
     fn anon_paths_post_wraps_document_and_omits_auth() {
         let server = MockServer::start(
             "HTTP/1.1 201 Created",
-            r#"{"id":"abc","url":"https://pathbase.dev/anon/abc"}"#,
+            r#"{"id":"abc","path":"/anon/pathstash/paths/abc","share_url":"https://pathbase.dev/anon/pathstash/paths/abc"}"#,
         );
         let resp = anon_paths_post(&server.base(), r#"{"Step":{}}"#).unwrap();
         assert_eq!(resp.id, "abc");
-        assert_eq!(resp.url, "https://pathbase.dev/anon/abc");
+        assert_eq!(resp.url, "https://pathbase.dev/anon/pathstash/paths/abc");
 
         let req = String::from_utf8(server.request()).unwrap();
         assert!(req.starts_with("POST /api/v1/anon/paths "), "got: {req}");
@@ -670,18 +912,23 @@ mod tests {
         repos_post(&server.base(), "tok", "pathstash").unwrap();
     }
 
+    /// Download decodes through `serde_json::Map` and re-serializes, so
+    /// keys may be reordered relative to the server's bytes. The
+    /// downstream cache writer (`write_cached`) round-trips through
+    /// `Graph` and writes pretty-printed JSON anyway, so the only
+    /// invariant we care about is "the JSON parses to the same value".
     #[test]
-    fn paths_download_returns_body_byte_for_byte() {
-        // Key ordering matters: the server's bytes must come back unmodified.
-        // With the round-trip removed (raw blocking GET, no Map decode), this
-        // is a straight string equality. If progenitor ever sneaks back in
-        // for this endpoint, the BTreeMap-backed Map reorders keys and this
-        // assertion catches it.
+    fn paths_download_returns_body_as_json() {
         let body = r#"{"Step":{"step":{"id":"s1","actor":"human:x","timestamp":"2024-01-01T00:00:00Z"},"change":{}}}"#;
         let server = MockServer::start("HTTP/1.1 200 OK", body);
         let got =
             paths_download(&server.base(), Some("tok"), "alex", "pathstash", "my-path").unwrap();
-        assert_eq!(got, body);
+        let got_v: serde_json::Value = serde_json::from_str(&got).unwrap();
+        let want_v: serde_json::Value = serde_json::from_str(body).unwrap();
+        assert_eq!(
+            got_v, want_v,
+            "downloaded body should parse to the same value"
+        );
 
         let req = String::from_utf8(server.request()).unwrap();
         assert!(
@@ -700,5 +947,145 @@ mod tests {
         let err = paths_download(&server.base(), Some("tok"), "alex", "pathstash", "missing")
             .unwrap_err();
         assert!(err.to_string().contains("not found"));
+    }
+
+    // ── preflight_auth ────────────────────────────────────────────────
+    //
+    // The preflight is the gate that decides authed-vs-anon BEFORE the
+    // share picker runs, so a credential rejection shouldn't make the
+    // user pick a session and *then* fail. These tests use
+    // TOOLPATH_CONFIG_DIR + a tempdir-credentials file to drive the
+    // logged-in path through the same MockServer used elsewhere.
+
+    fn write_credentials(dir: &std::path::Path, url: &str) {
+        let creds = StoredSession {
+            url: url.to_string(),
+            token: "tok".into(),
+            user: User {
+                id: "u1".into(),
+                username: "alice".into(),
+                email: None,
+                display_name: None,
+                avatar_url: None,
+            },
+        };
+        store_session(&dir.join(CREDENTIALS_FILE), &creds).unwrap();
+    }
+
+    fn me_response_body(username: &str) -> String {
+        // The generated User type requires id (uuid), username, created_at,
+        // updated_at. Mock the bare minimum that parses cleanly.
+        format!(
+            r#"{{"id":"00000000-0000-0000-0000-000000000001","username":"{username}","created_at":"2024-01-01T00:00:00Z","updated_at":"2024-01-01T00:00:00Z"}}"#
+        )
+    }
+
+    /// Cleared TOOLPATH_CONFIG_DIR + no `--anon` + no auth-requiring flags
+    /// → preflight returns Anon with the "not logged in" notice.
+    #[test]
+    fn preflight_anon_when_logged_out_and_no_auth_flags() {
+        let cfg = tempfile::tempdir().unwrap();
+        let _g = EnvGuard::set("TOOLPATH_CONFIG_DIR", cfg.path().to_str().unwrap());
+        let mode = preflight_auth("https://pathbase.dev", false, false).unwrap();
+        assert!(matches!(mode, AuthMode::Anon));
+    }
+
+    /// Stored credentials AND host matches AND api_me succeeds → Authed.
+    #[test]
+    fn preflight_authed_when_credentials_validate() {
+        let server = MockServer::start(
+            "HTTP/1.1 200 OK",
+            Box::leak(me_response_body("alice").into_boxed_str()),
+        );
+        let cfg = tempfile::tempdir().unwrap();
+        let _g = EnvGuard::set("TOOLPATH_CONFIG_DIR", cfg.path().to_str().unwrap());
+        write_credentials(cfg.path(), &server.base());
+        let base = server.base();
+        let mode = preflight_auth(&base, false, false).unwrap();
+        match mode {
+            AuthMode::Authed { username, .. } => assert_eq!(username, "alice"),
+            AuthMode::Anon => panic!("expected Authed, got Anon"),
+        }
+    }
+
+    /// Stored credentials but api_me rejects with 401 + no auth-requiring
+    /// flags → fall back to Anon (don't error).
+    #[test]
+    fn preflight_falls_back_to_anon_on_401_without_auth_flags() {
+        let server = MockServer::start("HTTP/1.1 401 Unauthorized", "{}");
+        let cfg = tempfile::tempdir().unwrap();
+        let _g = EnvGuard::set("TOOLPATH_CONFIG_DIR", cfg.path().to_str().unwrap());
+        write_credentials(cfg.path(), &server.base());
+        let base = server.base();
+        let mode = preflight_auth(&base, false, false).unwrap();
+        assert!(matches!(mode, AuthMode::Anon));
+    }
+
+    /// Stored credentials but api_me rejects + needs_auth=true → propagate
+    /// the error so the user knows --repo/--public/--slug can't be honored.
+    #[test]
+    fn preflight_propagates_401_when_auth_required() {
+        let server = MockServer::start("HTTP/1.1 401 Unauthorized", "{}");
+        let cfg = tempfile::tempdir().unwrap();
+        let _g = EnvGuard::set("TOOLPATH_CONFIG_DIR", cfg.path().to_str().unwrap());
+        write_credentials(cfg.path(), &server.base());
+        let base = server.base();
+        let err = preflight_auth(&base, false, true).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("--repo"), "expected mention of --repo: {msg}");
+    }
+
+    /// `--anon` short-circuits past every check.
+    #[test]
+    fn preflight_anon_flag_skips_credentials_check() {
+        // Even with valid credentials in place, --anon returns Anon without
+        // calling api_me (no MockServer needed — would 404).
+        let cfg = tempfile::tempdir().unwrap();
+        let _g = EnvGuard::set("TOOLPATH_CONFIG_DIR", cfg.path().to_str().unwrap());
+        write_credentials(cfg.path(), "https://pathbase.dev");
+        let mode = preflight_auth("https://pathbase.dev", true, false).unwrap();
+        assert!(matches!(mode, AuthMode::Anon));
+    }
+
+    /// Test-helper guard for `std::env::set_var`. Process env is shared
+    /// across all `cargo test` threads, so concurrent tests that mutate
+    /// the same key would race — `EnvGuard` serializes them via a global
+    /// mutex held for the guard's lifetime. Drop restores the prior value.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    struct EnvGuard {
+        key: String,
+        prior: Option<std::ffi::OsString>,
+        _lock: std::sync::MutexGuard<'static, ()>,
+    }
+    impl EnvGuard {
+        fn set(key: &str, val: &str) -> Self {
+            // PoisonError on a previously-panicked test still gives us a
+            // valid lock — recover the inner guard and proceed.
+            let lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            let prior = std::env::var_os(key);
+            // SAFETY: ENV_LOCK serializes EnvGuard-using tests against
+            // each other. The only env var these tests touch is
+            // TOOLPATH_CONFIG_DIR, and no other tests in this crate
+            // mutate or read it from the test process.
+            unsafe {
+                std::env::set_var(key, val);
+            }
+            Self {
+                key: key.to_string(),
+                prior,
+                _lock: lock,
+            }
+        }
+    }
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            unsafe {
+                match &self.prior {
+                    Some(v) => std::env::set_var(&self.key, v),
+                    None => std::env::remove_var(&self.key),
+                }
+            }
+        }
     }
 }

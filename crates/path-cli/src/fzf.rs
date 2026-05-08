@@ -37,9 +37,25 @@ fn which(cmd: &str) -> Option<std::path::PathBuf> {
     None
 }
 
-/// Run fzf with the supplied lines on stdin. Returns the selected lines, or
-/// an empty vec if the user cancelled (Esc / Ctrl-C / no match).
-pub fn pick(lines: &[String], opts: &PickOptions<'_>) -> Result<Vec<String>> {
+/// Outcome of an fzf invocation.
+///
+/// Distinguishes a deliberate user cancel (Esc / Ctrl-C, fzf exit 130) from
+/// the no-match case (fzf exit 1). Callers that want to surface a non-zero
+/// exit on cancel can match on `Cancelled`; callers that just want the picked
+/// lines treat both `NoMatch` and `Cancelled` as "empty selection".
+pub enum PickResult {
+    /// fzf exited 0 with at least one selected line.
+    Selected(Vec<String>),
+    /// fzf exited 1: input was non-empty but nothing matched the query.
+    NoMatch,
+    /// fzf exited 130: the user pressed Esc / Ctrl-C / Ctrl-D.
+    Cancelled,
+}
+
+/// Run fzf with the supplied lines on stdin. Returns a `PickResult` so the
+/// caller can distinguish a successful selection from no-match vs. an
+/// explicit user cancel (which some callers map to a non-zero exit).
+pub fn pick(lines: &[String], opts: &PickOptions<'_>) -> Result<PickResult> {
     let mut args: Vec<String> = vec![
         "--delimiter=\t".into(),
         format!("--with-nth={}", opts.with_nth),
@@ -53,7 +69,7 @@ pub fn pick(lines: &[String], opts: &PickOptions<'_>) -> Result<Vec<String>> {
 
     if let Some(preview) = opts.preview {
         args.push(format!("--preview={}", preview));
-        args.push("--preview-window=right:60%:wrap".into());
+        args.push(format!("--preview-window={}", opts.preview_window));
     }
 
     if let Some(header) = opts.header {
@@ -85,9 +101,12 @@ pub fn pick(lines: &[String], opts: &PickOptions<'_>) -> Result<Vec<String>> {
     match output.status.code() {
         Some(0) => {
             let text = String::from_utf8_lossy(&output.stdout);
-            Ok(text.lines().map(|s| s.to_string()).collect())
+            Ok(PickResult::Selected(
+                text.lines().map(|s| s.to_string()).collect(),
+            ))
         }
-        Some(1) | Some(130) => Ok(Vec::new()),
+        Some(1) => Ok(PickResult::NoMatch),
+        Some(130) => Ok(PickResult::Cancelled),
         _ => anyhow::bail!("fzf exited with status {:?}", output.status),
     }
 }
@@ -100,6 +119,9 @@ pub struct PickOptions<'a> {
     pub prompt: &'a str,
     /// Optional `--preview` command. Use `{1}`, `{2}` ... to substitute fields.
     pub preview: Option<&'a str>,
+    /// `--preview-window` placement. Defaults to `right:60%:wrap` (side-by-side);
+    /// pass `up:60%:wrap` for a stacked layout that fits narrow terminals.
+    pub preview_window: &'a str,
     /// Optional header line shown above the list.
     pub header: Option<&'a str>,
     /// Tiebreak ordering — `index` preserves input order.
@@ -114,6 +136,7 @@ impl Default for PickOptions<'_> {
             with_nth: "2..",
             prompt: "> ",
             preview: None,
+            preview_window: "right:60%:wrap",
             header: None,
             tiebreak: "index",
             multi: false,

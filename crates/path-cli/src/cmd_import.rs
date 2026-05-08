@@ -171,9 +171,9 @@ pub fn run(args: ImportArgs, pretty: bool) -> Result<()> {
     emit(&docs, args.force, args.no_cache, pretty)
 }
 
-struct DerivedDoc {
-    cache_id: String,
-    doc: Graph,
+pub(crate) struct DerivedDoc {
+    pub(crate) cache_id: String,
+    pub(crate) doc: Graph,
 }
 
 fn emit(docs: &[DerivedDoc], force: bool, no_cache: bool, pretty: bool) -> Result<()> {
@@ -447,6 +447,26 @@ fn derive_claude_with_manager(
     wrap_paths_claude(paths)
 }
 
+/// Derive a single Claude conversation given an explicit project + session.
+/// Used by `cmd_share` after its picker has resolved the pair; mirrors the
+/// `(Some(p), Some(s), _)` arm in [`derive_claude_with_manager`].
+pub(crate) fn derive_claude_session(project: &str, session: &str) -> Result<DerivedDoc> {
+    let manager = toolpath_claude::ClaudeConvo::new();
+    let cfg = toolpath_claude::derive::DeriveConfig {
+        project_path: Some(project.to_string()),
+        include_thinking: false,
+    };
+    let convo = manager
+        .read_conversation(project, session)
+        .map_err(|e| anyhow::anyhow!("{}", e))?;
+    let path = toolpath_claude::derive::derive_path(&convo, &cfg);
+    let cache_id = make_id("claude", &path.path.id);
+    Ok(DerivedDoc {
+        cache_id,
+        doc: Graph::from_path(path),
+    })
+}
+
 fn wrap_paths_claude(paths: Vec<toolpath::v1::Path>) -> Result<Vec<DerivedDoc>> {
     Ok(paths
         .into_iter()
@@ -496,10 +516,14 @@ fn pick_claude_in_project(
         prompt: "claude session> ",
         preview: Some("path show claude --project {1} --session {2}"),
         header: Some("pick a Claude session (TAB = multi-select, Enter = confirm)"),
+        preview_window: "right:60%:wrap",
         tiebreak: "index",
         multi: true,
     };
-    let selected = fzf::pick(&lines, &opts)?;
+    let selected = match fzf::pick(&lines, &opts)? {
+        fzf::PickResult::Selected(v) => v,
+        fzf::PickResult::NoMatch | fzf::PickResult::Cancelled => Vec::new(),
+    };
     Ok(Some(parse_project_session(&selected)))
 }
 
@@ -542,10 +566,14 @@ fn pick_claude_global(
         prompt: "claude session> ",
         preview: Some("path show claude --project {1} --session {2}"),
         header: Some("pick a Claude session (TAB = multi-select, Enter = confirm)"),
+        preview_window: "right:60%:wrap",
         tiebreak: "index",
         multi: true,
     };
-    let selected = fzf::pick(&lines, &opts)?;
+    let selected = match fzf::pick(&lines, &opts)? {
+        fzf::PickResult::Selected(v) => v,
+        fzf::PickResult::NoMatch | fzf::PickResult::Cancelled => Vec::new(),
+    };
     Ok(Some(parse_project_session(&selected)))
 }
 
@@ -637,6 +665,28 @@ fn derive_gemini_with_manager(
     wrap_paths_gemini(paths)
 }
 
+/// Derive a single Gemini conversation given an explicit project + session.
+pub(crate) fn derive_gemini_session(
+    project: &str,
+    session: &str,
+    include_thinking: bool,
+) -> Result<DerivedDoc> {
+    let manager = toolpath_gemini::GeminiConvo::new();
+    let cfg = toolpath_gemini::derive::DeriveConfig {
+        project_path: Some(project.to_string()),
+        include_thinking,
+    };
+    let convo = manager
+        .read_conversation(project, session)
+        .map_err(|e| anyhow::anyhow!("{}", e))?;
+    let path = toolpath_gemini::derive::derive_path(&convo, &cfg);
+    let cache_id = make_id("gemini", &path.path.id);
+    Ok(DerivedDoc {
+        cache_id,
+        doc: Graph::from_path(path),
+    })
+}
+
 fn wrap_paths_gemini(paths: Vec<toolpath::v1::Path>) -> Result<Vec<DerivedDoc>> {
     Ok(paths
         .into_iter()
@@ -682,10 +732,14 @@ fn pick_gemini_in_project(
         prompt: "gemini session> ",
         preview: Some("path show gemini --project {1} --session {2}"),
         header: Some("pick a Gemini session (TAB = multi-select, Enter = confirm)"),
+        preview_window: "right:60%:wrap",
         tiebreak: "index",
         multi: true,
     };
-    let selected = fzf::pick(&lines, &opts)?;
+    let selected = match fzf::pick(&lines, &opts)? {
+        fzf::PickResult::Selected(v) => v,
+        fzf::PickResult::NoMatch | fzf::PickResult::Cancelled => Vec::new(),
+    };
     Ok(Some(parse_project_session(&selected)))
 }
 
@@ -728,10 +782,14 @@ fn pick_gemini_global(
         prompt: "gemini session> ",
         preview: Some("path show gemini --project {1} --session {2}"),
         header: Some("pick a Gemini session (TAB = multi-select, Enter = confirm)"),
+        preview_window: "right:60%:wrap",
         tiebreak: "index",
         multi: true,
     };
-    let selected = fzf::pick(&lines, &opts)?;
+    let selected = match fzf::pick(&lines, &opts)? {
+        fzf::PickResult::Selected(v) => v,
+        fzf::PickResult::NoMatch | fzf::PickResult::Cancelled => Vec::new(),
+    };
     Ok(Some(parse_project_session(&selected)))
 }
 
@@ -791,6 +849,21 @@ fn derive_codex(session: Option<String>, all: bool) -> Result<Vec<DerivedDoc>> {
     wrap_paths_codex(paths)
 }
 
+/// Derive a single Codex session given an explicit session id.
+pub(crate) fn derive_codex_session(session: &str) -> Result<DerivedDoc> {
+    let manager = toolpath_codex::CodexConvo::new();
+    let config = toolpath_codex::derive::DeriveConfig { project_path: None };
+    let s = manager
+        .read_session(session)
+        .map_err(|e| anyhow::anyhow!("{}", e))?;
+    let path = toolpath_codex::derive::derive_path(&s, &config);
+    let cache_id = make_id("codex", &path.path.id);
+    Ok(DerivedDoc {
+        cache_id,
+        doc: Graph::from_path(path),
+    })
+}
+
 fn wrap_paths_codex(paths: Vec<toolpath::v1::Path>) -> Result<Vec<DerivedDoc>> {
     Ok(paths
         .into_iter()
@@ -838,10 +911,14 @@ fn pick_codex(manager: &toolpath_codex::CodexConvo) -> Result<Option<Vec<String>
         prompt: "codex session> ",
         preview: Some("path show codex --session {1}"),
         header: Some("pick a Codex session (TAB = multi-select, Enter = confirm)"),
+        preview_window: "right:60%:wrap",
         tiebreak: "index",
         multi: true,
     };
-    let selected = fzf::pick(&lines, &opts)?;
+    let selected = match fzf::pick(&lines, &opts)? {
+        fzf::PickResult::Selected(v) => v,
+        fzf::PickResult::NoMatch | fzf::PickResult::Cancelled => Vec::new(),
+    };
     Ok(Some(parse_single_id(&selected)))
 }
 
@@ -919,6 +996,29 @@ fn derive_opencode(
     }
 }
 
+/// Derive a single opencode session given an explicit session id.
+#[cfg(not(target_os = "emscripten"))]
+pub(crate) fn derive_opencode_session(
+    session: &str,
+    no_snapshot_diffs: bool,
+) -> Result<DerivedDoc> {
+    let manager = toolpath_opencode::OpencodeConvo::new();
+    let config = toolpath_opencode::derive::DeriveConfig {
+        no_snapshot_diffs,
+        ..Default::default()
+    };
+    let s = manager
+        .read_session(session)
+        .map_err(|e| anyhow::anyhow!("{}", e))?;
+    let path =
+        toolpath_opencode::derive::derive_path_with_resolver(&s, &config, manager.resolver());
+    let cache_id = make_id("opencode", &path.path.id);
+    Ok(DerivedDoc {
+        cache_id,
+        doc: Graph::from_path(path),
+    })
+}
+
 fn wrap_paths_opencode(paths: Vec<toolpath::v1::Path>) -> Result<Vec<DerivedDoc>> {
     Ok(paths
         .into_iter()
@@ -970,10 +1070,14 @@ fn pick_opencode(
         prompt: "opencode session> ",
         preview: Some("path show opencode --session {1}"),
         header: Some("pick an opencode session (TAB = multi-select, Enter = confirm)"),
+        preview_window: "right:60%:wrap",
         tiebreak: "index",
         multi: true,
     };
-    let selected = fzf::pick(&lines, &opts)?;
+    let selected = match fzf::pick(&lines, &opts)? {
+        fzf::PickResult::Selected(v) => v,
+        fzf::PickResult::NoMatch | fzf::PickResult::Cancelled => Vec::new(),
+    };
     Ok(Some(parse_single_id(&selected)))
 }
 
@@ -1071,6 +1175,27 @@ fn derive_pi_with_manager(
     Ok(docs)
 }
 
+/// Derive a single Pi session given an explicit project + session.
+pub(crate) fn derive_pi_session(
+    project: &str,
+    session: &str,
+    base: Option<PathBuf>,
+) -> Result<DerivedDoc> {
+    let manager = if let Some(path) = base {
+        let resolver = toolpath_pi::PathResolver::new().with_sessions_dir(&path);
+        toolpath_pi::PiConvo::with_resolver(resolver)
+    } else {
+        toolpath_pi::PiConvo::new()
+    };
+    let config = toolpath_pi::DeriveConfig::default();
+    let session = manager
+        .read_session(project, session)
+        .map_err(|e| anyhow::anyhow!("{}", e))?;
+    let doc = Graph::from_path(toolpath_pi::derive::derive_path(&session, &config));
+    let cache_id = make_id("pi", &doc_inner_id(&doc));
+    Ok(DerivedDoc { cache_id, doc })
+}
+
 #[cfg(not(target_os = "emscripten"))]
 fn pick_pi_in_project(
     manager: &toolpath_pi::PiConvo,
@@ -1103,10 +1228,14 @@ fn pick_pi_in_project(
         prompt: "pi session> ",
         preview: Some("path show pi --project {1} --session {2}"),
         header: Some("pick a Pi session (TAB = multi-select, Enter = confirm)"),
+        preview_window: "right:60%:wrap",
         tiebreak: "index",
         multi: true,
     };
-    let selected = fzf::pick(&lines, &opts)?;
+    let selected = match fzf::pick(&lines, &opts)? {
+        fzf::PickResult::Selected(v) => v,
+        fzf::PickResult::NoMatch | fzf::PickResult::Cancelled => Vec::new(),
+    };
     Ok(Some(parse_project_session(&selected)))
 }
 
@@ -1149,10 +1278,14 @@ fn pick_pi_global(manager: &toolpath_pi::PiConvo) -> Result<Option<Vec<(String, 
         prompt: "pi session> ",
         preview: Some("path show pi --project {1} --session {2}"),
         header: Some("pick a Pi session (TAB = multi-select, Enter = confirm)"),
+        preview_window: "right:60%:wrap",
         tiebreak: "index",
         multi: true,
     };
-    let selected = fzf::pick(&lines, &opts)?;
+    let selected = match fzf::pick(&lines, &opts)? {
+        fzf::PickResult::Selected(v) => v,
+        fzf::PickResult::NoMatch | fzf::PickResult::Cancelled => Vec::new(),
+    };
     Ok(Some(parse_project_session(&selected)))
 }
 
