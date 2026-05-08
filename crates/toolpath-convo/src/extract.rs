@@ -78,13 +78,31 @@ pub fn extract_conversation(path: &Path) -> ConversationView {
                         .and_then(|v| v.as_str())
                         .unwrap_or("unknown")
                         .to_string();
+                    // Restore the provider's original event id (e.g. the
+                    // source UUID for a Claude attachment). Falls back to
+                    // the synthetic step id for events that didn't have one.
+                    let id = structural
+                        .extra
+                        .get("event_source_id")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string())
+                        .unwrap_or_else(|| step.step.id.clone());
+                    // Strip the housekeeping keys we added in derive so the
+                    // event's data round-trips clean. Restore the original
+                    // `type` key from `event_data_type` if it was stashed.
+                    let mut data = structural.extra.clone();
+                    data.remove("entry_type");
+                    data.remove("event_source_id");
+                    if let Some(t) = data.remove("event_data_type") {
+                        data.insert("type".to_string(), t);
+                    }
 
                     let event = ConversationEvent {
-                        id: step.step.id.clone(),
+                        id,
                         timestamp: step.step.timestamp.clone(),
                         parent_id: step.step.parents.first().cloned(),
                         event_type,
-                        data: structural.extra.clone(),
+                        data,
                     };
                     view.events.push(event);
                 }

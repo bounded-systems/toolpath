@@ -164,7 +164,7 @@ pub struct ToolInvocation {
 /// The result of a tool invocation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolResult {
-    /// The text content returned by the tool.
+    /// The text content returned by the tool — what the model saw.
     pub content: String,
     /// Whether the tool reported an error.
     pub is_error: bool,
