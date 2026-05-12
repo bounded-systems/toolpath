@@ -140,11 +140,17 @@ pub struct Base {
     pub branch: Option<String>,
 }
 
+/// [`PathMeta::kind`] value for a path derived from an AI coding conversation.
+/// See the Toolpath RFC's "Document Kind" section.
+pub const PATH_KIND_CONVERSATION: &str = "convo";
+
 /// Path metadata
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PathMeta {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -808,6 +814,24 @@ mod tests {
         let json = serde_json::to_string(&step).unwrap();
         assert!(json.contains("\"issue\""));
         assert!(json.contains("issues/1"));
+    }
+
+    #[test]
+    fn test_path_meta_kind_serde() {
+        let meta = PathMeta {
+            kind: Some(PATH_KIND_CONVERSATION.to_string()),
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&meta).unwrap();
+        assert!(json.contains(r#""kind":"convo""#));
+        let parsed: PathMeta = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.kind.as_deref(), Some("convo"));
+    }
+
+    #[test]
+    fn test_path_meta_kind_omitted_when_none() {
+        let json = serde_json::to_string(&PathMeta::default()).unwrap();
+        assert!(!json.contains("kind"));
     }
 
     #[test]

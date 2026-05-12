@@ -169,7 +169,7 @@ A **path** collects steps and provides root context:
 | -------- | --------------------------------------------------- |
 | `path`   | Identity, base context, and head reference          |
 | `steps`  | Array of step objects                               |
-| `meta`   | Path-level metadata (title, actors, signatures)     |
+| `meta`   | Path-level metadata (title, kind, actors, signatures) |
 
 The `path.base` anchors the entire tree to a specific state (repo + ref +
 commit). Steps within inherit this context.
@@ -281,10 +281,29 @@ paths.
 
 | Field        | Description                                        |
 | ------------ | -------------------------------------------------- |
+| `kind`       | Path kind — see [Document Kind](#document-kind) (paths only) |
 | `intent`     | Human-readable description of purpose              |
 | `refs`       | Links to issues, docs, reasoning                   |
 | `actors`     | Actor definitions with identities and keys         |
 | `signatures` | Cryptographic signatures for verification          |
+
+#### Document Kind
+
+`meta.kind` on a **path** classifies it — a hint that the path follows a
+recognizable shape worth special-casing. It is always optional; an absent or
+unrecognized `kind` should be treated as a generic path. The only value defined
+so far is **`convo`** (future revisions may register more).
+
+A **`convo`** path is an AI coding conversation. Each conversational-turn step
+carries one [`ArtifactChange`](#change-perspectives) whose `structural.type` is
+`"conversation.append"` — find it by that `type`, not by artifact key. That
+change's `structural` object always has `role` (`"user"` / `"assistant"` /
+`"system"` / producer-specific) and, when the turn has prose, `text`; it may
+also carry `thinking`, `tool_uses`, token counts, `stop_reason`, environment
+fields, and a producer-namespaced bag of anything else. `meta.source` names the
+producing harness (`claude-code`, `gemini-cli`, `codex`, `opencode`, `pi`);
+structure beyond the `conversation.append` change — synthetic steps, file-write
+artifacts, tool records — is producer-specific.
 
 #### Actor Definitions
 
@@ -570,7 +589,7 @@ The path provides:
 - **base**: Where this tree branches from (repo + ref + commit)
 - **head**: Current tip of the active path
 - **steps**: All steps including dead ends (step-001a has no descendants)
-- **meta**: Path-level metadata including actors and signatures
+- **meta**: Path-level metadata including `kind` (see [Document Kind](#document-kind)), actors, and signatures
 
 ### Base Context
 

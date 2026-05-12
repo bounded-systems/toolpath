@@ -101,6 +101,8 @@ pub struct PathOpenMeta {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub intent: Option<String>,
@@ -147,6 +149,8 @@ pub struct PathMetaBody {
 pub struct PathMetaPatch {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -347,6 +351,7 @@ impl Path {
                             let mut meta = PathMeta::default();
                             if let Some(m) = po.meta {
                                 meta.title = m.title;
+                                meta.kind = m.kind;
                                 meta.source = m.source;
                                 meta.intent = m.intent;
                                 meta.refs = m.refs;
@@ -504,6 +509,9 @@ fn apply_meta_patch(path_meta: &mut PathMeta, patch: PathMetaPatch) {
     if let Some(v) = patch.title {
         path_meta.title = Some(v);
     }
+    if let Some(v) = patch.kind {
+        path_meta.kind = Some(v);
+    }
     if let Some(v) = patch.source {
         path_meta.source = Some(v);
     }
@@ -546,6 +554,7 @@ fn resolve_head(explicit: Option<String>, steps: &[Step]) -> Result<String, Json
 
 fn path_meta_is_empty(m: &PathMeta) -> bool {
     m.title.is_none()
+        && m.kind.is_none()
         && m.source.is_none()
         && m.intent.is_none()
         && m.refs.is_empty()
@@ -670,12 +679,14 @@ fn step_meta_is_empty(m: &StepMeta) -> bool {
 fn path_meta_for_open(m: &PathMeta) -> Option<PathOpenMeta> {
     let open = PathOpenMeta {
         title: m.title.clone(),
+        kind: m.kind.clone(),
         source: m.source.clone(),
         intent: m.intent.clone(),
         refs: m.refs.clone(),
         extra: m.extra.clone(),
     };
     if open.title.is_none()
+        && open.kind.is_none()
         && open.source.is_none()
         && open.intent.is_none()
         && open.refs.is_empty()
@@ -1220,6 +1231,38 @@ mod tests {
         let jsonl = p.to_jsonl_string().unwrap();
         let back = Path::from_jsonl_str(&jsonl).unwrap();
         assert_eq!(canonical_json(&p), canonical_json(&back));
+    }
+
+    #[test]
+    fn roundtrip_kind_in_path_meta() {
+        let p = Path {
+            path: PathIdentity {
+                id: "p".into(),
+                base: None,
+                head: "s1".into(),
+                graph_ref: None,
+            },
+            steps: vec![make_step("s1", None)],
+            meta: Some(PathMeta {
+                kind: Some(crate::v1::PATH_KIND_CONVERSATION.to_string()),
+                ..Default::default()
+            }),
+        };
+        let jsonl = p.to_jsonl_string().unwrap();
+        assert!(jsonl.contains(r#""kind":"convo""#));
+        let back = Path::from_jsonl_str(&jsonl).unwrap();
+        assert_eq!(canonical_json(&p), canonical_json(&back));
+    }
+
+    #[test]
+    fn path_meta_line_can_set_kind() {
+        let patch = PathMetaPatch {
+            kind: Some("convo".into()),
+            ..Default::default()
+        };
+        let mut meta = PathMeta::default();
+        apply_meta_patch(&mut meta, patch);
+        assert_eq!(meta.kind.as_deref(), Some("convo"));
     }
 
     #[test]
