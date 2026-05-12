@@ -212,16 +212,12 @@ pub fn derive_path(conversation: &Conversation, config: &DeriveConfig) -> Path {
                 ..Default::default()
             });
 
+        // Carry the original line verbatim under `raw`. `entry_type` is the
+        // line's bare `type`, informational only — a headerless line is
+        // identified by the presence of `raw`, not an enumerated type list.
         let mut event_extra: HashMap<String, serde_json::Value> = HashMap::new();
         event_extra.insert("entry_type".to_string(), json!(event_type));
-        // Carry the original line's fields verbatim (minus the redundant `type`).
-        if let Some(obj) = raw.as_object() {
-            for (k, v) in obj {
-                if k != "type" {
-                    event_extra.insert(k.clone(), v.clone());
-                }
-            }
-        }
+        event_extra.insert("raw".to_string(), raw.clone());
 
         let parents = last_step_id
             .as_ref()

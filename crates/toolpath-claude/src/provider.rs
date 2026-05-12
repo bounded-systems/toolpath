@@ -313,32 +313,28 @@ fn conversation_to_view(convo: &Conversation) -> ConversationView {
     }
 }
 
-/// Build an event from a preamble JSON line (ai-title, last-prompt,
-/// queue-operation, permission-mode, etc.).
+/// Build an event from a headerless preamble JSON line (`ai-title`,
+/// `last-prompt`, `queue-operation`, `permission-mode`, `file-history-snapshot`,
+/// or anything else above `entries` in Claude's JSONL).
 ///
-/// The line's fields land in `event.data` keyed by their original names.
-/// `event_type` carries the line's `type`; the projector rebuilds the
-/// line by merging `{type: event_type}` with `data`.
+/// The whole line is preserved verbatim under `data["raw"]`; the projector
+/// dumps it straight back onto `convo.preamble`. We don't model the shape —
+/// a headerless line is identified by the presence of `data["raw"]`, not by
+/// an enumerated `type` list. `event_type` carries the line's `type`, purely
+/// informational.
 fn preamble_to_event(idx: usize, raw: &serde_json::Value) -> toolpath_convo::ConversationEvent {
     let event_type = raw
         .get("type")
         .and_then(|v| v.as_str())
         .unwrap_or("preamble")
         .to_string();
-    let mut data: HashMap<String, serde_json::Value> = HashMap::new();
-    if let Some(obj) = raw.as_object() {
-        for (k, v) in obj {
-            if k == "type" {
-                continue;
-            }
-            data.insert(k.clone(), v.clone());
-        }
-    }
     let timestamp = raw
         .get("timestamp")
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .to_string();
+    let mut data: HashMap<String, serde_json::Value> = HashMap::new();
+    data.insert("raw".to_string(), raw.clone());
     toolpath_convo::ConversationEvent {
         id: format!("claude-preamble-{idx}"),
         timestamp,

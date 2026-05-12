@@ -58,21 +58,6 @@ impl ConversationProjector for ClaudeProjector {
 
 // ── Projection logic ─────────────────────────────────────────────────
 
-/// Headerless preamble types that live above `entries` in Claude's JSONL —
-/// they have no `uuid` and don't carry a message. The projector routes
-/// these events back to `convo.preamble`; everything else becomes an entry.
-const PREAMBLE_EVENT_TYPES: &[&str] = &[
-    "ai-title",
-    "last-prompt",
-    "queue-operation",
-    "permission-mode",
-    "file-history-snapshot",
-];
-
-fn is_preamble_event(event_type: &str) -> bool {
-    PREAMBLE_EVENT_TYPES.contains(&event_type)
-}
-
 /// Marker used by Claude's derive to preserve tool-result user entries as
 /// events. Their UUID is what the next assistant turn's `parentUuid`
 /// points at — synthesizing a new one breaks the chain.
@@ -81,10 +66,15 @@ const TOOL_RESULT_USER_EVENT: &str = "tool_result_user";
 fn project_view(view: &ConversationView) -> std::result::Result<Conversation, String> {
     let mut convo = Conversation::new(view.id.clone());
 
+    // Headerless lines (the JSONL "preamble": ai-title, last-prompt,
+    // queue-operation, permission-mode, file-history-snapshot, and anything
+    // unrecognized) ride in `view.events` carrying the original line verbatim
+    // under `data["raw"]`. Dump them straight back. A headerless event is
+    // identified by that `raw` key — no enumerated type list.
     let mut emitted_preamble = false;
     for event in &view.events {
-        if is_preamble_event(&event.event_type) {
-            convo.preamble.push(preamble_event_to_value(event));
+        if let Some(raw) = event.data.get("raw") {
+            convo.preamble.push(raw.clone());
             emitted_preamble = true;
         }
     }
@@ -194,8 +184,8 @@ fn project_view(view: &ConversationView) -> std::result::Result<Conversation, St
 
     // Emit non-preamble events (attachments, etc.) as entries.
     for event in &view.events {
-        if is_preamble_event(&event.event_type) {
-            continue;
+        if event.data.contains_key("raw") {
+            continue; // headerless line — already pushed onto convo.preamble
         }
         if consumed_event_ids.contains(&event.id) {
             continue;
@@ -296,19 +286,6 @@ fn tool_result_event_to_entry(
         message_id: None,
         extra,
     }
-}
-
-/// Rebuild the JSONL preamble line from an event: `{type: event_type, ...data}`.
-fn preamble_event_to_value(event: &toolpath_convo::ConversationEvent) -> serde_json::Value {
-    let mut obj = serde_json::Map::new();
-    obj.insert(
-        "type".into(),
-        serde_json::Value::String(event.event_type.clone()),
-    );
-    for (k, v) in &event.data {
-        obj.insert(k.clone(), v.clone());
-    }
-    serde_json::Value::Object(obj)
 }
 
 /// Apply Claude-specific metadata from a [`Turn`] onto a [`ConversationEntry`].
