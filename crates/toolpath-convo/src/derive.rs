@@ -233,6 +233,79 @@ pub fn derive_path(view: &ConversationView, config: &DeriveConfig) -> Path {
         steps.push(step);
     }
 
+    // Emit `view.events` as `conversation.event` steps so that attachments,
+    // preamble lines (ai-title, last-prompt, queue-operation, permission-mode),
+    // and other non-turn entries survive the IR-to-Path-to-IR roundtrip.
+    // Without this, derive_path drops everything outside `turns`, so a
+    // Claude session loses ~10–25% of its lines on import/export.
+    for (idx, event) in view.events.iter().enumerate() {
+        let step_id = format!("event-{:04}", idx + 1);
+        let actor = format!("provider:{}", provider);
+        actors
+            .entry(actor.clone())
+            .or_insert_with(|| ActorDefinition {
+                name: Some(provider.to_string()),
+                provider: Some(provider.to_string()),
+                ..Default::default()
+            });
+
+        // event.data is flattened into StructuralChange.extra. Strip keys
+        // that collide with the typed fields on StructuralChange itself —
+        // most importantly `type`, which serde renames `change_type` to.
+        // A Codex `user_message` event carries `data["type"] = "user_message"`,
+        // which would otherwise overwrite our `change_type = "conversation.event"`
+        // and break PathOrRef untagged-enum disambiguation on parse.
+        let mut extra: HashMap<String, serde_json::Value> = event
+            .data
+            .iter()
+            .filter(|(k, _)| k.as_str() != "type")
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        // Stash the original `type` value under a non-colliding key so
+        // round-trip can recover it for providers that need it.
+        if let Some(t) = event.data.get("type") {
+            extra.insert("event_data_type".to_string(), t.clone());
+        }
+        extra.insert(
+            "entry_type".to_string(),
+            serde_json::Value::String(event.event_type.clone()),
+        );
+        if !event.id.is_empty() {
+            extra.insert(
+                "event_source_id".to_string(),
+                serde_json::Value::String(event.id.clone()),
+            );
+        }
+
+        let mut step = Step {
+            step: StepIdentity {
+                id: step_id,
+                parents: event
+                    .parent_id
+                    .as_ref()
+                    .and_then(|pid| turn_to_step.get(pid).cloned())
+                    .into_iter()
+                    .collect(),
+                actor,
+                timestamp: event.timestamp.clone(),
+            },
+            change: HashMap::new(),
+            meta: None,
+        };
+
+        step.change.insert(
+            conv_artifact_key.clone(),
+            ArtifactChange {
+                raw: None,
+                structural: Some(StructuralChange {
+                    change_type: "conversation.event".to_string(),
+                    extra,
+                }),
+            },
+        );
+        steps.push(step);
+    }
+
     let head = steps.last().map(|s| s.step.id.clone()).unwrap_or_default();
 
     // Meta

@@ -55,7 +55,7 @@ impl std::fmt::Display for Role {
 }
 
 /// Token usage for a single turn.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TokenUsage {
     /// Tokens sent to the model (prompt + context).
     pub input_tokens: Option<u32>,
@@ -164,7 +164,7 @@ pub struct ToolInvocation {
 /// The result of a tool invocation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolResult {
-    /// The text content returned by the tool.
+    /// The text content returned by the tool — what the model saw.
     pub content: String,
     /// Whether the tool reported an error.
     pub is_error: bool,

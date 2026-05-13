@@ -30,7 +30,7 @@ fn claude_role_to_role(role: &MessageRole) -> Role {
 ///
 /// Returns `None` for unrecognized tools. When Claude Code adds or
 /// renames tools, update this map.
-fn tool_category(name: &str) -> Option<ToolCategory> {
+pub fn tool_category(name: &str) -> Option<ToolCategory> {
     match name {
         "Read" => Some(ToolCategory::FileRead),
         "Glob" | "Grep" => Some(ToolCategory::FileSearch),
@@ -39,6 +39,39 @@ fn tool_category(name: &str) -> Option<ToolCategory> {
         "WebFetch" | "WebSearch" => Some(ToolCategory::Network),
         "Task" | "Agent" => Some(ToolCategory::Delegation),
         _ => None,
+    }
+}
+
+/// Reverse of [`tool_category`]: pick Claude's native tool name for a
+/// given [`ToolCategory`], disambiguating by `args` shape where needed
+/// (e.g. `Edit` vs `Write`, `Glob` vs `Grep`).
+///
+/// Returns `None` when no Claude-canonical equivalent exists. Mirrors
+/// the `provider::native_name` helpers on opencode / codex / gemini /
+/// pi — projectors call it to surface cross-harness tool calls under
+/// the names Claude Code's UI knows how to render.
+pub fn native_name(category: ToolCategory, args: &serde_json::Value) -> Option<&'static str> {
+    let has = |k: &str| args.get(k).is_some();
+    match category {
+        ToolCategory::Shell => Some("Bash"),
+        ToolCategory::FileRead => Some("Read"),
+        ToolCategory::FileWrite => Some(if has("old_string") || has("oldString") {
+            "Edit"
+        } else {
+            "Write"
+        }),
+        ToolCategory::FileSearch => Some(
+            // Grep takes a regex `pattern` and often has output_mode/type
+            // hints; Glob takes a glob pattern. When ambiguous, default to
+            // Glob — its file-list rendering at least shows results.
+            if has("output_mode") || has("path_pattern") || has("type") {
+                "Grep"
+            } else {
+                "Glob"
+            },
+        ),
+        ToolCategory::Network => Some(if has("url") { "WebFetch" } else { "WebSearch" }),
+        ToolCategory::Delegation => Some("Task"),
     }
 }
 
@@ -84,13 +117,37 @@ fn message_to_turn(entry: &ConversationEntry, msg: &Message) -> Turn {
 
     let delegations = extract_delegations(&tool_uses);
 
-    let extra = if entry.extra.is_empty() {
+    // Fold the entry's typed top-level fields into the claude extras blob
+    // so projection can restore them. Without this, requestId / userType /
+    // version / sessionId vanish on roundtrip and Claude's UI loses its
+    // request-correlation metadata.
+    let mut claude_extras: serde_json::Map<String, serde_json::Value> =
+        serde_json::to_value(&entry.extra)
+            .ok()
+            .and_then(|v| v.as_object().cloned())
+            .unwrap_or_default();
+    if let Some(v) = &entry.version {
+        claude_extras
+            .entry("version".to_string())
+            .or_insert_with(|| serde_json::Value::String(v.clone()));
+    }
+    if let Some(v) = &entry.user_type {
+        claude_extras
+            .entry("user_type".to_string())
+            .or_insert_with(|| serde_json::Value::String(v.clone()));
+    }
+    if let Some(v) = &entry.request_id {
+        claude_extras
+            .entry("request_id".to_string())
+            .or_insert_with(|| serde_json::Value::String(v.clone()));
+    }
+    let extra = if claude_extras.is_empty() {
         HashMap::new()
     } else {
         let mut map = HashMap::new();
         map.insert(
             "claude".to_string(),
-            serde_json::to_value(&entry.extra).unwrap_or_default(),
+            serde_json::Value::Object(claude_extras),
         );
         map
     };
@@ -200,9 +257,20 @@ fn entry_to_turn(entry: &ConversationEntry) -> Option<Turn> {
 /// turn's `ToolInvocation.result` fields rather than emitted as separate turns.
 fn conversation_to_view(convo: &Conversation) -> ConversationView {
     let mut turns: Vec<Turn> = Vec::new();
+    let mut events: Vec<toolpath_convo::ConversationEvent> = Vec::new();
+
+    // Headerless preamble lines (ai-title, last-prompt, queue-operation,
+    // permission-mode, file-history-snapshot, etc.) become events so they
+    // round-trip back to JSONL.
+    for (idx, raw) in convo.preamble.iter().enumerate() {
+        events.push(preamble_to_event(idx, raw));
+    }
 
     for entry in &convo.entries {
         let Some(msg) = &entry.message else {
+            // Message-less entries (attachments, snapshots) survive as
+            // events so the projector can re-emit them.
+            events.push(entry_to_event(entry));
             continue;
         };
 
@@ -241,7 +309,80 @@ fn conversation_to_view(convo: &Conversation) -> ConversationView {
         provider_id: Some("claude-code".into()),
         files_changed,
         session_ids: vec![],
-        events: vec![],
+        events,
+    }
+}
+
+/// Build an event from a headerless preamble JSON line (`ai-title`,
+/// `last-prompt`, `queue-operation`, `permission-mode`, `file-history-snapshot`,
+/// or anything else above `entries` in Claude's JSONL).
+///
+/// The whole line is preserved verbatim under `data["raw"]`; the projector
+/// dumps it straight back onto `convo.preamble`. We don't model the shape —
+/// a headerless line is identified by the presence of `data["raw"]`, not by
+/// an enumerated `type` list. `event_type` carries the line's `type`, purely
+/// informational.
+fn preamble_to_event(idx: usize, raw: &serde_json::Value) -> toolpath_convo::ConversationEvent {
+    let event_type = raw
+        .get("type")
+        .and_then(|v| v.as_str())
+        .unwrap_or("preamble")
+        .to_string();
+    let timestamp = raw
+        .get("timestamp")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let mut data: HashMap<String, serde_json::Value> = HashMap::new();
+    data.insert("raw".to_string(), raw.clone());
+    toolpath_convo::ConversationEvent {
+        id: format!("claude-preamble-{idx}"),
+        timestamp,
+        parent_id: None,
+        event_type,
+        data,
+    }
+}
+
+/// Build an event from a message-less ConversationEntry (attachment, snapshot).
+///
+/// Captures the entry's typed fields in `event.data` so the projector can
+/// reconstruct an equivalent entry. The flatten extras (e.g. an attachment's
+/// `attachment` payload) come along for the ride under `entry_extra`.
+fn entry_to_event(entry: &ConversationEntry) -> toolpath_convo::ConversationEvent {
+    let mut data = HashMap::new();
+    if let Some(v) = &entry.cwd {
+        data.insert("cwd".into(), serde_json::Value::String(v.clone()));
+    }
+    if let Some(v) = &entry.git_branch {
+        data.insert("git_branch".into(), serde_json::Value::String(v.clone()));
+    }
+    if let Some(v) = &entry.version {
+        data.insert("version".into(), serde_json::Value::String(v.clone()));
+    }
+    if let Some(v) = &entry.user_type {
+        data.insert("user_type".into(), serde_json::Value::String(v.clone()));
+    }
+    if let Some(v) = &entry.message_id {
+        data.insert("message_id".into(), serde_json::Value::String(v.clone()));
+    }
+    if let Some(v) = &entry.tool_use_result {
+        data.insert("tool_use_result".into(), v.clone());
+    }
+    if let Some(v) = &entry.snapshot {
+        data.insert("snapshot".into(), v.clone());
+    }
+    if !entry.extra.is_empty()
+        && let Ok(value) = serde_json::to_value(&entry.extra)
+    {
+        data.insert("entry_extra".into(), value);
+    }
+    toolpath_convo::ConversationEvent {
+        id: entry.uuid.clone(),
+        timestamp: entry.timestamp.clone(),
+        parent_id: entry.parent_uuid.clone(),
+        event_type: entry.entry_type.clone(),
+        data,
     }
 }
 

@@ -321,7 +321,12 @@ impl<'a> Builder<'a> {
                 self.attach_tool_call(timestamp, fc.call_id, name, input, extra, false);
             }
             ResponseItem::FunctionCallOutput(out) => {
-                self.attach_tool_output(&out.call_id, &out.output);
+                let is_error = out
+                    .extra
+                    .get("is_error")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+                self.attach_tool_output(&out.call_id, &out.output, is_error);
             }
             ResponseItem::CustomToolCall(ct) => {
                 let input = Value::String(ct.input.clone());
@@ -333,7 +338,12 @@ impl<'a> Builder<'a> {
                 self.attach_tool_call(timestamp, ct.call_id, ct.name, input, extra, true);
             }
             ResponseItem::CustomToolCallOutput(out) => {
-                self.attach_tool_output(&out.call_id, &out.output);
+                let is_error = out
+                    .extra
+                    .get("is_error")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+                self.attach_tool_output(&out.call_id, &out.output, is_error);
             }
             ResponseItem::Other { kind, payload } => {
                 self.events.push(ConversationEvent {
@@ -428,18 +438,18 @@ impl<'a> Builder<'a> {
         self.call_index.insert(call_id, (turn_idx, tool_idx));
     }
 
-    fn attach_tool_output(&mut self, call_id: &str, output: &str) {
+    fn attach_tool_output(&mut self, call_id: &str, output: &str, is_error: bool) {
         if let Some((turn_idx, tool_idx)) = self.call_index.get(call_id).copied() {
             let turn = &mut self.turns[turn_idx];
             if let Some(inv) = turn.tool_uses.get_mut(tool_idx) {
-                let is_error = inv.result.as_ref().map(|r| r.is_error).unwrap_or(false);
+                let prior_error = inv.result.as_ref().map(|r| r.is_error).unwrap_or(false);
                 let merged = match inv.result.as_ref() {
                     Some(existing) => format!("{}\n{}", existing.content, output),
                     None => output.to_string(),
                 };
                 inv.result = Some(ToolResult {
                     content: merged,
-                    is_error,
+                    is_error: is_error || prior_error,
                 });
             }
         }

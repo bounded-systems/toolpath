@@ -32,28 +32,19 @@ impl ConversationReader {
 
             // Try to parse as a conversation entry
             match serde_json::from_str::<ConversationEntry>(&line) {
-                Ok(entry) => {
-                    // Only add entries with valid UUIDs (skip metadata entries)
-                    if !entry.uuid.is_empty() {
-                        conversation.add_entry(entry);
-                    }
+                Ok(entry) if !entry.uuid.is_empty() => {
+                    conversation.add_entry(entry);
                 }
-                Err(_) => {
-                    // Try to parse as a generic JSON value to check the type
-                    if let Ok(value) = serde_json::from_str::<serde_json::Value>(&line)
-                        && let Some(entry_type) = value.get("type").and_then(|t| t.as_str())
-                    {
-                        // Known metadata types we can safely ignore
-                        if entry_type == "file-history-snapshot" {
-                            // Silently skip file snapshots
-                            continue;
-                        }
-                    }
-
-                    // Only warn about truly unexpected parse failures
-                    if line_num < 5 || std::env::var("CLAUDE_CLI_DEBUG").is_ok() {
+                Ok(_) | Err(_) => {
+                    // Headerless / metadata lines (ai-title, last-prompt,
+                    // queue-operation, permission-mode, file-history-snapshot,
+                    // etc.) are preserved verbatim so the projector can
+                    // re-emit them on roundtrip.
+                    if let Ok(value) = serde_json::from_str::<serde_json::Value>(&line) {
+                        conversation.preamble.push(value);
+                    } else if line_num < 5 || std::env::var("CLAUDE_CLI_DEBUG").is_ok() {
                         eprintln!(
-                            "Warning: Failed to parse line {} in {:?}: entry type not recognized",
+                            "Warning: Failed to parse line {} in {:?}: not valid JSON",
                             line_num + 1,
                             path.file_name().unwrap_or_default()
                         );
