@@ -219,10 +219,10 @@ fn build_step(
     if !turn.tool_uses.is_empty() {
         // `tool_uses` array shape matches what `toolpath_convo::extract`
         // reads (id, name, input, category, result). Without this the
-        // tool calls vanish on extract → ConversationView → ClaudeProjector
-        // and Claude's UI shows assistant text only — no tool calls, no
-        // results. Keep the name+call_id+summary aliases too so existing
-        // consumers don't break.
+        // tool calls vanish on the extract → `ConversationView` round-trip,
+        // and any consumer re-projecting from that view sees assistant text
+        // only — no tool calls, no results. Keep the name+call_id+summary
+        // aliases too so existing consumers don't break.
         let uses: Vec<Value> = turn
             .tool_uses
             .iter()
