@@ -292,9 +292,9 @@ paths.
 `meta.kind` on a **path** classifies it — a hint that the path follows a
 recognizable shape worth special-casing. It is always optional; an absent or
 unrecognized `kind` should be treated as a generic path. The only value defined
-so far is **`convo`** (future revisions may register more).
+so far is **`agent-coding-session`** (future revisions may register more).
 
-A **`convo`** path is an AI coding conversation. Each conversational-turn step
+A **`agent-coding-session`** path is an AI coding conversation. Each conversational-turn step
 carries one [`ArtifactChange`](#change-perspectives) whose `structural.type` is
 `"conversation.append"` — find it by that `type`, not by artifact key. That
 change's `structural` object always has `role` (`"user"` / `"assistant"` /

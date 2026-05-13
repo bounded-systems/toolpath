@@ -339,7 +339,7 @@
         "kind": {
           "type": "string",
           "description": "The kind of this path — a hint to renderers and parsers that it follows a particular shape and may carry kind-specific conventions. Currently the only defined value is \"convo\": a path derived from an agent conversation, where each step is a `conversation.append` change carrying that turn's content. Absent means generic — no kind-specific structure is implied.",
-          "examples": ["convo"]
+          "examples": ["agent-coding-session"]
         },
         "source": {
           "type": "string",

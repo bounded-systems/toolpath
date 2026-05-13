@@ -1244,12 +1244,12 @@ mod tests {
             },
             steps: vec![make_step("s1", None)],
             meta: Some(PathMeta {
-                kind: Some(crate::v1::PATH_KIND_CONVERSATION.to_string()),
+                kind: Some(crate::v1::PATH_KIND_AGENT_CODING_SESSION.to_string()),
                 ..Default::default()
             }),
         };
         let jsonl = p.to_jsonl_string().unwrap();
-        assert!(jsonl.contains(r#""kind":"convo""#));
+        assert!(jsonl.contains(r#""kind":"agent-coding-session""#));
         let back = Path::from_jsonl_str(&jsonl).unwrap();
         assert_eq!(canonical_json(&p), canonical_json(&back));
     }
@@ -1257,12 +1257,12 @@ mod tests {
     #[test]
     fn path_meta_line_can_set_kind() {
         let patch = PathMetaPatch {
-            kind: Some("convo".into()),
+            kind: Some("agent-coding-session".into()),
             ..Default::default()
         };
         let mut meta = PathMeta::default();
         apply_meta_patch(&mut meta, patch);
-        assert_eq!(meta.kind.as_deref(), Some("convo"));
+        assert_eq!(meta.kind.as_deref(), Some("agent-coding-session"));
     }
 
     #[test]

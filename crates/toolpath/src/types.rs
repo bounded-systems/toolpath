@@ -142,7 +142,7 @@ pub struct Base {
 
 /// [`PathMeta::kind`] value for a path derived from an AI coding conversation.
 /// See the Toolpath RFC's "Document Kind" section.
-pub const PATH_KIND_CONVERSATION: &str = "convo";
+pub const PATH_KIND_AGENT_CODING_SESSION: &str = "agent-coding-session";
 
 /// Path metadata
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -819,13 +819,13 @@ mod tests {
     #[test]
     fn test_path_meta_kind_serde() {
         let meta = PathMeta {
-            kind: Some(PATH_KIND_CONVERSATION.to_string()),
+            kind: Some(PATH_KIND_AGENT_CODING_SESSION.to_string()),
             ..Default::default()
         };
         let json = serde_json::to_string(&meta).unwrap();
-        assert!(json.contains(r#""kind":"convo""#));
+        assert!(json.contains(r#""kind":"agent-coding-session""#));
         let parsed: PathMeta = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed.kind.as_deref(), Some("convo"));
+        assert_eq!(parsed.kind.as_deref(), Some("agent-coding-session"));
     }
 
     #[test]

@@ -2,17 +2,17 @@
 
 All notable changes to the Toolpath workspace are documented here.
 
-## `meta.kind` — new path-kind field; conversation paths tagged `convo` — unreleased
+## `meta.kind` — new path-kind field; conversation paths tagged `agent-coding-session` — unreleased
 
 New optional `meta.kind` field on `Path` (`toolpath::v1::PathMeta::kind`, plus
-the `toolpath::v1::PATH_KIND_CONVERSATION` constant) — a hint to renderers and
+the `toolpath::v1::PATH_KIND_AGENT_CODING_SESSION` constant) — a hint to renderers and
 generic parsers that a path follows a recognizable shape. The only defined
-value is `"convo"`: each step is a `conversation.append` change carrying that
+value is `"agent-coding-session"`: each step is a `conversation.append` change carrying that
 turn's `role`, `text`, and so on, and `meta.source` names the producing
 harness. Absent means generic — existing documents parse and validate
 unchanged, and `kind` is omitted when unset.
 
-Every conversation → `Path` derivation now sets `meta.kind = "convo"` (the
+Every conversation → `Path` derivation now sets `meta.kind = "agent-coding-session"` (the
 shared `toolpath_convo::derive_path` and each conversation provider crate's
 own). The JSONL form carries `kind` through `PathOpen.meta` and `PathMeta`
 patch lines. Documented in the RFC ("Document Kind") and the JSON Schema

@@ -4,13 +4,13 @@
 //! providers. Takes a [`ConversationView`] and emits a [`Path`] document with
 //! one step per turn and a `conversation.append` structural change carrying
 //! the turn's text, thinking, tool uses, and token usage. The emitted path is
-//! tagged with `meta.kind = "convo"` (`toolpath::v1::PATH_KIND_CONVERSATION`)
+//! tagged with `meta.kind = "agent-coding-session"` (`toolpath::v1::PATH_KIND_AGENT_CODING_SESSION`)
 //! so renderers and parsers know it follows the conversation shape.
 
 use std::collections::HashMap;
 
 use toolpath::v1::{
-    ActorDefinition, ArtifactChange, Base, PATH_KIND_CONVERSATION, Path, PathIdentity, PathMeta,
+    ActorDefinition, ArtifactChange, Base, PATH_KIND_AGENT_CODING_SESSION, Path, PathIdentity, PathMeta,
     Step, StepIdentity, StructuralChange,
 };
 
@@ -400,7 +400,7 @@ pub fn derive_path(view: &ConversationView, config: &DeriveConfig) -> Path {
 
     let mut meta = PathMeta {
         title: Some(title),
-        kind: Some(PATH_KIND_CONVERSATION.to_string()),
+        kind: Some(PATH_KIND_AGENT_CODING_SESSION.to_string()),
         source: view.provider_id.clone(),
         ..Default::default()
     };
@@ -695,11 +695,11 @@ mod tests {
         let path = derive_path(&view, &DeriveConfig::default());
         assert_eq!(
             path.meta.as_ref().unwrap().kind.as_deref(),
-            Some(PATH_KIND_CONVERSATION)
+            Some(PATH_KIND_AGENT_CODING_SESSION)
         );
         // ...and survives a JSON round-trip.
         let json = serde_json::to_string(&path).unwrap();
-        assert!(json.contains(r#""kind":"convo""#));
+        assert!(json.contains(r#""kind":"agent-coding-session""#));
     }
 
     #[test]
