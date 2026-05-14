@@ -668,6 +668,7 @@ mod tests {
             environment: None,
             delegations: vec![],
             extra: HashMap::new(),
+            file_mutations: Vec::new(),
         }
     }
 
@@ -691,6 +692,7 @@ mod tests {
             environment: None,
             delegations: vec![],
             extra: HashMap::new(),
+            file_mutations: Vec::new(),
         }
     }
 

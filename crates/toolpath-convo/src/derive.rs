@@ -221,61 +221,65 @@ pub fn derive_path(view: &ConversationView, config: &DeriveConfig) -> Path {
 
         // File mutations → sibling `file.write` change entries.
         //
-        // Preferred: each `ToolInvocation::file_mutations` entry comes from
-        // the provider's `to_view` with the resolved diff already in
+        // Preferred: each `Turn::file_mutations` entry comes from the
+        // provider's `to_view` with the resolved diff already in
         // `raw_diff` (claude's git-HEAD lookup, codex's `apply_patch_end`
-        // parse, opencode's git2 tree↔tree, etc.).
+        // parse, opencode's git2 tree↔tree, etc.). `tool_id` links back
+        // to a specific `ToolInvocation` when the provider can attribute.
         //
-        // Fallback: for tools whose category is `FileWrite` but whose
-        // `file_mutations` is empty (providers that haven't migrated yet),
-        // synthesize a diff from the tool's `input` via `file_write_change`.
-        for tool in &turn.tool_uses {
-            if !tool.file_mutations.is_empty() {
-                for fm in &tool.file_mutations {
-                    let mut t_extra: HashMap<String, serde_json::Value> = HashMap::new();
+        // Fallback (un-migrated providers): for any `FileWrite`-category
+        // tool with no matching mutation, synthesize from `tool.input`
+        // via `file_write_change`.
+        let attributed: std::collections::HashSet<String> = turn
+            .file_mutations
+            .iter()
+            .filter_map(|fm| fm.tool_id.clone())
+            .collect();
+        for fm in &turn.file_mutations {
+            let mut t_extra: HashMap<String, serde_json::Value> = HashMap::new();
+            if let Some(tid) = &fm.tool_id {
+                t_extra.insert(
+                    "tool_id".to_string(),
+                    serde_json::Value::String(tid.clone()),
+                );
+                if let Some(tool) = turn.tool_uses.iter().find(|t| &t.id == tid) {
                     t_extra.insert(
                         "tool".to_string(),
                         serde_json::Value::String(tool.name.clone()),
                     );
-                    t_extra.insert(
-                        "tool_id".to_string(),
-                        serde_json::Value::String(tool.id.clone()),
-                    );
-                    if let Some(op) = &fm.operation {
-                        t_extra.insert(
-                            "operation".to_string(),
-                            serde_json::Value::String(op.clone()),
-                        );
-                    }
-                    if let Some(b) = &fm.before {
-                        t_extra.insert(
-                            "before".to_string(),
-                            serde_json::Value::String(b.clone()),
-                        );
-                    }
-                    if let Some(a) = &fm.after {
-                        t_extra.insert("after".to_string(), serde_json::Value::String(a.clone()));
-                    }
-                    if let Some(rt) = &fm.rename_to {
-                        t_extra.insert(
-                            "rename_to".to_string(),
-                            serde_json::Value::String(rt.clone()),
-                        );
-                    }
-                    step.change.insert(
-                        fm.path.clone(),
-                        ArtifactChange {
-                            raw: fm.raw_diff.clone(),
-                            structural: Some(StructuralChange {
-                                change_type: "file.write".to_string(),
-                                extra: t_extra,
-                            }),
-                        },
-                    );
                 }
-                continue;
             }
-            if tool.category != Some(ToolCategory::FileWrite) {
+            if let Some(op) = &fm.operation {
+                t_extra.insert(
+                    "operation".to_string(),
+                    serde_json::Value::String(op.clone()),
+                );
+            }
+            if let Some(b) = &fm.before {
+                t_extra.insert("before".to_string(), serde_json::Value::String(b.clone()));
+            }
+            if let Some(a) = &fm.after {
+                t_extra.insert("after".to_string(), serde_json::Value::String(a.clone()));
+            }
+            if let Some(rt) = &fm.rename_to {
+                t_extra.insert(
+                    "rename_to".to_string(),
+                    serde_json::Value::String(rt.clone()),
+                );
+            }
+            step.change.insert(
+                fm.path.clone(),
+                ArtifactChange {
+                    raw: fm.raw_diff.clone(),
+                    structural: Some(StructuralChange {
+                        change_type: "file.write".to_string(),
+                        extra: t_extra,
+                    }),
+                },
+            );
+        }
+        for tool in &turn.tool_uses {
+            if tool.category != Some(ToolCategory::FileWrite) || attributed.contains(&tool.id) {
                 continue;
             }
             let Some(path) = extract_file_path(tool) else {
@@ -659,6 +663,7 @@ mod tests {
             environment: None,
             delegations: vec![],
             extra: HashMap::new(),
+            file_mutations: Vec::new(),
         }
     }
 

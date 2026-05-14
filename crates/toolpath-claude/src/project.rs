@@ -1028,6 +1028,7 @@ mod tests {
             environment: None,
             delegations: vec![],
             extra: Default::default(),
+            file_mutations: Vec::new(),
         }
     }
 
@@ -1046,6 +1047,7 @@ mod tests {
             environment: None,
             delegations: vec![],
             extra: Default::default(),
+            file_mutations: Vec::new(),
         }
     }
 

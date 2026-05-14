@@ -77,24 +77,24 @@ pub fn extract_conversation(path: &Path) -> ConversationView {
     let mut files_seen: HashSet<String> = HashSet::new();
 
     for step in &path.steps {
-        // Pre-collect file.write entries on this step, indexed by tool_id,
-        // so we can attach them as `tool.file_mutations` once the turn is
-        // built. The iteration order of `step.change` (HashMap) is
-        // non-deterministic; a pre-pass keeps the attach step simple.
-        let mut step_mutations: HashMap<String, Vec<FileMutation>> = HashMap::new();
+        // Pre-collect file.write entries on this step. They attach to the
+        // turn built from this step's `conversation.append` change (below);
+        // the iteration order of `step.change` (HashMap) is non-deterministic
+        // so a pre-pass keeps the attach step simple. Sorted by path for
+        // determinism on the way back out.
+        let mut step_mutations: Vec<FileMutation> = Vec::new();
         for (key, ch) in &step.change {
             let Some(s) = &ch.structural else { continue };
             if s.change_type != "file.write" {
                 continue;
             }
-            let tid = s
-                .extra
-                .get("tool_id")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
             let fm = FileMutation {
                 path: key.clone(),
+                tool_id: s
+                    .extra
+                    .get("tool_id")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string()),
                 operation: s
                     .extra
                     .get("operation")
@@ -117,8 +117,9 @@ pub fn extract_conversation(path: &Path) -> ConversationView {
                     .and_then(|v| v.as_str())
                     .map(|s| s.to_string()),
             };
-            step_mutations.entry(tid).or_default().push(fm);
+            step_mutations.push(fm);
         }
+        step_mutations.sort_by(|a, b| a.path.cmp(&b.path));
 
         for (artifact_key, artifact_change) in &step.change {
             let structural = match &artifact_change.structural {
@@ -145,12 +146,11 @@ pub fn extract_conversation(path: &Path) -> ConversationView {
                     }
 
                     let mut turn = build_turn(step, &structural.extra);
-                    // Attach pre-collected file mutations to their tool_uses
-                    // by `tool_id`.
-                    for tu in turn.tool_uses.iter_mut() {
-                        if let Some(fms) = step_mutations.remove(&tu.id) {
-                            tu.file_mutations = fms;
-                        }
+                    // Attach pre-collected file mutations to the turn.
+                    // `tool_id` on each mutation links back to the
+                    // specific `ToolInvocation` (when set by derive).
+                    if !step_mutations.is_empty() {
+                        turn.file_mutations = std::mem::take(&mut step_mutations);
                     }
                     let idx = view.turns.len();
                     step_to_turn.insert(&step.step.id, idx);
@@ -321,6 +321,7 @@ fn build_turn(step: &Step, extra: &HashMap<String, serde_json::Value>) -> Turn {
         token_usage,
         environment,
         delegations,
+        file_mutations: Vec::new(),
         extra: turn_extra,
     }
 }

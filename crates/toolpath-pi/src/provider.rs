@@ -343,6 +343,7 @@ pub fn session_to_view(session: &PiSession) -> ConversationView {
                     environment: Some(env.clone()),
                     delegations: vec![],
                     extra: extra_map,
+                    file_mutations: Vec::new(),
                 });
             }
 
@@ -386,6 +387,7 @@ pub fn session_to_view(session: &PiSession) -> ConversationView {
                     environment: Some(env.clone()),
                     delegations: vec![],
                     extra: extra_map,
+                    file_mutations: Vec::new(),
                 });
             }
 
@@ -422,6 +424,7 @@ pub fn session_to_view(session: &PiSession) -> ConversationView {
                     environment: Some(env.clone()),
                     delegations: vec![],
                     extra: extra_map,
+                    file_mutations: Vec::new(),
                 });
             }
 
@@ -463,6 +466,7 @@ pub fn session_to_view(session: &PiSession) -> ConversationView {
                     environment: Some(env.clone()),
                     delegations: vec![],
                     extra: extra_map,
+                    file_mutations: Vec::new(),
                 });
             }
 
@@ -684,6 +688,7 @@ pub fn session_to_view(session: &PiSession) -> ConversationView {
                     environment: Some(env.clone()),
                     delegations,
                     extra: extra_map,
+                    file_mutations: Vec::new(),
                 });
             }
         }

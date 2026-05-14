@@ -169,6 +169,7 @@ mod tests {
             environment: None,
             delegations: vec![],
             extra: HashMap::new(),
+            file_mutations: Vec::new(),
         }
     }
 
@@ -369,6 +370,7 @@ mod tests {
                 environment: None,
                 delegations: vec![],
                 extra: HashMap::new(),
+                file_mutations: Vec::new(),
             }],
             total_usage: None,
             provider_id: None,
@@ -430,6 +432,7 @@ mod tests {
                     environment: None,
                     delegations: vec![],
                     extra: HashMap::new(),
+                    file_mutations: Vec::new(),
                 },
                 Turn {
                     id: "t2".into(),
@@ -450,6 +453,7 @@ mod tests {
                     environment: None,
                     delegations: vec![],
                     extra: HashMap::new(),
+                    file_mutations: Vec::new(),
                 },
             ],
             total_usage: None,

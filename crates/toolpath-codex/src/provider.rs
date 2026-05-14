@@ -608,17 +608,16 @@ impl<'a> Builder<'a> {
         let mut paths: Vec<&String> = patch.changes.keys().collect();
         paths.sort();
 
-        // Populate `tool.file_mutations` on the matching tool invocation so
-        // `derive_path` can project each file mutation into a sibling
-        // `file.write` change.
-        if let Some((turn_idx, tool_idx)) = loc {
+        // Populate `turn.file_mutations` on the matching turn, with
+        // `tool_id` set to the `call_id` so `derive_path` can link the
+        // sibling `file.write` change back to this specific tool call.
+        if let Some((turn_idx, _tool_idx)) = loc {
             let turn = &mut self.turns[turn_idx];
-            if let Some(tool) = turn.tool_uses.get_mut(tool_idx) {
-                for path in &paths {
-                    if let Some(change) = patch.changes.get(*path) {
-                        tool.file_mutations
-                            .push(patch_change_to_file_mutation(path, change));
-                    }
+            for path in &paths {
+                if let Some(change) = patch.changes.get(*path) {
+                    let mut fm = patch_change_to_file_mutation(path, change);
+                    fm.tool_id = Some(patch.call_id.clone());
+                    turn.file_mutations.push(fm);
                 }
             }
         }
@@ -791,6 +790,7 @@ fn message_to_turn(
         environment,
         delegations: Vec::new(),
         extra,
+        file_mutations: Vec::new(),
     }
 }
 
@@ -817,6 +817,7 @@ fn synthetic_assistant_turn(
         }),
         delegations: Vec::new(),
         extra: HashMap::new(),
+        file_mutations: Vec::new(),
     }
 }
 
@@ -1097,19 +1098,25 @@ mod tests {
     }
 
     #[test]
-    fn patch_apply_end_populates_tool_file_mutations() {
+    fn patch_apply_end_populates_turn_file_mutations() {
         let (_t, mgr, id) = setup_session_fixture(&minimal_session());
         let view = to_view(&mgr.read_session(&id).unwrap());
-        // Find the assistant turn whose `apply_patch` tool produced the file.
-        let tu = view
+        // Find the turn that hosts the `apply_patch` file mutation. The
+        // mutation's `tool_id` should link back to the apply_patch tool.
+        let apply_patch_id = view
             .turns
             .iter()
             .flat_map(|t| t.tool_uses.iter())
             .find(|tu| tu.name == "apply_patch")
+            .map(|tu| tu.id.clone())
             .expect("apply_patch tool invocation present");
-        assert_eq!(tu.file_mutations.len(), 1);
-        let fm = &tu.file_mutations[0];
-        assert_eq!(fm.path, "/tmp/proj/a.rs");
+        let fm = view
+            .turns
+            .iter()
+            .flat_map(|t| t.file_mutations.iter())
+            .find(|fm| fm.path == "/tmp/proj/a.rs")
+            .expect("file mutation present");
+        assert_eq!(fm.tool_id.as_ref(), Some(&apply_patch_id));
         assert_eq!(fm.operation.as_deref(), Some("add"));
         assert!(fm.raw_diff.is_some());
     }

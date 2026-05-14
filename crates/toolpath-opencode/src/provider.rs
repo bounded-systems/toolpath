@@ -40,8 +40,8 @@ use crate::types::{
 };
 use toolpath_convo::{
     ConversationEvent, ConversationMeta, ConversationProvider, ConversationView,
-    ConvoError as ConvoTraitError, DelegatedWork, EnvironmentSnapshot, Role, TokenUsage,
-    ToolCategory, ToolInvocation, ToolResult, Turn,
+    ConvoError as ConvoTraitError, DelegatedWork, EnvironmentSnapshot, FileMutation, ProducerInfo,
+    Role, SessionBase, TokenUsage, ToolCategory, ToolInvocation, ToolResult, Turn,
 };
 
 /// Provider for opencode sessions.
@@ -149,9 +149,17 @@ pub fn native_name(category: ToolCategory, args: &Value) -> Option<&'static str>
 // ── Session → ConversationView ─────────────────────────────────────
 
 /// Convert a parsed opencode [`Session`] to the provider-agnostic
-/// [`ConversationView`] shape.
+/// [`ConversationView`] shape. File mutations from the snapshot git repo
+/// are not populated; use [`to_view_with_resolver`] when you have one.
 pub fn to_view(session: &Session) -> ConversationView {
-    Builder::new(session).build()
+    to_view_with_resolver(session, &PathResolver::new())
+}
+
+/// Like [`to_view`] but opens opencode's snapshot git repository via the
+/// resolver and pre-resolves each turn's file mutations against the
+/// snapshot pair. Falls back silently when the repo isn't present.
+pub fn to_view_with_resolver(session: &Session, resolver: &PathResolver) -> ConversationView {
+    Builder::new(session).build_with_resolver(resolver)
 }
 
 struct Builder<'a> {
@@ -175,6 +183,53 @@ impl<'a> Builder<'a> {
             total_usage: TokenUsage::default(),
             total_usage_set: false,
         }
+    }
+
+    fn build_with_resolver(self, resolver: &PathResolver) -> ConversationView {
+        let session_version = self.session.version.clone();
+        let session_directory = self.session.directory.to_string_lossy().to_string();
+        let session_project_id = self.session.project_id.clone();
+        let snapshot_repo = resolver
+            .snapshot_gitdir(&session_project_id, &self.session.directory)
+            .ok()
+            .and_then(|gd| git2::Repository::open(gd).ok());
+
+        let mut view = self.build();
+        attach_snapshot_diffs(&mut view, snapshot_repo.as_ref());
+        attach_tool_input_fallbacks(&mut view);
+
+        // Producer + base.
+        view.producer = Some(ProducerInfo {
+            name: "opencode".into(),
+            version: Some(session_version),
+        });
+        view.base = Some(SessionBase {
+            working_dir: Some(session_directory),
+            vcs_revision: Some(session_project_id),
+            vcs_branch: None,
+            vcs_remote: None,
+        });
+
+        // opencode's wire format carries `parentID` on assistant messages
+        // pointing back at the previous user message — that's the natural
+        // chain. User messages legitimately have no parent. Don't
+        // synthesize anything here (would break the matrix idempotence:
+        // user turns would gain a synthetic parent that the projector
+        // can't preserve, causing parent_id graphs to diverge across
+        // iterations).
+
+        // Refresh files_changed so it matches what landed on turns.
+        let mut seen = std::collections::HashSet::new();
+        let mut ordered = Vec::new();
+        for turn in &view.turns {
+            for fm in &turn.file_mutations {
+                if seen.insert(fm.path.clone()) {
+                    ordered.push(fm.path.clone());
+                }
+            }
+        }
+        view.files_changed = ordered;
+        view
     }
 
     fn build(mut self) -> ConversationView {
@@ -255,6 +310,7 @@ impl<'a> Builder<'a> {
             environment,
             delegations: Vec::new(),
             extra,
+            file_mutations: Vec::new(),
         });
     }
 
@@ -449,6 +505,7 @@ impl<'a> Builder<'a> {
             environment,
             delegations,
             extra,
+            file_mutations: Vec::new(),
         });
     }
 }
@@ -648,6 +705,196 @@ impl ConversationProvider for OpencodeConvo {
                 successor: None,
             })
             .collect())
+    }
+}
+
+// ── Snapshot diff / tool-input fallback ────────────────────────────────
+
+/// For each assistant turn, walk its `extra["opencode"]["snapshots"]`
+/// across turns and populate `Turn.file_mutations` from the git2
+/// tree↔tree diff of the snapshot pair. No-op when `repo` is `None`.
+fn attach_snapshot_diffs(view: &mut ConversationView, repo: Option<&git2::Repository>) {
+    let Some(repo) = repo else { return };
+    let mut prev_after: Option<String> = None;
+    for turn in view.turns.iter_mut() {
+        let snapshots: Vec<String> = turn
+            .extra
+            .get("opencode")
+            .and_then(|oc| oc.get("snapshots"))
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let (Some(first), Some(last)) = (snapshots.first(), snapshots.last()) else {
+            continue;
+        };
+        // Prefer the previous turn's `after` snapshot as `before`.
+        let before = prev_after.clone().unwrap_or_else(|| first.clone());
+        let after = last.clone();
+        prev_after = Some(after.clone());
+        if before == after {
+            continue;
+        }
+        match diff_trees(repo, &before, &after) {
+            Ok(mutations) => {
+                for fm in mutations {
+                    turn.file_mutations.push(fm);
+                }
+            }
+            Err(e) => {
+                eprintln!(
+                    "Warning: snapshot diff {}..{} failed: {}",
+                    &before[..before.len().min(8)],
+                    &after[..after.len().min(8)],
+                    e
+                );
+            }
+        }
+    }
+}
+
+/// For each file-write tool invocation whose path isn't already covered
+/// by a snapshot-diff `FileMutation`, synthesize a no-raw mutation
+/// attributed to the tool. Catches files opencode wrote that are
+/// gitignored (so the snapshot pair shows no change) and the case
+/// where there's no snapshot repo at all.
+fn attach_tool_input_fallbacks(view: &mut ConversationView) {
+    for turn in view.turns.iter_mut() {
+        let existing: std::collections::HashSet<String> = turn
+            .file_mutations
+            .iter()
+            .map(|fm| fm.path.clone())
+            .collect();
+        let mut extras: Vec<FileMutation> = Vec::new();
+        for tu in &turn.tool_uses {
+            let Some(path) = tool_input_file_path(tu) else {
+                continue;
+            };
+            if existing.contains(&path) {
+                continue;
+            }
+            extras.push(FileMutation {
+                path,
+                tool_id: Some(tu.id.clone()),
+                operation: Some(tool_to_operation(&tu.name).to_string()),
+                ..Default::default()
+            });
+        }
+        turn.file_mutations.extend(extras);
+    }
+}
+
+fn tool_input_file_path(tu: &ToolInvocation) -> Option<String> {
+    tu.input
+        .get("filePath")
+        .or_else(|| tu.input.get("file_path"))
+        .or_else(|| tu.input.get("path"))
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+}
+
+fn tool_to_operation(name: &str) -> &'static str {
+    match name {
+        "write" => "add",
+        "edit" | "multiedit" | "patch" => "update",
+        "delete" | "rm" => "delete",
+        _ => "touch",
+    }
+}
+
+fn diff_trees(
+    repo: &git2::Repository,
+    before: &str,
+    after: &str,
+) -> std::result::Result<Vec<FileMutation>, git2::Error> {
+    let before_obj = repo.revparse_single(before)?;
+    let after_obj = repo.revparse_single(after)?;
+    let before_tree = before_obj.peel_to_tree()?;
+    let after_tree = after_obj.peel_to_tree()?;
+
+    let mut opts = git2::DiffOptions::new();
+    opts.context_lines(3);
+    opts.include_ignored(false);
+    opts.ignore_submodules(true);
+    let diff = repo.diff_tree_to_tree(Some(&before_tree), Some(&after_tree), Some(&mut opts))?;
+
+    use std::path::PathBuf;
+    let mut by_path: HashMap<PathBuf, (String, &'static str, Option<PathBuf>)> = HashMap::new();
+
+    diff.print(git2::DiffFormat::Patch, |delta, _hunk, line| {
+        let Some(new_path) = delta.new_file().path() else {
+            if let Some(old) = delta.old_file().path() {
+                let buf = by_path
+                    .entry(old.to_path_buf())
+                    .or_insert_with(|| (String::new(), "delete", None));
+                append_diff_line(&mut buf.0, line);
+            }
+            return true;
+        };
+        let op = classify_delta(&delta);
+        let entry = by_path.entry(new_path.to_path_buf()).or_insert_with(|| {
+            (
+                String::new(),
+                op,
+                delta.old_file().path().map(|p| p.to_path_buf()),
+            )
+        });
+        append_diff_line(&mut entry.0, line);
+        true
+    })?;
+
+    let mut out: Vec<FileMutation> = by_path
+        .into_iter()
+        .map(|(path, (raw_diff, op, old_path))| FileMutation {
+            path: path.to_string_lossy().into_owned(),
+            tool_id: None,
+            operation: Some(op.to_string()),
+            raw_diff: if raw_diff.is_empty() {
+                None
+            } else {
+                Some(raw_diff)
+            },
+            before: None,
+            after: None,
+            rename_to: if op == "rename" {
+                old_path.map(|p| p.to_string_lossy().into_owned())
+            } else {
+                None
+            },
+        })
+        .collect();
+    out.sort_by(|a, b| a.path.cmp(&b.path));
+    Ok(out)
+}
+
+fn classify_delta(delta: &git2::DiffDelta) -> &'static str {
+    use git2::Delta;
+    match delta.status() {
+        Delta::Added => "add",
+        Delta::Deleted => "delete",
+        Delta::Modified => "update",
+        Delta::Renamed => "rename",
+        Delta::Copied => "copy",
+        Delta::Typechange => "update",
+        _ => "update",
+    }
+}
+
+fn append_diff_line(buf: &mut String, line: git2::DiffLine<'_>) {
+    use git2::DiffLineType;
+    let prefix = match line.origin_value() {
+        DiffLineType::Context => " ",
+        DiffLineType::Addition => "+",
+        DiffLineType::Deletion => "-",
+        DiffLineType::ContextEOFNL | DiffLineType::AddEOFNL | DiffLineType::DeleteEOFNL => "",
+        _ => "",
+    };
+    buf.push_str(prefix);
+    if let Ok(s) = std::str::from_utf8(line.content()) {
+        buf.push_str(s);
     }
 }
 

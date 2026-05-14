@@ -167,6 +167,7 @@ fn message_to_turn(entry: &ConversationEntry, msg: &Message) -> Turn {
         environment,
         delegations,
         extra,
+        file_mutations: Vec::new(),
     }
 }
 
@@ -1065,6 +1066,7 @@ mod tests {
             environment: None,
             delegations: vec![],
             extra: Default::default(),
+            file_mutations: Vec::new(),
         }];
 
         // Create a message with results in reversed order

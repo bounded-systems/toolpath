@@ -101,15 +101,23 @@ pub struct SessionBase {
     pub vcs_remote: Option<String>,
 }
 
-/// A file mutation resolved at view-construction time. Providers populate this
-/// on the `ToolInvocation` that caused the mutation; `derive_path` projects
-/// each entry into a sibling artifact change keyed by `path` with
-/// `structural.type == "file.write"`.
+/// A file mutation resolved at view-construction time. Lives on the `Turn`
+/// that produced it; `derive_path` projects each entry into a sibling
+/// artifact change keyed by `path` with `structural.type == "file.write"`.
+/// `tool_id` links back to the specific `ToolInvocation` that caused the
+/// mutation when the provider can identify it (codex via `patch_apply_end`
+/// call_id, claude/gemini via tool-input attribution); `None` when the
+/// mutation is attributable only to the turn as a whole (opencode's
+/// snapshot diffs between turns).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct FileMutation {
     /// File path (relative to `view.base.working_dir` if relative, or
     /// `file://`/absolute).
     pub path: String,
+    /// `ToolInvocation::id` of the tool call that produced this mutation,
+    /// when the provider can attribute it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_id: Option<String>,
     /// Operation: `"add"`, `"update"`, `"delete"`, or a provider-specific tag.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub operation: Option<String>,
@@ -218,11 +226,6 @@ pub struct ToolInvocation {
     /// crate; `None` for unrecognized tools.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub category: Option<ToolCategory>,
-    /// File mutations this invocation produced, with diffs pre-resolved by
-    /// the provider's `to_view`. Each entry projects to a sibling
-    /// `file.write` artifact change in the derived step.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub file_mutations: Vec<FileMutation>,
 }
 
 /// The result of a tool invocation.
@@ -274,6 +277,14 @@ pub struct Turn {
     /// Sub-agent work delegated from this turn.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub delegations: Vec<DelegatedWork>,
+
+    /// File mutations produced by this turn, with diffs pre-resolved by
+    /// the provider's `to_view`. Each entry projects to a sibling
+    /// `file.write` artifact change in the derived step. When the
+    /// mutation is attributable to a specific tool call, `tool_id` on
+    /// the entry links back to that `ToolInvocation::id`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub file_mutations: Vec<FileMutation>,
 
     /// Provider-specific data that doesn't fit the common schema.
     ///
@@ -551,6 +562,7 @@ mod tests {
                     environment: None,
                     delegations: vec![],
                     extra: HashMap::new(),
+                    file_mutations: Vec::new(),
                 },
                 Turn {
                     id: "t2".into(),
@@ -581,6 +593,7 @@ mod tests {
                     environment: None,
                     delegations: vec![],
                     extra: HashMap::new(),
+                    file_mutations: Vec::new(),
                 },
                 Turn {
                     id: "t3".into(),
@@ -596,6 +609,7 @@ mod tests {
                     environment: None,
                     delegations: vec![],
                     extra: HashMap::new(),
+                    file_mutations: Vec::new(),
                 },
             ],
             total_usage: None,
@@ -944,6 +958,7 @@ mod tests {
                 result: None,
             }],
             extra: HashMap::new(),
+            file_mutations: Vec::new(),
         };
         let json = serde_json::to_string(&turn).unwrap();
         let back: Turn = serde_json::from_str(&json).unwrap();

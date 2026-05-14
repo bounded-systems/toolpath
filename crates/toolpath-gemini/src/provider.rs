@@ -137,6 +137,7 @@ fn message_to_turn(msg: &GeminiMessage, working_dir: Option<&str>) -> Turn {
         environment,
         delegations: vec![],
         extra,
+        file_mutations: Vec::new(),
     }
 }
 
