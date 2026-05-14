@@ -289,21 +289,17 @@ paths.
 
 #### Document Kind
 
-`meta.kind` on a **path** classifies it — a hint that the path follows a
-recognizable shape worth special-casing. It is always optional; an absent or
-unrecognized `kind` should be treated as a generic path. The only value defined
-so far is **`agent-coding-session`** (future revisions may register more).
+`meta.kind` on a **path** is a URI naming a *kind specification* — a contract
+describing the additional shape the path follows on top of the base format.
+Consumers that recognize the URI may rely on the structure that spec describes;
+unrecognized URIs should be treated as a generic path. Kind URIs are
+immutable, semver-versioned, and revisions ship at a new version URI.
 
-A **`agent-coding-session`** path is an AI coding conversation. Each conversational-turn step
-carries one [`ArtifactChange`](#change-perspectives) whose `structural.type` is
-`"conversation.append"` — find it by that `type`, not by artifact key. That
-change's `structural` object always has `role` (`"user"` / `"assistant"` /
-`"system"` / producer-specific) and, when the turn has prose, `text`; it may
-also carry `thinking`, `tool_uses`, token counts, `stop_reason`, environment
-fields, and a producer-namespaced bag of anything else. `meta.source` names the
-producing harness (`claude-code`, `gemini-cli`, `codex`, `opencode`, `pi`);
-structure beyond the `conversation.append` change — synthetic steps, file-write
-artifacts, tool records — is producer-specific.
+Defined kinds are listed at <https://toolpath.dev/kinds/>. The only one defined
+so far is `https://toolpath.dev/kinds/agent-coding-session/v1.0.0` — a path
+recording an AI coding conversation, where each conversational-turn step
+carries a `"conversation.append"` structural change with the turn's role,
+text, and so on. See the linked spec for the full contract.
 
 #### Actor Definitions
 

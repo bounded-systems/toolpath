@@ -1249,7 +1249,7 @@ mod tests {
             }),
         };
         let jsonl = p.to_jsonl_string().unwrap();
-        assert!(jsonl.contains(r#""kind":"agent-coding-session""#));
+        assert!(jsonl.contains(r#""kind":"https://toolpath.dev/kinds/agent-coding-session/v1.0.0""#));
         let back = Path::from_jsonl_str(&jsonl).unwrap();
         assert_eq!(canonical_json(&p), canonical_json(&back));
     }
@@ -1257,12 +1257,12 @@ mod tests {
     #[test]
     fn path_meta_line_can_set_kind() {
         let patch = PathMetaPatch {
-            kind: Some("agent-coding-session".into()),
+            kind: Some("https://toolpath.dev/kinds/agent-coding-session/v1.0.0".into()),
             ..Default::default()
         };
         let mut meta = PathMeta::default();
         apply_meta_patch(&mut meta, patch);
-        assert_eq!(meta.kind.as_deref(), Some("agent-coding-session"));
+        assert_eq!(meta.kind.as_deref(), Some("https://toolpath.dev/kinds/agent-coding-session/v1.0.0"));
     }
 
     #[test]

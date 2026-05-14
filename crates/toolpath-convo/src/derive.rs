@@ -4,8 +4,7 @@
 //! providers. Takes a [`ConversationView`] and emits a [`Path`] document with
 //! one step per turn and a `conversation.append` structural change carrying
 //! the turn's text, thinking, tool uses, and token usage. The emitted path is
-//! tagged with `meta.kind = "agent-coding-session"` (`toolpath::v1::PATH_KIND_AGENT_CODING_SESSION`)
-//! so renderers and parsers know it follows the conversation shape.
+//! tagged with `meta.kind = PATH_KIND_AGENT_CODING_SESSION`.
 
 use std::collections::HashMap;
 
@@ -699,7 +698,7 @@ mod tests {
         );
         // ...and survives a JSON round-trip.
         let json = serde_json::to_string(&path).unwrap();
-        assert!(json.contains(r#""kind":"agent-coding-session""#));
+        assert!(json.contains(r#""kind":"https://toolpath.dev/kinds/agent-coding-session/v1.0.0""#));
     }
 
     #[test]

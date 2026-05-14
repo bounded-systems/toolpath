@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://toolpath.dev/kinds/agent-coding-session/v1.0.0/schema.json",
+  "title": "Toolpath kind: agent-coding-session v1.0.0",
+  "description": "Additive constraints on a Toolpath `Path` whose `meta.kind` is the agent-coding-session v1.0.0 URI. Apply alongside the base Toolpath schema; the path is valid when both pass. The full contract — required vs. optional fields on `conversation.append` changes, actor patterns, what's producer-specific — is at https://toolpath.dev/kinds/agent-coding-session/v1.0.0/.",
+  "type": "object",
+  "properties": {
+    "meta": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "const": "https://toolpath.dev/kinds/agent-coding-session/v1.0.0"
+        }
+      },
+      "required": ["kind"]
+    }
+  },
+  "required": ["meta"]
+}

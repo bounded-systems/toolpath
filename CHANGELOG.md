@@ -2,21 +2,29 @@
 
 All notable changes to the Toolpath workspace are documented here.
 
-## `meta.kind` — new path-kind field; conversation paths tagged `agent-coding-session` — unreleased
+## `meta.kind` — new path-kind field; hosted kind spec registry — unreleased
 
-New optional `meta.kind` field on `Path` (`toolpath::v1::PathMeta::kind`, plus
-the `toolpath::v1::PATH_KIND_AGENT_CODING_SESSION` constant) — a hint to renderers and
-generic parsers that a path follows a recognizable shape. The only defined
-value is `"agent-coding-session"`: each step is a `conversation.append` change carrying that
-turn's `role`, `text`, and so on, and `meta.source` names the producing
-harness. Absent means generic — existing documents parse and validate
-unchanged, and `kind` is omitted when unset.
+New optional `meta.kind` field on `Path` (`toolpath::v1::PathMeta::kind`,
+plus the `toolpath::v1::PATH_KIND_AGENT_CODING_SESSION` constant). `kind` is a
+URI naming a *kind specification* — a hosted, immutable, semver-versioned
+contract describing the additional shape a path follows on top of the base
+format. Absent or unrecognized `kind` ⇒ generic path; existing documents
+parse and validate unchanged.
 
-Every conversation → `Path` derivation now sets `meta.kind = "agent-coding-session"` (the
-shared `toolpath_convo::derive_path` and each conversation provider crate's
-own). The JSONL form carries `kind` through `PathOpen.meta` and `PathMeta`
-patch lines. Documented in the RFC ("Document Kind") and the JSON Schema
-(`$defs/pathMeta`).
+The first defined kind is `https://toolpath.dev/kinds/agent-coding-session/v1.0.0`,
+which marks a path as an AI coding conversation (each step is a
+`conversation.append` change carrying that turn's `role`, `text`, and so
+on; `meta.source` names the producing harness). Every conversation → `Path`
+derivation now sets it — the shared `toolpath_convo::derive_path` and each
+conversation provider crate's own. The JSONL form carries `kind` through
+`PathOpen.meta` and `PathMeta` patch lines.
+
+Kind specs are sourced under `site/kinds/<name>/<version>/` (Markdown spec
+plus an additive JSON Schema fragment) and published under
+`https://toolpath.dev/kinds/`. A registry index lives at
+`https://toolpath.dev/kinds/`. The Toolpath RFC ("Document Kind") and the
+JSON Schema (`$defs/pathMeta`) reference the registry rather than carrying
+kind-specific contracts inline.
 
 Touches `toolpath`, `toolpath-convo`, `toolpath-claude`, `toolpath-gemini`,
 `toolpath-codex`, `toolpath-opencode`, and `toolpath-pi`; versions to be
