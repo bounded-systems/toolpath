@@ -42,14 +42,8 @@ use crate::types::{
 ///
 /// let view = ConversationView {
 ///     id: "session-uuid".into(),
-///     started_at: None,
-///     last_activity: None,
-///     turns: vec![],
-///     total_usage: None,
 ///     provider_id: Some("gemini-cli".into()),
-///     files_changed: vec![],
-///     session_ids: vec![],
-///     events: vec![],
+///     ..Default::default()
 /// };
 ///
 /// let projector = GeminiProjector::default();

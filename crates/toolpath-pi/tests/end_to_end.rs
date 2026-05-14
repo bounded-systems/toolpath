@@ -99,7 +99,8 @@ fn test_derive_path_from_fixture() {
     // Path ID format.
     assert!(path.path.id.starts_with("path-pi-"));
     // Head points at the last step.
-    assert_eq!(path.path.head, "step-0004");
+    // Head matches the last turn's native id (which is the source entry id).
+    assert_eq!(path.path.head, "m4");
     // Base URI derived from cwd.
     assert!(
         path.path

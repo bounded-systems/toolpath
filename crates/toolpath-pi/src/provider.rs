@@ -21,7 +21,8 @@ use serde_json::{Map, Value, json};
 use std::collections::HashMap;
 use toolpath_convo::{
     ConversationMeta, ConversationProvider, ConversationView, ConvoError, DelegatedWork,
-    EnvironmentSnapshot, Role, TokenUsage, ToolCategory, ToolInvocation, ToolResult, Turn,
+    EnvironmentSnapshot, Role, SessionBase, TokenUsage, ToolCategory, ToolInvocation, ToolResult,
+    Turn,
 };
 
 // ── Classification helpers ───────────────────────────────────────────
@@ -754,6 +755,15 @@ pub fn session_to_view(session: &PiSession) -> ConversationView {
     let started_at = parse_ts(&session.header.timestamp);
     let last_activity = turns.last().and_then(|t| parse_ts(&t.timestamp));
 
+    let base = if session.header.cwd.is_empty() {
+        None
+    } else {
+        Some(SessionBase {
+            working_dir: Some(session.header.cwd.clone()),
+            ..Default::default()
+        })
+    };
+
     ConversationView {
         id: session.header.id.clone(),
         started_at,
@@ -764,6 +774,7 @@ pub fn session_to_view(session: &PiSession) -> ConversationView {
         files_changed,
         session_ids,
         events: vec![],
+        base,
         ..Default::default()
     }
 }
