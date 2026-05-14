@@ -69,6 +69,19 @@ pub struct TokenUsage {
     pub cache_write_tokens: Option<u32>,
 }
 
+/// Identity of the software that produced a session: e.g.
+/// `{ name: "codex-tui", version: "0.118.0" }`. Distinct from
+/// [`ConversationView::provider_id`] (which is the high-level family —
+/// `"codex"`, `"claude-code"` — used for dispatch).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ProducerInfo {
+    /// Producer name (e.g. `"codex-tui"`, `"claude-code"`, `"gemini-cli"`).
+    pub name: String,
+    /// Producer version, when the source format records one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+}
+
 /// Path-level base context for a conversation: where the session was rooted
 /// and against what VCS state. Populated by the provider's `to_view`; projects
 /// straight onto `Path.base` by `derive_path`.
@@ -109,6 +122,10 @@ pub struct FileMutation {
     /// File contents after this mutation (when known).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub after: Option<String>,
+    /// When this mutation is a rename, the new path. Projected to
+    /// `structural.extra.rename_to`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rename_to: Option<String>,
 }
 
 /// Snapshot of the working environment when a turn was produced.
@@ -312,11 +329,10 @@ pub struct ConversationView {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base: Option<SessionBase>,
 
-    /// Path-level provider-namespaced extras. Projects directly to
-    /// `Path.meta.extra`. Providers SHOULD namespace under their short id
-    /// (e.g. `extra["codex"]`, `extra["opencode"]`) to avoid collisions.
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    pub extra: HashMap<String, serde_json::Value>,
+    /// Producing software (CLI name + version). Distinct from
+    /// `provider_id`, which is the dispatch family.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub producer: Option<ProducerInfo>,
 }
 
 impl ConversationView {

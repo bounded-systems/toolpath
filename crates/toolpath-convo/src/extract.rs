@@ -13,8 +13,8 @@ use chrono::DateTime;
 use toolpath::v1::{Path, Step};
 
 use crate::{
-    ConversationEvent, ConversationView, DelegatedWork, EnvironmentSnapshot, FileMutation, Role,
-    SessionBase, TokenUsage, ToolCategory, ToolInvocation, ToolResult, Turn,
+    ConversationEvent, ConversationView, DelegatedWork, EnvironmentSnapshot, FileMutation,
+    ProducerInfo, Role, SessionBase, TokenUsage, ToolCategory, ToolInvocation, ToolResult, Turn,
 };
 
 /// Extract a [`ConversationView`] from a toolpath [`Path`] document.
@@ -60,15 +60,15 @@ pub fn extract_conversation(path: &Path) -> ConversationView {
         }
     }
 
-    // Project `path.meta.extra` back to `view.extra`. `files_changed` and
-    // `vcs_remote` are handled by other slots.
-    if let Some(meta) = &path.meta {
-        for (k, v) in &meta.extra {
-            if k == "files_changed" || k == "vcs_remote" {
-                continue;
-            }
-            view.extra.insert(k.clone(), v.clone());
-        }
+    // Recover canonical session-level fields from `path.meta.extra`.
+    // Unrecognized keys are dropped — the IR is the cross-harness contract.
+    if let Some(meta) = &path.meta
+        && let Some(p) = meta
+            .extra
+            .get("producer")
+            .and_then(|v| serde_json::from_value::<ProducerInfo>(v.clone()).ok())
+    {
+        view.producer = Some(p);
     }
 
     // Map from step ID → index into view.turns, for parent lookups.
@@ -109,6 +109,11 @@ pub fn extract_conversation(path: &Path) -> ConversationView {
                 after: s
                     .extra
                     .get("after")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string()),
+                rename_to: s
+                    .extra
+                    .get("rename_to")
                     .and_then(|v| v.as_str())
                     .map(|s| s.to_string()),
             };

@@ -256,6 +256,12 @@ pub fn derive_path(view: &ConversationView, config: &DeriveConfig) -> Path {
                     if let Some(a) = &fm.after {
                         t_extra.insert("after".to_string(), serde_json::Value::String(a.clone()));
                     }
+                    if let Some(rt) = &fm.rename_to {
+                        t_extra.insert(
+                            "rename_to".to_string(),
+                            serde_json::Value::String(rt.clone()),
+                        );
+                    }
                     step.change.insert(
                         fm.path.clone(),
                         ArtifactChange {
@@ -304,6 +310,9 @@ pub fn derive_path(view: &ConversationView, config: &DeriveConfig) -> Path {
     // and other non-turn entries survive the IR-to-Path-to-IR roundtrip.
     // Without this, derive_path drops everything outside `turns`, so a
     // Claude session loses ~10–25% of its lines on import/export.
+    // Track the last emitted step id so events without an explicit
+    // `parent_id` can chain off whatever step came before them.
+    let mut last_step_id: Option<String> = steps.last().map(|s| s.step.id.clone());
     for (idx, event) in view.events.iter().enumerate() {
         // Event step id: prefer the event's native id so it round-trips.
         let step_id = if event.id.is_empty() {
@@ -348,15 +357,18 @@ pub fn derive_path(view: &ConversationView, config: &DeriveConfig) -> Path {
             );
         }
 
+        let parents: Vec<String> = event
+            .parent_id
+            .as_ref()
+            .and_then(|pid| turn_to_step.get(pid).cloned())
+            .or_else(|| last_step_id.clone())
+            .into_iter()
+            .collect();
+
         let mut step = Step {
             step: StepIdentity {
-                id: step_id,
-                parents: event
-                    .parent_id
-                    .as_ref()
-                    .and_then(|pid| turn_to_step.get(pid).cloned())
-                    .into_iter()
-                    .collect(),
+                id: step_id.clone(),
+                parents,
                 actor,
                 timestamp: event.timestamp.clone(),
             },
@@ -375,6 +387,7 @@ pub fn derive_path(view: &ConversationView, config: &DeriveConfig) -> Path {
             },
         );
         steps.push(step);
+        last_step_id = Some(step_id);
     }
 
     let head = steps.last().map(|s| s.step.id.clone()).unwrap_or_default();
@@ -401,11 +414,6 @@ pub fn derive_path(view: &ConversationView, config: &DeriveConfig) -> Path {
         meta.extra.insert("files_changed".to_string(), v);
     }
 
-    // Project path-level provider-namespaced extras straight onto meta.extra.
-    for (k, v) in &view.extra {
-        meta.extra.insert(k.clone(), v.clone());
-    }
-
     // Carry `vcs_remote` (not representable on `Base`) under meta.extra.
     if let Some(remote) = view.base.as_ref().and_then(|b| b.vcs_remote.as_ref())
         && !meta.extra.contains_key("vcs_remote")
@@ -414,6 +422,13 @@ pub fn derive_path(view: &ConversationView, config: &DeriveConfig) -> Path {
             "vcs_remote".to_string(),
             serde_json::Value::String(remote.clone()),
         );
+    }
+
+    // Project canonical session-level fields under well-known keys.
+    if let Some(producer) = &view.producer
+        && let Ok(v) = serde_json::to_value(producer)
+    {
+        meta.extra.insert("producer".to_string(), v);
     }
 
     Path {

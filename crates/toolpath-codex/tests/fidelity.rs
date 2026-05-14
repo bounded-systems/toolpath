@@ -191,14 +191,15 @@ fn collect_derived_tool_call_ids(path: &toolpath::v1::Path) -> HashSet<String> {
             let Some(struc) = change.structural.as_ref() else {
                 continue;
             };
-            let Some(calls) = struc.extra.get("tool_calls") else {
+            // Canonical: `tool_uses` array entries carry `id` (= call_id).
+            let Some(uses) = struc.extra.get("tool_uses") else {
                 continue;
             };
-            let Some(arr) = calls.as_array() else {
+            let Some(arr) = uses.as_array() else {
                 continue;
             };
-            for c in arr {
-                if let Some(id) = c.get("call_id").and_then(|v| v.as_str()) {
+            for tu in arr {
+                if let Some(id) = tu.get("id").and_then(|v| v.as_str()) {
                     ids.insert(id.to_string());
                 }
             }

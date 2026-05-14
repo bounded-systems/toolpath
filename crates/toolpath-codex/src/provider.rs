@@ -27,13 +27,14 @@ use std::collections::HashMap;
 
 use crate::io::ConvoIO;
 use crate::types::{
-    EventMsg, ExecCommandEnd, Message, PatchApplyEnd, ResponseItem, RolloutItem, Session,
-    TokenCountInfo, TokenUsage as CodexTokenUsage,
+    EventMsg, ExecCommandEnd, Message, PatchApplyEnd, PatchChange, ResponseItem, RolloutItem,
+    Session, TokenCountInfo, TokenUsage as CodexTokenUsage,
 };
 use serde_json::{Map, Value};
 use toolpath_convo::{
     ConversationEvent, ConversationMeta, ConversationProvider, ConversationView, ConvoError,
-    EnvironmentSnapshot, Role, TokenUsage, ToolCategory, ToolInvocation, ToolResult, Turn,
+    EnvironmentSnapshot, FileMutation, ProducerInfo, Role, SessionBase, TokenUsage, ToolCategory,
+    ToolInvocation, ToolResult, Turn,
 };
 
 /// Provider for Codex sessions.
@@ -257,6 +258,81 @@ impl<'a> Builder<'a> {
             }
         }
 
+        // Path-level base context from session_meta (cwd + git).
+        let meta = self.session.meta();
+        let base = {
+            let wd = meta
+                .as_ref()
+                .map(|m| m.cwd.to_string_lossy().to_string())
+                .filter(|s| !s.is_empty())
+                .or_else(|| self.working_dir.clone());
+            let git = meta.as_ref().and_then(|m| m.git.as_ref());
+            let revision = git.and_then(|g| g.commit_hash.clone());
+            let branch = git.and_then(|g| g.branch.clone());
+            let remote = git.and_then(|g| g.repository_url.clone());
+            if wd.is_some() || revision.is_some() || branch.is_some() || remote.is_some() {
+                Some(SessionBase {
+                    working_dir: wd,
+                    vcs_revision: revision,
+                    vcs_branch: branch,
+                    vcs_remote: remote,
+                })
+            } else {
+                None
+            }
+        };
+
+        // Producer (originator + cli_version) lifts onto the typed view
+        // field. `model_provider` already lives on each assistant
+        // `ActorDefinition.provider`. Codex's `source` and `forked_from_id`
+        // are wire-level fields with no cross-harness analog — the codex
+        // projector hard-codes defaults on the return path, so we let them
+        // drop on this side.
+        let producer = meta.as_ref().map(|m| ProducerInfo {
+            name: m.originator.clone(),
+            version: Some(m.cli_version.clone()),
+        });
+
+        // Filter empty carrier turns (no text, no thinking, no tool calls).
+        // Previously done inside `derive_path_from_view`; moved here so the
+        // canonical `derive_path` sees only meaningful turns.
+        self.turns
+            .retain(|t| !(t.text.is_empty() && t.thinking.is_none() && t.tool_uses.is_empty()));
+
+        // Assign synthetic ids to turns whose source message didn't carry
+        // one, then link sequentially via `parent_id` so the shared
+        // `derive_path` can walk a connected DAG. Codex turns don't carry
+        // explicit parent ids on the wire; this preserves the linear
+        // ordering the old `derive_path_from_view` produced.
+        for (idx, t) in self.turns.iter_mut().enumerate() {
+            if t.id.is_empty() {
+                t.id = format!("codex-turn-{:04}", idx + 1);
+            }
+        }
+        let mut prev: Option<String> = None;
+        for t in self.turns.iter_mut() {
+            if t.parent_id.is_none() {
+                t.parent_id = prev.clone();
+            }
+            prev = Some(t.id.clone());
+        }
+
+        // Disambiguate event ids. `event_from_raw` synthesizes
+        // `<event_type>-<timestamp>`, which collides when codex emits
+        // multiple events of the same type at the same timestamp (rare
+        // but real). Suffix duplicates with their position so each step
+        // gets a unique id.
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for t in &self.turns {
+            seen.insert(t.id.clone());
+        }
+        for (i, e) in self.events.iter_mut().enumerate() {
+            if !seen.insert(e.id.clone()) {
+                e.id = format!("{}-{:04}", e.id, i);
+                seen.insert(e.id.clone());
+            }
+        }
+
         ConversationView {
             id: self.session.id.clone(),
             started_at: self.session.started_at(),
@@ -271,6 +347,8 @@ impl<'a> Builder<'a> {
             files_changed: self.files_changed_order,
             session_ids: vec![],
             events: self.events,
+            base,
+            producer,
             ..Default::default()
         }
     }
@@ -523,25 +601,28 @@ impl<'a> Builder<'a> {
     }
 
     fn apply_patch_apply_end(&mut self, patch: &PatchApplyEnd) {
-        let turn_idx = self.call_index.get(&patch.call_id).map(|(i, _)| *i);
+        let loc = self.call_index.get(&patch.call_id).copied();
 
-        if let Some(turn_idx) = turn_idx {
+        // `patch.changes` is a HashMap — iterate in sorted order so the
+        // derived order is deterministic across runs.
+        let mut paths: Vec<&String> = patch.changes.keys().collect();
+        paths.sort();
+
+        // Populate `tool.file_mutations` on the matching tool invocation so
+        // `derive_path` can project each file mutation into a sibling
+        // `file.write` change.
+        if let Some((turn_idx, tool_idx)) = loc {
             let turn = &mut self.turns[turn_idx];
-            let codex = turn_extra_codex_mut(turn);
-            let patches = codex
-                .entry("patch_changes")
-                .or_insert_with(|| Value::Array(Vec::new()));
-            if let Value::Array(arr) = patches
-                && let Ok(v) = serde_json::to_value(patch)
-            {
-                arr.push(v);
+            if let Some(tool) = turn.tool_uses.get_mut(tool_idx) {
+                for path in &paths {
+                    if let Some(change) = patch.changes.get(*path) {
+                        tool.file_mutations
+                            .push(patch_change_to_file_mutation(path, change));
+                    }
+                }
             }
         }
 
-        // `patch.changes` is a HashMap — iterate in sorted order so the
-        // derived `files_changed` list is deterministic across runs.
-        let mut paths: Vec<&String> = patch.changes.keys().collect();
-        paths.sort();
         for path in paths {
             if self.files_changed_seen.insert(path.clone()) {
                 self.files_changed_order.push(path.clone());
@@ -583,6 +664,74 @@ impl<'a> Builder<'a> {
             .rposition(|t| t.role == Role::Assistant)
             .or_else(|| self.turns.len().checked_sub(1))
     }
+}
+
+// ── Patch → FileMutation conversion ─────────────────────────────────
+
+fn patch_change_to_file_mutation(path: &str, change: &PatchChange) -> FileMutation {
+    let mut fm = FileMutation {
+        path: path.to_string(),
+        ..Default::default()
+    };
+    match change {
+        PatchChange::Add { content, .. } => {
+            fm.operation = Some("add".into());
+            fm.after = Some(content.clone());
+            fm.raw_diff = Some(synth_add_diff(content));
+        }
+        PatchChange::Update {
+            unified_diff,
+            move_path,
+            ..
+        } => {
+            fm.operation = Some("update".into());
+            fm.raw_diff = Some(unified_diff.clone());
+            fm.rename_to = move_path.clone();
+        }
+        PatchChange::Delete {
+            original_content, ..
+        } => {
+            fm.operation = Some("delete".into());
+            fm.before = original_content.clone();
+            fm.raw_diff = original_content.as_deref().map(synth_delete_diff);
+        }
+        PatchChange::Unknown => {
+            fm.operation = Some("unknown".into());
+        }
+    }
+    fm
+}
+
+fn synth_add_diff(content: &str) -> String {
+    let lines: Vec<&str> = content.split('\n').collect();
+    let effective: &[&str] = if lines.last() == Some(&"") {
+        &lines[..lines.len().saturating_sub(1)]
+    } else {
+        &lines[..]
+    };
+    let mut buf = format!("@@ -0,0 +1,{} @@\n", effective.len());
+    for l in effective {
+        buf.push('+');
+        buf.push_str(l);
+        buf.push('\n');
+    }
+    buf
+}
+
+fn synth_delete_diff(original: &str) -> String {
+    let lines: Vec<&str> = original.split('\n').collect();
+    let effective: &[&str] = if lines.last() == Some(&"") {
+        &lines[..lines.len().saturating_sub(1)]
+    } else {
+        &lines[..]
+    };
+    let mut buf = format!("@@ -1,{} +0,0 @@\n", effective.len());
+    for l in effective {
+        buf.push('-');
+        buf.push_str(l);
+        buf.push('\n');
+    }
+    buf
 }
 
 fn message_to_turn(
@@ -948,14 +1097,21 @@ mod tests {
     }
 
     #[test]
-    fn patch_apply_end_attached_to_turn_extra() {
+    fn patch_apply_end_populates_tool_file_mutations() {
         let (_t, mgr, id) = setup_session_fixture(&minimal_session());
         let view = to_view(&mgr.read_session(&id).unwrap());
-        let assistant = &view.turns[1];
-        let codex = assistant.extra.get("codex").unwrap();
-        let patches = codex.get("patch_changes").unwrap().as_array().unwrap();
-        assert_eq!(patches.len(), 1);
-        assert_eq!(patches[0]["changes"]["/tmp/proj/a.rs"]["type"], "add");
+        // Find the assistant turn whose `apply_patch` tool produced the file.
+        let tu = view
+            .turns
+            .iter()
+            .flat_map(|t| t.tool_uses.iter())
+            .find(|tu| tu.name == "apply_patch")
+            .expect("apply_patch tool invocation present");
+        assert_eq!(tu.file_mutations.len(), 1);
+        let fm = &tu.file_mutations[0];
+        assert_eq!(fm.path, "/tmp/proj/a.rs");
+        assert_eq!(fm.operation.as_deref(), Some("add"));
+        assert!(fm.raw_diff.is_some());
     }
 
     #[test]
