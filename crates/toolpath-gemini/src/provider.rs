@@ -103,6 +103,7 @@ fn message_to_turn(msg: &GeminiMessage, working_dir: Option<&str>) -> Turn {
         .iter()
         .map(tool_call_to_invocation)
         .collect();
+    let file_mutations = compute_file_mutations(msg.tool_calls());
 
     let token_usage = msg.tokens.as_ref().map(|t| TokenUsage {
         input_tokens: t.input,
@@ -137,7 +138,88 @@ fn message_to_turn(msg: &GeminiMessage, working_dir: Option<&str>) -> Turn {
         environment,
         delegations: vec![],
         extra,
-        file_mutations: Vec::new(),
+        file_mutations,
+    }
+}
+
+/// For each file-write tool call in this message, build a
+/// `FileMutation` with a pre-resolved unified diff. Preference order:
+///   1. Gemini's own `resultDisplay.fileDiff` when present (real diff
+///      computed by the harness).
+///   2. Hand-rolled fallback from `args` (`old_string`/`new_string` for
+///      `replace`, `content` for `write_file`).
+/// `tool_id` links back to the [`ToolCall`].
+fn compute_file_mutations(calls: &[ToolCall]) -> Vec<toolpath_convo::FileMutation> {
+    let mut out = Vec::new();
+    for call in calls {
+        if tool_category(&call.name) != Some(ToolCategory::FileWrite) {
+            continue;
+        }
+        let Some(path) = file_path_from_args(&call.args) else {
+            continue;
+        };
+        let raw_diff = call.file_diff().or_else(|| fallback_raw_diff(call));
+        let operation = match call.name.as_str() {
+            "write_file" => Some("add".to_string()),
+            "replace" | "edit" => Some("update".to_string()),
+            _ => Some(call.name.clone()),
+        };
+        let after = match call.name.as_str() {
+            "write_file" => call
+                .args
+                .get("content")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string()),
+            _ => None,
+        };
+        out.push(toolpath_convo::FileMutation {
+            path,
+            tool_id: Some(call.id.clone()),
+            operation,
+            raw_diff,
+            before: None,
+            after,
+            rename_to: None,
+        });
+    }
+    out
+}
+
+/// Synthesize a unified-diff hunk when Gemini's `resultDisplay.fileDiff`
+/// is absent. Not pixel-perfect but enough to give readers a change
+/// perspective.
+fn fallback_raw_diff(call: &ToolCall) -> Option<String> {
+    match call.name.as_str() {
+        "replace" => {
+            let old_s = call.args.get("old_string").and_then(|v| v.as_str())?;
+            let new_s = call.args.get("new_string").and_then(|v| v.as_str())?;
+            let old_lines: Vec<&str> = old_s.split('\n').collect();
+            let new_lines: Vec<&str> = new_s.split('\n').collect();
+            let mut buf = format!("@@ -1,{} +1,{} @@\n", old_lines.len(), new_lines.len());
+            for l in old_lines {
+                buf.push('-');
+                buf.push_str(l);
+                buf.push('\n');
+            }
+            for l in new_lines {
+                buf.push('+');
+                buf.push_str(l);
+                buf.push('\n');
+            }
+            Some(buf)
+        }
+        "write_file" => {
+            let content = call.args.get("content").and_then(|v| v.as_str())?;
+            let lines: Vec<&str> = content.split('\n').collect();
+            let mut buf = format!("@@ -0,0 +1,{} @@\n", lines.len());
+            for l in lines {
+                buf.push('+');
+                buf.push_str(l);
+                buf.push('\n');
+            }
+            Some(buf)
+        }
+        _ => None,
     }
 }
 
@@ -361,8 +443,26 @@ fn conversation_to_view(convo: &Conversation) -> ConversationView {
         }
     }
 
+    // Gemini's wire format doesn't carry parent_id on messages, so link
+    // turns sequentially. (Matches the old `derive_path_from_view`,
+    // which used `last_step_id` as the parent for each new step.)
+    let mut prev: Option<String> = None;
+    for t in turns.iter_mut() {
+        if t.parent_id.is_none() {
+            t.parent_id = prev.clone();
+        }
+        prev = Some(t.id.clone());
+    }
+
     let total_usage = sum_usage(&turns);
     let files_changed = extract_files_changed(&turns);
+
+    let view_base = working_dir.as_ref().map(|wd| toolpath_convo::SessionBase {
+        working_dir: Some(wd.clone()),
+        vcs_revision: None,
+        vcs_branch: None,
+        vcs_remote: None,
+    });
 
     ConversationView {
         id: convo.session_uuid.clone(),
@@ -374,7 +474,11 @@ fn conversation_to_view(convo: &Conversation) -> ConversationView {
         files_changed,
         session_ids: vec![],
         events: vec![],
-        ..Default::default()
+        base: view_base,
+        producer: Some(toolpath_convo::ProducerInfo {
+            name: "gemini-cli".into(),
+            version: None,
+        }),
     }
 }
 
