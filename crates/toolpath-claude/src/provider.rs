@@ -99,6 +99,8 @@ fn message_to_turn(entry: &ConversationEntry, msg: &Message) -> Turn {
         })
         .collect();
 
+    let file_mutations = compute_file_mutations(&tool_uses, entry.cwd.as_deref());
+
     let token_usage = msg.usage.as_ref().map(|u| TokenUsage {
         input_tokens: u.input_tokens,
         output_tokens: u.output_tokens,
@@ -167,8 +169,99 @@ fn message_to_turn(entry: &ConversationEntry, msg: &Message) -> Turn {
         environment,
         delegations,
         extra,
-        file_mutations: Vec::new(),
+        file_mutations,
     }
+}
+
+/// For each file-write tool invocation in the turn, synthesize a unified
+/// diff via [`toolpath_convo::file_write_diff`] and pre-resolve the
+/// before-state for `Write` via `git show HEAD:<path>` (best-effort).
+/// Each mutation links back to its tool via `tool_id`.
+fn compute_file_mutations(
+    tool_uses: &[ToolInvocation],
+    cwd: Option<&str>,
+) -> Vec<toolpath_convo::FileMutation> {
+    let mut out = Vec::new();
+    for tu in tool_uses {
+        if tu.category != Some(ToolCategory::FileWrite) {
+            continue;
+        }
+        let Some(path) = extract_file_path_for_tool(&tu.input) else {
+            continue;
+        };
+        // Only `Write` carries whole-file content; consult git HEAD for
+        // its pre-image so the diff isn't addition-only. Other tools
+        // (Edit / MultiEdit / NotebookEdit) carry old_string/new_string
+        // pairs and don't need a before-state lookup.
+        let before_state = if tu.name == "Write" {
+            cwd.and_then(|c| git_head_content(c, &path))
+        } else {
+            None
+        };
+        let raw_diff =
+            toolpath_convo::file_write_diff(&tu.name, &tu.input, &path, before_state.as_deref());
+        let operation = match tu.name.as_str() {
+            "Write" => Some("add".to_string()),
+            "Edit" | "MultiEdit" | "NotebookEdit" => Some("update".to_string()),
+            _ => None,
+        };
+        let after = match tu.name.as_str() {
+            "Write" => tu
+                .input
+                .get("content")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string()),
+            _ => None,
+        };
+        out.push(toolpath_convo::FileMutation {
+            path,
+            tool_id: Some(tu.id.clone()),
+            operation,
+            raw_diff,
+            before: before_state,
+            after,
+            rename_to: None,
+        });
+    }
+    out
+}
+
+/// Best-effort lookup of a file's contents at `HEAD` in the git repo
+/// rooted at `repo_dir` (or one of its ancestors). Shells out to `git
+/// show HEAD:<relative-path>`. Returns `None` when any of these hold:
+/// `repo_dir` isn't inside a git repo, `path` isn't tracked at `HEAD`,
+/// `git` isn't on `PATH`, or the command otherwise fails.
+fn git_head_content(repo_dir: &str, path: &str) -> Option<String> {
+    use std::path::Path as FsPath;
+    use std::process::Command;
+    let repo = FsPath::new(repo_dir);
+    let file = FsPath::new(path);
+    let rel = if file.is_absolute() {
+        file.strip_prefix(repo).ok()?.to_path_buf()
+    } else {
+        file.to_path_buf()
+    };
+    let rel_str = rel.to_string_lossy().replace('\\', "/");
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .arg("show")
+        .arg(format!("HEAD:{rel_str}"))
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    String::from_utf8(output.stdout).ok()
+}
+
+fn extract_file_path_for_tool(input: &serde_json::Value) -> Option<String> {
+    for k in ["file_path", "path", "filename", "file"] {
+        if let Some(s) = input.get(k).and_then(|v| v.as_str()) {
+            return Some(s.to_string());
+        }
+    }
+    None
 }
 
 /// Extract delegation info from Task tool invocations.
@@ -302,6 +395,46 @@ fn conversation_to_view(convo: &Conversation) -> ConversationView {
     let total_usage = sum_usage(&turns);
     let files_changed = extract_files_changed(&turns);
 
+    // Pull path-level base/producer from the first entry that carries the
+    // metadata (Claude records cwd / git_branch / version on every
+    // conversational entry; the first one is the canonical "this is where
+    // we started").
+    let mut base = toolpath_convo::SessionBase::default();
+    let mut producer_version: Option<String> = None;
+    for entry in &convo.entries {
+        if base.working_dir.is_none()
+            && let Some(cwd) = &entry.cwd
+        {
+            base.working_dir = Some(cwd.clone());
+        }
+        if base.vcs_branch.is_none()
+            && let Some(b) = &entry.git_branch
+        {
+            base.vcs_branch = Some(b.clone());
+        }
+        if producer_version.is_none()
+            && let Some(v) = &entry.version
+        {
+            producer_version = Some(v.clone());
+        }
+        if base.working_dir.is_some() && base.vcs_branch.is_some() && producer_version.is_some() {
+            break;
+        }
+    }
+    let view_base = if base.working_dir.is_some()
+        || base.vcs_branch.is_some()
+        || base.vcs_revision.is_some()
+        || base.vcs_remote.is_some()
+    {
+        Some(base)
+    } else {
+        None
+    };
+    let producer = producer_version.map(|v| toolpath_convo::ProducerInfo {
+        name: "claude-code".into(),
+        version: Some(v),
+    });
+
     ConversationView {
         id: convo.session_id.clone(),
         started_at: convo.started_at,
@@ -312,7 +445,8 @@ fn conversation_to_view(convo: &Conversation) -> ConversationView {
         files_changed,
         session_ids: vec![],
         events,
-        ..Default::default()
+        base: view_base,
+        producer,
     }
 }
 
