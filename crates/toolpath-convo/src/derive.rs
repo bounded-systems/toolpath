@@ -52,14 +52,33 @@ pub fn derive_path(view: &ConversationView, config: &DeriveConfig) -> Path {
         .clone()
         .unwrap_or_else(|| format!("path-{}-{}", provider, id_prefix));
 
-    // Base URI: config override wins; otherwise first turn's working_dir
+    // Base resolution order:
+    //   1. `config.base_uri` (CLI override): provides the `uri`; ref/branch
+    //      come from `view.base` if set.
+    //   2. `view.base` (provider-populated): the canonical source.
+    //   3. First turn's `environment.working_dir` (legacy fallback).
     let base = config
         .base_uri
         .clone()
         .map(|uri| Base {
             uri,
-            ref_str: None,
-            branch: None,
+            ref_str: view.base.as_ref().and_then(|b| b.vcs_revision.clone()),
+            branch: view.base.as_ref().and_then(|b| b.vcs_branch.clone()),
+        })
+        .or_else(|| {
+            view.base.as_ref().and_then(|b| {
+                let wd = b.working_dir.as_ref()?;
+                let uri = if wd.starts_with('/') {
+                    format!("file://{}", wd)
+                } else {
+                    wd.clone()
+                };
+                Some(Base {
+                    uri,
+                    ref_str: b.vcs_revision.clone(),
+                    branch: b.vcs_branch.clone(),
+                })
+            })
         })
         .or_else(|| {
             view.turns
@@ -86,7 +105,13 @@ pub fn derive_path(view: &ConversationView, config: &DeriveConfig) -> Path {
     let mut actors: HashMap<String, ActorDefinition> = HashMap::new();
 
     for (idx, turn) in view.turns.iter().enumerate() {
-        let step_id = format!("step-{:04}", idx + 1);
+        // Step id: use the turn's native id when set so it round-trips
+        // through `extract_conversation`; otherwise synthesize sequentially.
+        let step_id = if turn.id.is_empty() {
+            format!("step-{:04}", idx + 1)
+        } else {
+            turn.id.clone()
+        };
         turn_to_step.insert(turn.id.clone(), step_id.clone());
 
         let actor = actor_for_turn(turn, provider);
@@ -194,21 +219,62 @@ pub fn derive_path(view: &ConversationView, config: &DeriveConfig) -> Path {
             },
         );
 
-        // File-write tool invocations → artifact changes. Each gets a unified
-        // diff in `raw` (so it renders like a git diff) plus the structured
-        // before/after strings in `structural.extra` for tools that want to
-        // re-apply or inspect the op programmatically.
+        // File mutations → sibling `file.write` change entries.
+        //
+        // Preferred: each `ToolInvocation::file_mutations` entry comes from
+        // the provider's `to_view` with the resolved diff already in
+        // `raw_diff` (claude's git-HEAD lookup, codex's `apply_patch_end`
+        // parse, opencode's git2 tree↔tree, etc.).
+        //
+        // Fallback: for tools whose category is `FileWrite` but whose
+        // `file_mutations` is empty (providers that haven't migrated yet),
+        // synthesize a diff from the tool's `input` via `file_write_change`.
         for tool in &turn.tool_uses {
+            if !tool.file_mutations.is_empty() {
+                for fm in &tool.file_mutations {
+                    let mut t_extra: HashMap<String, serde_json::Value> = HashMap::new();
+                    t_extra.insert(
+                        "tool".to_string(),
+                        serde_json::Value::String(tool.name.clone()),
+                    );
+                    t_extra.insert(
+                        "tool_id".to_string(),
+                        serde_json::Value::String(tool.id.clone()),
+                    );
+                    if let Some(op) = &fm.operation {
+                        t_extra.insert(
+                            "operation".to_string(),
+                            serde_json::Value::String(op.clone()),
+                        );
+                    }
+                    if let Some(b) = &fm.before {
+                        t_extra.insert(
+                            "before".to_string(),
+                            serde_json::Value::String(b.clone()),
+                        );
+                    }
+                    if let Some(a) = &fm.after {
+                        t_extra.insert("after".to_string(), serde_json::Value::String(a.clone()));
+                    }
+                    step.change.insert(
+                        fm.path.clone(),
+                        ArtifactChange {
+                            raw: fm.raw_diff.clone(),
+                            structural: Some(StructuralChange {
+                                change_type: "file.write".to_string(),
+                                extra: t_extra,
+                            }),
+                        },
+                    );
+                }
+                continue;
+            }
             if tool.category != Some(ToolCategory::FileWrite) {
                 continue;
             }
             let Some(path) = extract_file_path(tool) else {
                 continue;
             };
-            // Shared derivation doesn't have access to a local checkout,
-            // so it can't resolve pre-write file state. Providers that do
-            // (e.g. `toolpath-claude`) build their own steps and pass a
-            // resolved `before_state` directly to `file_write_diff`.
             let (raw, mut t_extra) = file_write_change(tool, &path, None);
             t_extra.insert(
                 "tool".to_string(),
@@ -239,7 +305,12 @@ pub fn derive_path(view: &ConversationView, config: &DeriveConfig) -> Path {
     // Without this, derive_path drops everything outside `turns`, so a
     // Claude session loses ~10–25% of its lines on import/export.
     for (idx, event) in view.events.iter().enumerate() {
-        let step_id = format!("event-{:04}", idx + 1);
+        // Event step id: prefer the event's native id so it round-trips.
+        let step_id = if event.id.is_empty() {
+            format!("event-{:04}", idx + 1)
+        } else {
+            event.id.clone()
+        };
         let actor = format!("provider:{}", provider);
         actors
             .entry(actor.clone())
@@ -328,6 +399,21 @@ pub fn derive_path(view: &ConversationView, config: &DeriveConfig) -> Path {
         && let Ok(v) = serde_json::to_value(&view.files_changed)
     {
         meta.extra.insert("files_changed".to_string(), v);
+    }
+
+    // Project path-level provider-namespaced extras straight onto meta.extra.
+    for (k, v) in &view.extra {
+        meta.extra.insert(k.clone(), v.clone());
+    }
+
+    // Carry `vcs_remote` (not representable on `Base`) under meta.extra.
+    if let Some(remote) = view.base.as_ref().and_then(|b| b.vcs_remote.as_ref())
+        && !meta.extra.contains_key("vcs_remote")
+    {
+        meta.extra.insert(
+            "vcs_remote".to_string(),
+            serde_json::Value::String(remote.clone()),
+        );
     }
 
     Path {
@@ -595,7 +681,7 @@ mod tests {
         let path = derive_path(&view, &DeriveConfig::default());
         assert_eq!(path.steps.len(), 1);
         assert_eq!(path.steps[0].step.actor, "human:user");
-        assert_eq!(path.steps[0].step.id, "step-0001");
+        assert_eq!(path.steps[0].step.id, "t1");
     }
 
     #[test]
@@ -639,7 +725,7 @@ mod tests {
         t2.model = Some("m".into());
         let view = view_with(vec![t1, t2]);
         let path = derive_path(&view, &DeriveConfig::default());
-        assert_eq!(path.steps[1].step.parents, vec!["step-0001".to_string()]);
+        assert_eq!(path.steps[1].step.parents, vec!["t1".to_string()]);
     }
 
     fn fw_tool(name: &str, id: &str, input: serde_json::Value) -> ToolInvocation {
@@ -1039,7 +1125,7 @@ mod tests {
         ];
         let view = view_with(turns);
         let path = derive_path(&view, &DeriveConfig::default());
-        assert_eq!(path.path.head, "step-0003");
+        assert_eq!(path.path.head, "t3");
     }
 
     #[test]
@@ -1127,7 +1213,7 @@ mod tests {
         assert_eq!(back.path.id, path.path.id);
         assert_eq!(back.path.head, path.path.head);
         assert_eq!(back.steps.len(), 2);
-        assert_eq!(back.steps[1].step.parents, vec!["step-0001".to_string()]);
+        assert_eq!(back.steps[1].step.parents, vec!["t1".to_string()]);
         assert!(back.steps[1].change.contains_key("x.rs"));
     }
 }

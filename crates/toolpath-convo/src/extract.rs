@@ -13,8 +13,8 @@ use chrono::DateTime;
 use toolpath::v1::{Path, Step};
 
 use crate::{
-    ConversationEvent, ConversationView, DelegatedWork, EnvironmentSnapshot, Role, TokenUsage,
-    ToolCategory, ToolInvocation, ToolResult, Turn,
+    ConversationEvent, ConversationView, DelegatedWork, EnvironmentSnapshot, FileMutation, Role,
+    SessionBase, TokenUsage, ToolCategory, ToolInvocation, ToolResult, Turn,
 };
 
 /// Extract a [`ConversationView`] from a toolpath [`Path`] document.
@@ -26,12 +26,95 @@ use crate::{
 pub fn extract_conversation(path: &Path) -> ConversationView {
     let mut view = ConversationView::default();
 
+    // Project `path.base` back to `view.base`.
+    if let Some(base) = &path.path.base {
+        let working_dir = base
+            .uri
+            .strip_prefix("file://")
+            .map(|s| s.to_string())
+            .or_else(|| {
+                if base.uri.is_empty() {
+                    None
+                } else {
+                    Some(base.uri.clone())
+                }
+            });
+        let vcs_remote = path
+            .meta
+            .as_ref()
+            .and_then(|m| m.extra.get("vcs_remote"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        let sb = SessionBase {
+            working_dir,
+            vcs_revision: base.ref_str.clone(),
+            vcs_branch: base.branch.clone(),
+            vcs_remote,
+        };
+        if sb.working_dir.is_some()
+            || sb.vcs_revision.is_some()
+            || sb.vcs_branch.is_some()
+            || sb.vcs_remote.is_some()
+        {
+            view.base = Some(sb);
+        }
+    }
+
+    // Project `path.meta.extra` back to `view.extra`. `files_changed` and
+    // `vcs_remote` are handled by other slots.
+    if let Some(meta) = &path.meta {
+        for (k, v) in &meta.extra {
+            if k == "files_changed" || k == "vcs_remote" {
+                continue;
+            }
+            view.extra.insert(k.clone(), v.clone());
+        }
+    }
+
     // Map from step ID → index into view.turns, for parent lookups.
     let mut step_to_turn: HashMap<&str, usize> = HashMap::new();
     // Track files_changed for dedup in insertion order.
     let mut files_seen: HashSet<String> = HashSet::new();
 
     for step in &path.steps {
+        // Pre-collect file.write entries on this step, indexed by tool_id,
+        // so we can attach them as `tool.file_mutations` once the turn is
+        // built. The iteration order of `step.change` (HashMap) is
+        // non-deterministic; a pre-pass keeps the attach step simple.
+        let mut step_mutations: HashMap<String, Vec<FileMutation>> = HashMap::new();
+        for (key, ch) in &step.change {
+            let Some(s) = &ch.structural else { continue };
+            if s.change_type != "file.write" {
+                continue;
+            }
+            let tid = s
+                .extra
+                .get("tool_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let fm = FileMutation {
+                path: key.clone(),
+                operation: s
+                    .extra
+                    .get("operation")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string()),
+                raw_diff: ch.raw.clone(),
+                before: s
+                    .extra
+                    .get("before")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string()),
+                after: s
+                    .extra
+                    .get("after")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string()),
+            };
+            step_mutations.entry(tid).or_default().push(fm);
+        }
+
         for (artifact_key, artifact_change) in &step.change {
             let structural = match &artifact_change.structural {
                 Some(s) => s,
@@ -56,7 +139,14 @@ pub fn extract_conversation(path: &Path) -> ConversationView {
                         view.id = session.to_string();
                     }
 
-                    let turn = build_turn(step, &structural.extra);
+                    let mut turn = build_turn(step, &structural.extra);
+                    // Attach pre-collected file mutations to their tool_uses
+                    // by `tool_id`.
+                    for tu in turn.tool_uses.iter_mut() {
+                        if let Some(fms) = step_mutations.remove(&tu.id) {
+                            tu.file_mutations = fms;
+                        }
+                    }
                     let idx = view.turns.len();
                     step_to_turn.insert(&step.step.id, idx);
                     view.turns.push(turn);
