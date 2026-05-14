@@ -32,14 +32,7 @@ use toolpath_convo::{
 ///
 /// let view = ConversationView {
 ///     id: "my-session".to_string(),
-///     started_at: None,
-///     last_activity: None,
-///     turns: vec![],
-///     total_usage: None,
-///     provider_id: None,
-///     files_changed: vec![],
-///     session_ids: vec![],
-///     events: vec![],
+///     ..Default::default()
 /// };
 ///
 /// let projector = ClaudeProjector;
@@ -1016,6 +1009,7 @@ mod tests {
             files_changed: vec![],
             session_ids: vec![],
             events: vec![],
+            ..Default::default()
         }
     }
 
@@ -1140,6 +1134,7 @@ mod tests {
             input: serde_json::json!({"file_path": "src/main.rs"}),
             result: None,
             category: None,
+            ..Default::default()
         }];
 
         let view = make_view("sess-1", vec![turn]);
@@ -1211,6 +1206,7 @@ mod tests {
                 is_error: false,
             }),
             category: None,
+            ..Default::default()
         }];
 
         let view = make_view("sess-1", vec![user_turn("u1", "Go"), turn]);
@@ -1259,6 +1255,7 @@ mod tests {
             input: serde_json::json!({}),
             result: None, // no result
             category: None,
+            ..Default::default()
         }];
 
         let view = make_view("sess-1", vec![turn]);
@@ -1359,6 +1356,7 @@ mod tests {
             input: serde_json::json!({"command": "ls"}),
             result: None,
             category: None,
+            ..Default::default()
         }];
 
         let view = make_view("sess-1", vec![turn]);
@@ -1390,6 +1388,7 @@ mod tests {
                     is_error: false,
                 }),
                 category: None,
+                ..Default::default()
             },
             ToolInvocation {
                 id: "t2".to_string(),
@@ -1400,6 +1399,7 @@ mod tests {
                     is_error: true,
                 }),
                 category: None,
+                ..Default::default()
             },
         ];
 
@@ -1466,6 +1466,7 @@ mod tests {
                     is_error: false,
                 }),
                 category: None,
+                ..Default::default()
             },
             ToolInvocation {
                 id: "t2".to_string(),
@@ -1473,6 +1474,7 @@ mod tests {
                 input: serde_json::json!({}),
                 result: None, // no result for this one
                 category: None,
+                ..Default::default()
             },
         ];
 
@@ -1599,6 +1601,7 @@ mod tests {
                 is_error: false,
             }),
             category: None,
+            ..Default::default()
         }];
 
         let view = make_view("sess-1", vec![turn]);

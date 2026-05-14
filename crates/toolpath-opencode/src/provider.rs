@@ -208,6 +208,7 @@ impl<'a> Builder<'a> {
             files_changed: self.files_changed_order,
             session_ids: vec![self.session.id.clone()],
             events: self.events,
+            ..Default::default()
         }
     }
 
@@ -501,6 +502,7 @@ fn to_invocation(
         input,
         result,
         category: tool_category(&tp.tool),
+        ..Default::default()
     }
 }
 

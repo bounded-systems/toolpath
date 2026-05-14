@@ -177,6 +177,7 @@ fn tool_call_to_invocation(call: &ToolCall) -> ToolInvocation {
         input: call.args.clone(),
         result,
         category: tool_category(&call.name),
+        ..Default::default()
     }
 }
 
@@ -372,6 +373,7 @@ fn conversation_to_view(convo: &Conversation) -> ConversationView {
         files_changed,
         session_ids: vec![],
         events: vec![],
+        ..Default::default()
     }
 }
 

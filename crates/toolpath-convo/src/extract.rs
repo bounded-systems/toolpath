@@ -24,17 +24,7 @@ use crate::{
 /// `conversation.append`, and `tool.invoke` are recognized; everything else
 /// is silently skipped.
 pub fn extract_conversation(path: &Path) -> ConversationView {
-    let mut view = ConversationView {
-        id: String::new(),
-        started_at: None,
-        last_activity: None,
-        turns: Vec::new(),
-        total_usage: None,
-        provider_id: None,
-        files_changed: Vec::new(),
-        session_ids: Vec::new(),
-        events: Vec::new(),
-    };
+    let mut view = ConversationView::default();
 
     // Map from step ID → index into view.turns, for parent lookups.
     let mut step_to_turn: HashMap<&str, usize> = HashMap::new();
@@ -291,6 +281,7 @@ fn build_inline_tool_uses(extra: &HashMap<String, serde_json::Value>) -> Vec<Too
                 input,
                 result,
                 category,
+                ..Default::default()
             })
         })
         .collect()
@@ -431,6 +422,7 @@ fn build_tool_invocation(extra: &HashMap<String, serde_json::Value>) -> ToolInvo
         input,
         result,
         category,
+        ..Default::default()
     }
 }
 

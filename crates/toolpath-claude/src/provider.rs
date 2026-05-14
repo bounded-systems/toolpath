@@ -94,6 +94,7 @@ fn message_to_turn(entry: &ConversationEntry, msg: &Message) -> Turn {
                 input: tu.input.clone(),
                 result,
                 category,
+                ..Default::default()
             }
         })
         .collect();
@@ -310,6 +311,7 @@ fn conversation_to_view(convo: &Conversation) -> ConversationView {
         files_changed,
         session_ids: vec![],
         events,
+        ..Default::default()
     }
 }
 
@@ -1046,6 +1048,7 @@ mod tests {
                     input: serde_json::json!({}),
                     result: None,
                     category: Some(ToolCategory::FileRead),
+                    ..Default::default()
                 },
                 ToolInvocation {
                     id: "tool-b".into(),
@@ -1053,6 +1056,7 @@ mod tests {
                     input: serde_json::json!({}),
                     result: None,
                     category: Some(ToolCategory::FileWrite),
+                    ..Default::default()
                 },
             ],
             model: None,

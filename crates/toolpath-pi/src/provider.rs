@@ -536,6 +536,7 @@ pub fn session_to_view(session: &PiSession) -> ConversationView {
                                     input: arguments.clone(),
                                     result: None,
                                     category,
+                                    ..Default::default()
                                 });
                             }
                         }
@@ -617,6 +618,7 @@ pub fn session_to_view(session: &PiSession) -> ConversationView {
                                 is_error: !matches!(exit_code, Some(0)),
                             }),
                             category: Some(ToolCategory::Shell),
+                            ..Default::default()
                         });
                     }
 
@@ -762,6 +764,7 @@ pub fn session_to_view(session: &PiSession) -> ConversationView {
         files_changed,
         session_ids,
         events: vec![],
+        ..Default::default()
     }
 }
 

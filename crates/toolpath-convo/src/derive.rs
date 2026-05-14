@@ -564,14 +564,9 @@ mod tests {
     fn view_with(turns: Vec<Turn>) -> ConversationView {
         ConversationView {
             id: "abcdef012345".to_string(),
-            started_at: None,
-            last_activity: None,
             turns,
-            total_usage: None,
             provider_id: Some("pi".to_string()),
-            files_changed: vec![],
-            session_ids: vec![],
-            events: vec![],
+            ..Default::default()
         }
     }
 
@@ -654,6 +649,7 @@ mod tests {
             input,
             result: None,
             category: Some(ToolCategory::FileWrite),
+            ..Default::default()
         }
     }
 
@@ -724,6 +720,7 @@ mod tests {
             input: serde_json::json!({"file_path": "x.rs"}),
             result: None,
             category: Some(ToolCategory::FileRead),
+            ..Default::default()
         }];
         let view = view_with(vec![turn]);
         let path = derive_path(&view, &DeriveConfig::default());
@@ -921,6 +918,7 @@ mod tests {
                 is_error: false,
             }),
             category: Some(ToolCategory::FileRead),
+            ..Default::default()
         }];
         let view = view_with(vec![turn]);
         let path = derive_path(&view, &DeriveConfig::default());
@@ -937,6 +935,7 @@ mod tests {
             input: serde_json::json!({}),
             result: None,
             category: Some(ToolCategory::FileRead),
+            ..Default::default()
         }];
         let view = view_with(vec![turn]);
         let cfg = DeriveConfig {

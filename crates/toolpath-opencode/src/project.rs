@@ -800,6 +800,7 @@ mod tests {
             files_changed: vec![],
             session_ids: vec![],
             events: vec![],
+            ..Default::default()
         }
     }
 
@@ -850,6 +851,7 @@ mod tests {
                 is_error: false,
             }),
             category: Some(ToolCategory::Shell),
+            ..Default::default()
         }];
         let s = OpencodeProjector::default()
             .project(&view_with(vec![t]))
@@ -888,6 +890,7 @@ mod tests {
                 is_error: true,
             }),
             category: Some(ToolCategory::Shell),
+            ..Default::default()
         }];
         let s = OpencodeProjector::default()
             .project(&view_with(vec![t]))
@@ -912,6 +915,7 @@ mod tests {
             input: json!({"file_path": "x.rs", "old_string": "a", "new_string": "b"}),
             result: None,
             category: Some(ToolCategory::FileWrite),
+            ..Default::default()
         }];
         let s = OpencodeProjector::default()
             .project(&view_with(vec![t]))

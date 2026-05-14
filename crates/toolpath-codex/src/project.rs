@@ -53,14 +53,8 @@ use crate::types::{
 ///
 /// let view = ConversationView {
 ///     id: "session-uuid".into(),
-///     started_at: None,
-///     last_activity: None,
-///     turns: vec![],
-///     total_usage: None,
 ///     provider_id: Some("codex".into()),
-///     files_changed: vec![],
-///     session_ids: vec![],
-///     events: vec![],
+///     ..Default::default()
 /// };
 ///
 /// let session = CodexProjector::default().project(&view).unwrap();
@@ -711,6 +705,7 @@ mod tests {
             files_changed: vec![],
             session_ids: vec![],
             events: vec![],
+            ..Default::default()
         }
     }
 
@@ -788,6 +783,7 @@ mod tests {
                 is_error: false,
             }),
             category: Some(ToolCategory::Shell),
+            ..Default::default()
         }];
         let s = CodexProjector::default()
             .project(&view_with(vec![t]))
@@ -844,6 +840,7 @@ mod tests {
             input: json!({"command": "ls"}),
             result: None,
             category: Some(ToolCategory::Shell),
+            ..Default::default()
         }];
         let s = CodexProjector::default()
             .project(&view_with(vec![t]))
@@ -874,6 +871,7 @@ mod tests {
                 is_error: false,
             }),
             category: Some(ToolCategory::FileWrite),
+            ..Default::default()
         }];
         let s = CodexProjector::default()
             .project(&view_with(vec![t]))

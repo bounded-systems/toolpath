@@ -816,6 +816,7 @@ mod tests {
             files_changed: vec![],
             session_ids: vec![],
             events: vec![],
+            ..Default::default()
         }
     }
 
@@ -862,6 +863,7 @@ mod tests {
                 is_error: false,
             }),
             category: Some(ToolCategory::FileRead),
+            ..Default::default()
         }];
         let session = PiProjector::default().project(&view_with(vec![t])).unwrap();
         // session header + assistant + tool-result = 3 entries
@@ -918,6 +920,7 @@ mod tests {
             input: serde_json::json!({"command": "ls"}),
             result: None,
             category: Some(ToolCategory::Shell),
+            ..Default::default()
         }];
         let session = PiProjector::default().project(&view_with(vec![t])).unwrap();
         match &session.entries[1] {

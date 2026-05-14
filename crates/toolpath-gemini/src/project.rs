@@ -643,6 +643,7 @@ mod tests {
             files_changed: vec![],
             session_ids: vec![],
             events: vec![],
+            ..Default::default()
         }
     }
 
@@ -783,6 +784,7 @@ mod tests {
                 is_error: false,
             }),
             category: Some(ToolCategory::FileRead),
+            ..Default::default()
         }];
         let convo = GeminiProjector::default()
             .project(&view_with(vec![t]))
@@ -813,6 +815,7 @@ mod tests {
                 is_error: true,
             }),
             category: Some(ToolCategory::Shell),
+            ..Default::default()
         }];
         let convo = GeminiProjector::default()
             .project(&view_with(vec![t]))
@@ -833,6 +836,7 @@ mod tests {
                 is_error: false,
             }),
             category: Some(ToolCategory::FileWrite),
+            ..Default::default()
         }];
         t.extra.insert(
             "gemini".into(),
@@ -976,6 +980,7 @@ mod tests {
                 is_error: false,
             }),
             category: Some(ToolCategory::FileRead),
+            ..Default::default()
         }];
 
         let convo = GeminiProjector::default()

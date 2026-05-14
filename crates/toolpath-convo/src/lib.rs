@@ -69,6 +69,48 @@ pub struct TokenUsage {
     pub cache_write_tokens: Option<u32>,
 }
 
+/// Path-level base context for a conversation: where the session was rooted
+/// and against what VCS state. Populated by the provider's `to_view`; projects
+/// straight onto `Path.base` by `derive_path`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SessionBase {
+    /// Working directory (absolute path).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub working_dir: Option<String>,
+    /// VCS revision (commit hash, changeset id).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vcs_revision: Option<String>,
+    /// VCS branch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vcs_branch: Option<String>,
+    /// Repository URL or other origin identifier.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vcs_remote: Option<String>,
+}
+
+/// A file mutation resolved at view-construction time. Providers populate this
+/// on the `ToolInvocation` that caused the mutation; `derive_path` projects
+/// each entry into a sibling artifact change keyed by `path` with
+/// `structural.type == "file.write"`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct FileMutation {
+    /// File path (relative to `view.base.working_dir` if relative, or
+    /// `file://`/absolute).
+    pub path: String,
+    /// Operation: `"add"`, `"update"`, `"delete"`, or a provider-specific tag.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operation: Option<String>,
+    /// Unified diff (the canonical perspective).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub raw_diff: Option<String>,
+    /// File contents before this mutation (when known).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub before: Option<String>,
+    /// File contents after this mutation (when known).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after: Option<String>,
+}
+
 /// Snapshot of the working environment when a turn was produced.
 ///
 /// All fields are optional. Providers populate what they have.
@@ -145,7 +187,7 @@ pub enum ToolCategory {
 }
 
 /// A tool invocation within a turn.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ToolInvocation {
     /// Provider-assigned identifier for this invocation.
     pub id: String,
@@ -159,6 +201,11 @@ pub struct ToolInvocation {
     /// crate; `None` for unrecognized tools.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub category: Option<ToolCategory>,
+    /// File mutations this invocation produced, with diffs pre-resolved by
+    /// the provider's `to_view`. Each entry projects to a sibling
+    /// `file.write` artifact change in the derived step.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub file_mutations: Vec<FileMutation>,
 }
 
 /// The result of a tool invocation.
@@ -221,7 +268,7 @@ pub struct Turn {
 }
 
 /// A complete conversation from any provider.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ConversationView {
     /// Unique session/conversation identifier.
     pub id: String,
@@ -259,6 +306,17 @@ pub struct ConversationView {
     /// be preserved for round-trip fidelity.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub events: Vec<ConversationEvent>,
+
+    /// Path-level base: where this session was rooted (`cwd`, git
+    /// commit/branch/remote). Projects directly to `Path.base`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base: Option<SessionBase>,
+
+    /// Path-level provider-namespaced extras. Projects directly to
+    /// `Path.meta.extra`. Providers SHOULD namespace under their short id
+    /// (e.g. `extra["codex"]`, `extra["opencode"]`) to avoid collisions.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub extra: HashMap<String, serde_json::Value>,
 }
 
 impl ConversationView {
@@ -494,6 +552,7 @@ mod tests {
                             is_error: false,
                         }),
                         category: Some(ToolCategory::FileRead),
+                        ..Default::default()
                     }],
                     model: Some("claude-opus-4-6".into()),
                     stop_reason: Some("end_turn".into()),
@@ -528,6 +587,7 @@ mod tests {
             files_changed: vec![],
             session_ids: vec![],
             events: vec![],
+            ..Default::default()
         }
     }
 
@@ -557,6 +617,7 @@ mod tests {
             files_changed: vec![],
             session_ids: vec![],
             events: vec![],
+            ..Default::default()
         };
         assert!(view.title(50).is_none());
     }
@@ -795,6 +856,7 @@ mod tests {
             input: serde_json::json!({"command": "ls"}),
             result: None,
             category: Some(ToolCategory::Shell),
+            ..Default::default()
         };
         let json = serde_json::to_string(&ti).unwrap();
         assert!(json.contains("\"shell\""));
@@ -810,6 +872,7 @@ mod tests {
             input: serde_json::json!({}),
             result: None,
             category: None,
+            ..Default::default()
         };
         let json = serde_json::to_string(&ti).unwrap();
         assert!(!json.contains("category"));
@@ -902,6 +965,7 @@ mod tests {
             files_changed: vec!["src/main.rs".into(), "src/lib.rs".into()],
             session_ids: vec![],
             events: vec![],
+            ..Default::default()
         };
         let json = serde_json::to_string(&view).unwrap();
         let back: ConversationView = serde_json::from_str(&json).unwrap();
@@ -994,6 +1058,7 @@ mod tests {
                 event_type: "attachment".into(),
                 data: HashMap::new(),
             }],
+            ..Default::default()
         };
         let json = serde_json::to_string(&view).unwrap();
         assert!(json.contains("events"));
@@ -1014,6 +1079,7 @@ mod tests {
             files_changed: vec![],
             session_ids: vec![],
             events: vec![],
+            ..Default::default()
         };
         let json = serde_json::to_string(&view).unwrap();
         assert!(!json.contains("events"));

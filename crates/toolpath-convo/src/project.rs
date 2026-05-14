@@ -83,14 +83,7 @@ where
 ///
 /// let view = ConversationView {
 ///     id: "s1".into(),
-///     started_at: None,
-///     last_activity: None,
-///     turns: vec![],
-///     total_usage: None,
-///     provider_id: None,
-///     files_changed: vec![],
-///     session_ids: vec![],
-///     events: vec![],
+///     ..Default::default()
 /// };
 ///
 /// let projector = AnyProjector::new(TurnCounter);
@@ -157,6 +150,7 @@ mod tests {
             files_changed: vec![],
             session_ids: vec![],
             events: vec![],
+            ..Default::default()
         }
     }
 
@@ -193,6 +187,7 @@ mod tests {
             files_changed: vec![],
             session_ids: vec![],
             events: vec![],
+            ..Default::default()
         }
     }
 
@@ -357,6 +352,7 @@ mod tests {
                             is_error: false,
                         }),
                         category: None,
+                        ..Default::default()
                     },
                     ToolInvocation {
                         id: "u2".into(),
@@ -364,6 +360,7 @@ mod tests {
                         input: serde_json::json!({"command": "cargo test"}),
                         result: None,
                         category: None,
+                        ..Default::default()
                     },
                 ],
                 model: None,
@@ -377,6 +374,7 @@ mod tests {
             provider_id: None,
             files_changed: vec![],
             session_ids: vec![],
+            ..Default::default()
         };
 
         let any = AnyProjector::new(ToolNameCollector);
@@ -458,6 +456,7 @@ mod tests {
             provider_id: None,
             files_changed: vec![],
             session_ids: vec![],
+            ..Default::default()
         };
 
         let any = AnyProjector::new(TotalInputTokens);

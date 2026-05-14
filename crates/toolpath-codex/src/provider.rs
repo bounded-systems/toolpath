@@ -271,6 +271,7 @@ impl<'a> Builder<'a> {
             files_changed: self.files_changed_order,
             session_ids: vec![],
             events: self.events,
+            ..Default::default()
         }
     }
 
@@ -409,6 +410,7 @@ impl<'a> Builder<'a> {
             input,
             result: None,
             category,
+            ..Default::default()
         };
 
         let turn_idx = match self.last_assistant_turn_index() {
