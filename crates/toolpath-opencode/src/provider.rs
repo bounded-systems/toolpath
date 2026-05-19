@@ -170,6 +170,14 @@ struct Builder<'a> {
     files_changed_seen: std::collections::HashSet<String>,
     total_usage: TokenUsage,
     total_usage_set: bool,
+    /// Snapshot git repo, when one's been opened by `build_with_resolver`.
+    /// Used inline by `handle_assistant_message` to compute per-turn
+    /// `file_mutations` from snapshot tree↔tree diffs.
+    snapshot_repo: Option<git2::Repository>,
+    /// The previous assistant turn's ending snapshot SHA. Used as the
+    /// `before` of the next turn's snapshot pair so intermediate state
+    /// captures correctly.
+    prev_snapshot_after: Option<String>,
 }
 
 impl<'a> Builder<'a> {
@@ -182,21 +190,21 @@ impl<'a> Builder<'a> {
             files_changed_seen: std::collections::HashSet::new(),
             total_usage: TokenUsage::default(),
             total_usage_set: false,
+            snapshot_repo: None,
+            prev_snapshot_after: None,
         }
     }
 
-    fn build_with_resolver(self, resolver: &PathResolver) -> ConversationView {
+    fn build_with_resolver(mut self, resolver: &PathResolver) -> ConversationView {
         let session_version = self.session.version.clone();
         let session_directory = self.session.directory.to_string_lossy().to_string();
         let session_project_id = self.session.project_id.clone();
-        let snapshot_repo = resolver
+        self.snapshot_repo = resolver
             .snapshot_gitdir(&session_project_id, &self.session.directory)
             .ok()
             .and_then(|gd| git2::Repository::open(gd).ok());
 
         let mut view = self.build();
-        attach_snapshot_diffs(&mut view, snapshot_repo.as_ref());
-        attach_tool_input_fallbacks(&mut view);
 
         // Producer + base.
         view.producer = Some(ProducerInfo {
@@ -465,7 +473,7 @@ impl<'a> Builder<'a> {
         if !snapshots.is_empty() {
             opencode_extra.insert(
                 "snapshots".into(),
-                Value::Array(snapshots.into_iter().map(Value::String).collect()),
+                Value::Array(snapshots.iter().cloned().map(Value::String).collect()),
             );
         }
         if !patches.is_empty() {
@@ -478,6 +486,15 @@ impl<'a> Builder<'a> {
             opencode_extra.insert("error".into(), err.clone());
         }
         extra.insert("opencode".into(), Value::Object(opencode_extra));
+
+        // Compute `file_mutations` for this turn inline:
+        //   1. If we have a snapshot repo AND a snapshot pair (prev_after,
+        //      this turn's last snapshot), walk the git2 tree↔tree diff
+        //      and add a FileMutation per touched file.
+        //   2. For any file-write tool whose path wasn't covered by the
+        //      snapshot diff, add a tool-input-derived FileMutation
+        //      (catches gitignored paths and the no-repo case).
+        let file_mutations = self.compute_turn_mutations(&snapshots, &tool_uses);
 
         self.turns.push(Turn {
             id: msg.id.clone(),
@@ -505,8 +522,71 @@ impl<'a> Builder<'a> {
             environment,
             delegations,
             extra,
-            file_mutations: Vec::new(),
+            file_mutations,
         });
+    }
+
+    fn compute_turn_mutations(
+        &mut self,
+        snapshots: &[String],
+        tool_uses: &[ToolInvocation],
+    ) -> Vec<FileMutation> {
+        let mut out: Vec<FileMutation> = Vec::new();
+        let mut covered: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+        // Snapshot diff (when repo + pair available).
+        if let (Some(repo), Some(first), Some(last)) =
+            (self.snapshot_repo.as_ref(), snapshots.first(), snapshots.last())
+        {
+            let before = self
+                .prev_snapshot_after
+                .clone()
+                .unwrap_or_else(|| first.clone());
+            let after = last.clone();
+            self.prev_snapshot_after = Some(after.clone());
+            if before != after {
+                match diff_trees(repo, &before, &after) {
+                    Ok(mutations) => {
+                        for fm in mutations {
+                            covered.insert(fm.path.clone());
+                            out.push(fm);
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!(
+                            "Warning: snapshot diff {}..{} failed: {}",
+                            &before[..before.len().min(8)],
+                            &after[..after.len().min(8)],
+                            e
+                        );
+                    }
+                }
+            }
+        } else if let Some(last) = snapshots.last() {
+            // Track even when we can't diff, so subsequent turns still
+            // chain off the right `before`.
+            self.prev_snapshot_after = Some(last.clone());
+        }
+
+        // Tool-input fallback for file-write tools whose paths aren't
+        // already covered by a snapshot-diff mutation.
+        for tu in tool_uses {
+            let Some(path) = tool_input_file_path(tu) else {
+                continue;
+            };
+            if covered.contains(&path) {
+                continue;
+            }
+            covered.insert(path.clone());
+            out.push(FileMutation {
+                path,
+                tool_id: Some(tu.id.clone()),
+                operation: Some(tool_to_operation(&tu.name).to_string()),
+                ..Default::default()
+            });
+        }
+
+        out
     }
 }
 
@@ -708,84 +788,7 @@ impl ConversationProvider for OpencodeConvo {
     }
 }
 
-// ── Snapshot diff / tool-input fallback ────────────────────────────────
-
-/// For each assistant turn, walk its `extra["opencode"]["snapshots"]`
-/// across turns and populate `Turn.file_mutations` from the git2
-/// tree↔tree diff of the snapshot pair. No-op when `repo` is `None`.
-fn attach_snapshot_diffs(view: &mut ConversationView, repo: Option<&git2::Repository>) {
-    let Some(repo) = repo else { return };
-    let mut prev_after: Option<String> = None;
-    for turn in view.turns.iter_mut() {
-        let snapshots: Vec<String> = turn
-            .extra
-            .get("opencode")
-            .and_then(|oc| oc.get("snapshots"))
-            .and_then(|v| v.as_array())
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|v| v.as_str().map(str::to_string))
-                    .collect()
-            })
-            .unwrap_or_default();
-        let (Some(first), Some(last)) = (snapshots.first(), snapshots.last()) else {
-            continue;
-        };
-        // Prefer the previous turn's `after` snapshot as `before`.
-        let before = prev_after.clone().unwrap_or_else(|| first.clone());
-        let after = last.clone();
-        prev_after = Some(after.clone());
-        if before == after {
-            continue;
-        }
-        match diff_trees(repo, &before, &after) {
-            Ok(mutations) => {
-                for fm in mutations {
-                    turn.file_mutations.push(fm);
-                }
-            }
-            Err(e) => {
-                eprintln!(
-                    "Warning: snapshot diff {}..{} failed: {}",
-                    &before[..before.len().min(8)],
-                    &after[..after.len().min(8)],
-                    e
-                );
-            }
-        }
-    }
-}
-
-/// For each file-write tool invocation whose path isn't already covered
-/// by a snapshot-diff `FileMutation`, synthesize a no-raw mutation
-/// attributed to the tool. Catches files opencode wrote that are
-/// gitignored (so the snapshot pair shows no change) and the case
-/// where there's no snapshot repo at all.
-fn attach_tool_input_fallbacks(view: &mut ConversationView) {
-    for turn in view.turns.iter_mut() {
-        let existing: std::collections::HashSet<String> = turn
-            .file_mutations
-            .iter()
-            .map(|fm| fm.path.clone())
-            .collect();
-        let mut extras: Vec<FileMutation> = Vec::new();
-        for tu in &turn.tool_uses {
-            let Some(path) = tool_input_file_path(tu) else {
-                continue;
-            };
-            if existing.contains(&path) {
-                continue;
-            }
-            extras.push(FileMutation {
-                path,
-                tool_id: Some(tu.id.clone()),
-                operation: Some(tool_to_operation(&tu.name).to_string()),
-                ..Default::default()
-            });
-        }
-        turn.file_mutations.extend(extras);
-    }
-}
+// ── Snapshot diff helpers ──────────────────────────────────────────────
 
 fn tool_input_file_path(tu: &ToolInvocation) -> Option<String> {
     tu.input
