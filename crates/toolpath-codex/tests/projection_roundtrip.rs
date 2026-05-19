@@ -210,28 +210,6 @@ fn roundtrip_preserves_custom_tool_call_inputs() {
 }
 
 #[test]
-fn roundtrip_preserves_encrypted_reasoning_content_count() {
-    // Encrypted reasoning blobs survive because the forward path
-    // stashes them in `Turn.extra["codex"]["reasoning_encrypted"]`
-    // and the projector re-emits one Reasoning line per blob.
-    let (_t, source) = load_source();
-    let (_, rebuilt, _) = roundtrip(&source);
-
-    let count_encrypted = |s: &Session| -> usize {
-        s.lines
-            .iter()
-            .filter(|l| {
-                if let RolloutItem::ResponseItem(ResponseItem::Reasoning(r)) = l.item() {
-                    return r.encrypted_content.is_some();
-                }
-                false
-            })
-            .count()
-    };
-    assert_eq!(count_encrypted(&rebuilt), count_encrypted(&source));
-}
-
-#[test]
 fn projected_jsonl_reparses_through_codex_reader() {
     // Strongest contract test: serialize the rebuilt session as
     // JSONL, write to disk, read back through Codex's own

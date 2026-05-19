@@ -98,6 +98,8 @@ fn message_to_turn(entry: &ConversationEntry, msg: &Message) -> Turn {
         })
         .collect();
 
+    let file_mutations = compute_file_mutations(&tool_uses, entry.cwd.as_deref());
+
     let token_usage = msg.usage.as_ref().map(|u| TokenUsage {
         input_tokens: u.input_tokens,
         output_tokens: u.output_tokens,
@@ -117,41 +119,6 @@ fn message_to_turn(entry: &ConversationEntry, msg: &Message) -> Turn {
 
     let delegations = extract_delegations(&tool_uses);
 
-    // Fold the entry's typed top-level fields into the claude extras blob
-    // so projection can restore them. Without this, requestId / userType /
-    // version / sessionId vanish on roundtrip and Claude's UI loses its
-    // request-correlation metadata.
-    let mut claude_extras: serde_json::Map<String, serde_json::Value> =
-        serde_json::to_value(&entry.extra)
-            .ok()
-            .and_then(|v| v.as_object().cloned())
-            .unwrap_or_default();
-    if let Some(v) = &entry.version {
-        claude_extras
-            .entry("version".to_string())
-            .or_insert_with(|| serde_json::Value::String(v.clone()));
-    }
-    if let Some(v) = &entry.user_type {
-        claude_extras
-            .entry("user_type".to_string())
-            .or_insert_with(|| serde_json::Value::String(v.clone()));
-    }
-    if let Some(v) = &entry.request_id {
-        claude_extras
-            .entry("request_id".to_string())
-            .or_insert_with(|| serde_json::Value::String(v.clone()));
-    }
-    let extra = if claude_extras.is_empty() {
-        HashMap::new()
-    } else {
-        let mut map = HashMap::new();
-        map.insert(
-            "claude".to_string(),
-            serde_json::Value::Object(claude_extras),
-        );
-        map
-    };
-
     Turn {
         id: entry.uuid.clone(),
         parent_id: entry.parent_uuid.clone(),
@@ -165,8 +132,99 @@ fn message_to_turn(entry: &ConversationEntry, msg: &Message) -> Turn {
         token_usage,
         environment,
         delegations,
-        extra,
+        file_mutations,
     }
+}
+
+/// For each file-write tool invocation in the turn, synthesize a unified
+/// diff via [`toolpath_convo::file_write_diff`] and pre-resolve the
+/// before-state for `Write` via `git show HEAD:<path>` (best-effort).
+/// Each mutation links back to its tool via `tool_id`.
+fn compute_file_mutations(
+    tool_uses: &[ToolInvocation],
+    cwd: Option<&str>,
+) -> Vec<toolpath_convo::FileMutation> {
+    let mut out = Vec::new();
+    for tu in tool_uses {
+        if tu.category != Some(ToolCategory::FileWrite) {
+            continue;
+        }
+        let Some(path) = extract_file_path_for_tool(&tu.input) else {
+            continue;
+        };
+        // Only `Write` carries whole-file content; consult git HEAD for
+        // its pre-image so the diff isn't addition-only. Other tools
+        // (Edit / MultiEdit / NotebookEdit) carry old_string/new_string
+        // pairs and don't need a before-state lookup.
+        let before_state = if tu.name == "Write" {
+            cwd.and_then(|c| git_head_content(c, &path))
+        } else {
+            None
+        };
+        let raw_diff =
+            toolpath_convo::file_write_diff(&tu.name, &tu.input, &path, before_state.as_deref());
+        let operation = match tu.name.as_str() {
+            "Write" => Some("add".to_string()),
+            "Edit" | "MultiEdit" | "NotebookEdit" => Some("update".to_string()),
+            _ => None,
+        };
+        let after = match tu.name.as_str() {
+            "Write" => tu
+                .input
+                .get("content")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string()),
+            _ => None,
+        };
+        out.push(toolpath_convo::FileMutation {
+            path,
+            tool_id: Some(tu.id.clone()),
+            operation,
+            raw_diff,
+            before: before_state,
+            after,
+            rename_to: None,
+        });
+    }
+    out
+}
+
+/// Best-effort lookup of a file's contents at `HEAD` in the git repo
+/// rooted at `repo_dir` (or one of its ancestors). Shells out to `git
+/// show HEAD:<relative-path>`. Returns `None` when any of these hold:
+/// `repo_dir` isn't inside a git repo, `path` isn't tracked at `HEAD`,
+/// `git` isn't on `PATH`, or the command otherwise fails.
+fn git_head_content(repo_dir: &str, path: &str) -> Option<String> {
+    use std::path::Path as FsPath;
+    use std::process::Command;
+    let repo = FsPath::new(repo_dir);
+    let file = FsPath::new(path);
+    let rel = if file.is_absolute() {
+        file.strip_prefix(repo).ok()?.to_path_buf()
+    } else {
+        file.to_path_buf()
+    };
+    let rel_str = rel.to_string_lossy().replace('\\', "/");
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .arg("show")
+        .arg(format!("HEAD:{rel_str}"))
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    String::from_utf8(output.stdout).ok()
+}
+
+fn extract_file_path_for_tool(input: &serde_json::Value) -> Option<String> {
+    for k in ["file_path", "path", "filename", "file"] {
+        if let Some(s) = input.get(k).and_then(|v| v.as_str()) {
+            return Some(s.to_string());
+        }
+    }
+    None
 }
 
 /// Extract delegation info from Task tool invocations.
@@ -266,21 +324,52 @@ fn conversation_to_view(convo: &Conversation) -> ConversationView {
         events.push(preamble_to_event(idx, raw));
     }
 
+    // Map from "absorbed-or-skipped entry UUID" → "the previous
+    // turn-bearing entry's UUID". Used so that an assistant turn whose
+    // wire parentUuid points at a tool-result-only entry (or any other
+    // absorbed entry that didn't become a Turn) gets a Turn.parent_id
+    // that still maps onto a real Turn — keeping the IR's turn-to-turn
+    // chain intact for `derive_path`. The original UUID is preserved
+    // via the `tool_result_user` event.
+    let mut parent_rewrites: HashMap<String, String> = HashMap::new();
+    let mut last_turn_uuid: Option<String> = None;
+
     for entry in &convo.entries {
         let Some(msg) = &entry.message else {
             // Message-less entries (attachments, snapshots) survive as
             // events so the projector can re-emit them.
             events.push(entry_to_event(entry));
+            if let Some(prev) = &last_turn_uuid {
+                parent_rewrites.insert(entry.uuid.clone(), prev.clone());
+            }
             continue;
         };
 
-        // Tool-result-only user entries get merged into existing turns
+        // Tool-result-only user entries get merged into the preceding
+        // assistant's tool_uses[i].result and dropped from the turn
+        // stream. The next assistant entry's wire parentUuid points at
+        // this entry; we record a rewrite so the IR's turn-to-turn chain
+        // stays connected. (The projector re-synthesizes the wire-level
+        // tool-result entries on the way out from tool_uses[i].result —
+        // their original UUIDs aren't preserved across the roundtrip,
+        // but the Claude UI walks the chain by parentUuid, not by
+        // specific UUIDs, so that's fine.)
         if is_tool_result_only(entry) {
             merge_tool_results(&mut turns, msg);
+            if let Some(prev) = &last_turn_uuid {
+                parent_rewrites.insert(entry.uuid.clone(), prev.clone());
+            }
             continue;
         }
 
-        turns.push(message_to_turn(entry, msg));
+        let mut turn = message_to_turn(entry, msg);
+        if let Some(pid) = turn.parent_id.as_ref()
+            && let Some(real) = parent_rewrites.get(pid)
+        {
+            turn.parent_id = Some(real.clone());
+        }
+        last_turn_uuid = Some(turn.id.clone());
+        turns.push(turn);
     }
 
     // Re-derive delegation results now that tool results are merged
@@ -300,6 +389,46 @@ fn conversation_to_view(convo: &Conversation) -> ConversationView {
     let total_usage = sum_usage(&turns);
     let files_changed = extract_files_changed(&turns);
 
+    // Pull path-level base/producer from the first entry that carries the
+    // metadata (Claude records cwd / git_branch / version on every
+    // conversational entry; the first one is the canonical "this is where
+    // we started").
+    let mut base = toolpath_convo::SessionBase::default();
+    let mut producer_version: Option<String> = None;
+    for entry in &convo.entries {
+        if base.working_dir.is_none()
+            && let Some(cwd) = &entry.cwd
+        {
+            base.working_dir = Some(cwd.clone());
+        }
+        if base.vcs_branch.is_none()
+            && let Some(b) = &entry.git_branch
+        {
+            base.vcs_branch = Some(b.clone());
+        }
+        if producer_version.is_none()
+            && let Some(v) = &entry.version
+        {
+            producer_version = Some(v.clone());
+        }
+        if base.working_dir.is_some() && base.vcs_branch.is_some() && producer_version.is_some() {
+            break;
+        }
+    }
+    let view_base = if base.working_dir.is_some()
+        || base.vcs_branch.is_some()
+        || base.vcs_revision.is_some()
+        || base.vcs_remote.is_some()
+    {
+        Some(base)
+    } else {
+        None
+    };
+    let producer = producer_version.map(|v| toolpath_convo::ProducerInfo {
+        name: "claude-code".into(),
+        version: Some(v),
+    });
+
     ConversationView {
         id: convo.session_id.clone(),
         started_at: convo.started_at,
@@ -310,6 +439,8 @@ fn conversation_to_view(convo: &Conversation) -> ConversationView {
         files_changed,
         session_ids: vec![],
         events,
+        base: view_base,
+        producer,
     }
 }
 
@@ -1060,7 +1191,7 @@ mod tests {
             token_usage: None,
             environment: None,
             delegations: vec![],
-            extra: Default::default(),
+            file_mutations: Vec::new(),
         }];
 
         // Create a message with results in reversed order
@@ -1278,29 +1409,6 @@ mod tests {
             d.result.as_deref(),
             Some("Found the bug in auth.rs line 42")
         );
-    }
-
-    // ── Provider-specific extras (Turn.extra["claude"]) ─────────────
-
-    #[test]
-    fn test_turn_extra_populated_from_entry() {
-        let entry: ConversationEntry = serde_json::from_str(
-            r#"{"uuid":"u1","type":"user","timestamp":"2024-01-01T00:00:00Z","subtype":"init","message":{"role":"user","content":"hello"}}"#,
-        )
-        .unwrap();
-        let turn = to_turn(&entry).unwrap();
-        let claude = turn.extra.get("claude").expect("extra[\"claude\"] missing");
-        assert_eq!(claude["subtype"], "init");
-    }
-
-    #[test]
-    fn test_turn_extra_empty_when_no_extras() {
-        let entry: ConversationEntry = serde_json::from_str(
-            r#"{"uuid":"u1","type":"user","timestamp":"2024-01-01T00:00:00Z","message":{"role":"user","content":"hello"}}"#,
-        )
-        .unwrap();
-        let turn = to_turn(&entry).unwrap();
-        assert!(turn.extra.is_empty());
     }
 
     #[test]

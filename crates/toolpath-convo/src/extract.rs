@@ -13,8 +13,8 @@ use chrono::DateTime;
 use toolpath::v1::{Path, Step};
 
 use crate::{
-    ConversationEvent, ConversationView, DelegatedWork, EnvironmentSnapshot, Role, TokenUsage,
-    ToolCategory, ToolInvocation, ToolResult, Turn,
+    ConversationEvent, ConversationView, DelegatedWork, EnvironmentSnapshot, FileMutation,
+    ProducerInfo, Role, SessionBase, TokenUsage, ToolCategory, ToolInvocation, ToolResult, Turn,
 };
 
 /// Extract a [`ConversationView`] from a toolpath [`Path`] document.
@@ -24,17 +24,52 @@ use crate::{
 /// `conversation.append`, and `tool.invoke` are recognized; everything else
 /// is silently skipped.
 pub fn extract_conversation(path: &Path) -> ConversationView {
-    let mut view = ConversationView {
-        id: String::new(),
-        started_at: None,
-        last_activity: None,
-        turns: Vec::new(),
-        total_usage: None,
-        provider_id: None,
-        files_changed: Vec::new(),
-        session_ids: Vec::new(),
-        events: Vec::new(),
-    };
+    let mut view = ConversationView::default();
+
+    // Project `path.base` back to `view.base`.
+    if let Some(base) = &path.path.base {
+        let working_dir = base
+            .uri
+            .strip_prefix("file://")
+            .map(|s| s.to_string())
+            .or_else(|| {
+                if base.uri.is_empty() {
+                    None
+                } else {
+                    Some(base.uri.clone())
+                }
+            });
+        let vcs_remote = path
+            .meta
+            .as_ref()
+            .and_then(|m| m.extra.get("vcs_remote"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        let sb = SessionBase {
+            working_dir,
+            vcs_revision: base.ref_str.clone(),
+            vcs_branch: base.branch.clone(),
+            vcs_remote,
+        };
+        if sb.working_dir.is_some()
+            || sb.vcs_revision.is_some()
+            || sb.vcs_branch.is_some()
+            || sb.vcs_remote.is_some()
+        {
+            view.base = Some(sb);
+        }
+    }
+
+    // Recover canonical session-level fields from `path.meta.extra`.
+    // Unrecognized keys are dropped — the IR is the cross-harness contract.
+    if let Some(meta) = &path.meta
+        && let Some(p) = meta
+            .extra
+            .get("producer")
+            .and_then(|v| serde_json::from_value::<ProducerInfo>(v.clone()).ok())
+    {
+        view.producer = Some(p);
+    }
 
     // Map from step ID → index into view.turns, for parent lookups.
     let mut step_to_turn: HashMap<&str, usize> = HashMap::new();
@@ -42,6 +77,50 @@ pub fn extract_conversation(path: &Path) -> ConversationView {
     let mut files_seen: HashSet<String> = HashSet::new();
 
     for step in &path.steps {
+        // Pre-collect file.write entries on this step. They attach to the
+        // turn built from this step's `conversation.append` change (below);
+        // the iteration order of `step.change` (HashMap) is non-deterministic
+        // so a pre-pass keeps the attach step simple. Sorted by path for
+        // determinism on the way back out.
+        let mut step_mutations: Vec<FileMutation> = Vec::new();
+        for (key, ch) in &step.change {
+            let Some(s) = &ch.structural else { continue };
+            if s.change_type != "file.write" {
+                continue;
+            }
+            let fm = FileMutation {
+                path: key.clone(),
+                tool_id: s
+                    .extra
+                    .get("tool_id")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string()),
+                operation: s
+                    .extra
+                    .get("operation")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string()),
+                raw_diff: ch.raw.clone(),
+                before: s
+                    .extra
+                    .get("before")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string()),
+                after: s
+                    .extra
+                    .get("after")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string()),
+                rename_to: s
+                    .extra
+                    .get("rename_to")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string()),
+            };
+            step_mutations.push(fm);
+        }
+        step_mutations.sort_by(|a, b| a.path.cmp(&b.path));
+
         for (artifact_key, artifact_change) in &step.change {
             let structural = match &artifact_change.structural {
                 Some(s) => s,
@@ -66,7 +145,13 @@ pub fn extract_conversation(path: &Path) -> ConversationView {
                         view.id = session.to_string();
                     }
 
-                    let turn = build_turn(step, &structural.extra);
+                    let mut turn = build_turn(step, &structural.extra);
+                    // Attach pre-collected file mutations to the turn.
+                    // `tool_id` on each mutation links back to the
+                    // specific `ToolInvocation` (when set by derive).
+                    if !step_mutations.is_empty() {
+                        turn.file_mutations = std::mem::take(&mut step_mutations);
+                    }
                     let idx = view.turns.len();
                     step_to_turn.insert(&step.step.id, idx);
                     view.turns.push(turn);
@@ -219,8 +304,6 @@ fn build_turn(step: &Step, extra: &HashMap<String, serde_json::Value>) -> Turn {
 
     let delegations = build_delegations(extra);
 
-    let turn_extra = build_turn_extra(extra);
-
     let parent_id = step.step.parents.first().cloned();
 
     Turn {
@@ -236,7 +319,7 @@ fn build_turn(step: &Step, extra: &HashMap<String, serde_json::Value>) -> Turn {
         token_usage,
         environment,
         delegations,
-        extra: turn_extra,
+        file_mutations: Vec::new(),
     }
 }
 
@@ -302,58 +385,6 @@ fn build_delegations(extra: &HashMap<String, serde_json::Value>) -> Vec<Delegate
         .get("delegations")
         .and_then(|v| serde_json::from_value::<Vec<DelegatedWork>>(v.clone()).ok())
         .unwrap_or_default()
-}
-
-/// Build `Turn.extra`. Merges:
-///   - the shared-derive `turn_extra` object (a map of provider-namespaced
-///     keys preserved verbatim);
-///   - Claude's bespoke `entry_extra` plus top-level `version`/`user_type`/
-///     `request_id` fields (packed under `extra["claude"]`).
-fn build_turn_extra(
-    extra: &HashMap<String, serde_json::Value>,
-) -> HashMap<String, serde_json::Value> {
-    let mut out: HashMap<String, serde_json::Value> = HashMap::new();
-
-    // Shared-derive path: verbatim map.
-    if let Some(obj) = extra.get("turn_extra").and_then(|v| v.as_object()) {
-        for (k, v) in obj {
-            out.insert(k.clone(), v.clone());
-        }
-    }
-
-    // Claude bespoke path: hoist known top-level fields under `"claude"`.
-    let mut claude_data = serde_json::Map::new();
-    if let Some(v) = extra.get("version") {
-        claude_data.insert("version".to_string(), v.clone());
-    }
-    if let Some(v) = extra.get("user_type") {
-        claude_data.insert("user_type".to_string(), v.clone());
-    }
-    if let Some(v) = extra.get("request_id") {
-        claude_data.insert("request_id".to_string(), v.clone());
-    }
-    if let Some(entry_extra) = extra.get("entry_extra").and_then(|v| v.as_object()) {
-        for (k, v) in entry_extra {
-            claude_data.insert(k.clone(), v.clone());
-        }
-    }
-    if !claude_data.is_empty() {
-        // Merge with any existing `"claude"` key from turn_extra so we
-        // don't clobber provider-supplied fields.
-        let merged = match out.remove("claude") {
-            Some(serde_json::Value::Object(existing)) => {
-                let mut m = existing;
-                for (k, v) in claude_data {
-                    m.entry(k).or_insert(v);
-                }
-                serde_json::Value::Object(m)
-            }
-            _ => serde_json::Value::Object(claude_data),
-        };
-        out.insert("claude".to_string(), merged);
-    }
-
-    out
 }
 
 fn build_token_usage(extra: &HashMap<String, serde_json::Value>) -> Option<TokenUsage> {
@@ -1138,86 +1169,6 @@ mod tests {
 
         let view = extract_conversation(&path);
         assert!(view.turns[0].environment.is_none());
-    }
-
-    #[test]
-    fn test_extra_claude_metadata() {
-        let path = make_path(vec![make_step(
-            "step-001",
-            "agent:claude-opus-4-6",
-            "2026-01-01T00:00:00Z",
-            vec![],
-            vec![(
-                "agent://claude-code/sess-1",
-                "conversation.append",
-                extras(&[
-                    ("role", serde_json::json!("assistant")),
-                    ("text", serde_json::json!("hi")),
-                    ("version", serde_json::json!("1.0.30")),
-                    ("user_type", serde_json::json!("pro")),
-                    ("request_id", serde_json::json!("req-abc-123")),
-                ]),
-            )],
-        )]);
-
-        let view = extract_conversation(&path);
-        let claude = view.turns[0].extra.get("claude").unwrap();
-        assert_eq!(claude["version"], serde_json::json!("1.0.30"));
-        assert_eq!(claude["user_type"], serde_json::json!("pro"));
-        assert_eq!(claude["request_id"], serde_json::json!("req-abc-123"));
-    }
-
-    #[test]
-    fn test_entry_extra_merged_into_claude() {
-        let path = make_path(vec![make_step(
-            "step-001",
-            "agent:claude-opus-4-6",
-            "2026-01-01T00:00:00Z",
-            vec![],
-            vec![(
-                "agent://claude-code/sess-1",
-                "conversation.append",
-                extras(&[
-                    ("role", serde_json::json!("assistant")),
-                    ("text", serde_json::json!("hi")),
-                    (
-                        "entry_extra",
-                        serde_json::json!({
-                            "entrypoint": "cli",
-                            "isMeta": true,
-                            "slug": "my-project"
-                        }),
-                    ),
-                ]),
-            )],
-        )]);
-
-        let view = extract_conversation(&path);
-        let claude = view.turns[0].extra.get("claude").unwrap();
-        assert_eq!(claude["entrypoint"], serde_json::json!("cli"));
-        assert_eq!(claude["isMeta"], serde_json::json!(true));
-        assert_eq!(claude["slug"], serde_json::json!("my-project"));
-    }
-
-    #[test]
-    fn test_extra_empty_when_no_metadata() {
-        let path = make_path(vec![make_step(
-            "step-001",
-            "human:alex",
-            "2026-01-01T00:00:00Z",
-            vec![],
-            vec![(
-                "agent://claude-code/sess-1",
-                "conversation.append",
-                extras(&[
-                    ("role", serde_json::json!("user")),
-                    ("text", serde_json::json!("hello")),
-                ]),
-            )],
-        )]);
-
-        let view = extract_conversation(&path);
-        assert!(view.turns[0].extra.is_empty());
     }
 
     #[test]

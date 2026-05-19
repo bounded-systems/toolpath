@@ -48,14 +48,8 @@ use crate::types::{
 ///
 /// let view = ConversationView {
 ///     id: "session-uuid".into(),
-///     started_at: None,
-///     last_activity: None,
-///     turns: vec![],
-///     total_usage: None,
 ///     provider_id: Some("pi".into()),
-///     files_changed: vec![],
-///     session_ids: vec![],
-///     events: vec![],
+///     ..Default::default()
 /// };
 ///
 /// let session = PiProjector::default().project(&view).unwrap();
@@ -182,13 +176,12 @@ fn project_view(
     })
 }
 
-/// Pull `Turn.extra["pi"]` if present (the namespace forward path uses).
-/// Foreign-namespace extras are intentionally not consulted.
-fn pi_extras(turn: &Turn) -> Option<&Map<String, Value>> {
-    turn.extra.get("pi").and_then(|v| match v {
-        Value::Object(m) => Some(m),
-        _ => None,
-    })
+/// Used to return `Turn.extra["pi"]`; the IR no longer carries
+/// provider-namespaced extras. Always `None`. Callers fall back to
+/// reconstructing source-format details from typed IR fields and
+/// reasonable defaults.
+fn pi_extras(_turn: &Turn) -> Option<&'static Map<String, Value>> {
+    None
 }
 
 /// Emit `ModelChange` / `ThinkingLevelChange` / `Label` entries that the
@@ -761,7 +754,6 @@ fn extra_map_from(v: Option<&Value>) -> HashMap<String, Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
     use toolpath_convo::{TokenUsage, ToolCategory, ToolInvocation, ToolResult};
 
     fn user_turn(id: &str, text: &str) -> Turn {
@@ -778,7 +770,7 @@ mod tests {
             token_usage: None,
             environment: None,
             delegations: vec![],
-            extra: HashMap::new(),
+            file_mutations: Vec::new(),
         }
     }
 
@@ -801,7 +793,7 @@ mod tests {
             }),
             environment: None,
             delegations: vec![],
-            extra: HashMap::new(),
+            file_mutations: Vec::new(),
         }
     }
 
@@ -816,6 +808,7 @@ mod tests {
             files_changed: vec![],
             session_ids: vec![],
             events: vec![],
+            ..Default::default()
         }
     }
 
@@ -949,130 +942,6 @@ mod tests {
                 assert!(matches!(&content[1], ContentBlock::Text { text, .. } if text == "Done."));
             }
             _ => panic!("expected Assistant"),
-        }
-    }
-
-    #[test]
-    fn test_tool_role_with_pi_extras_becomes_tool_result() {
-        let mut t = user_turn("tr1", "result text");
-        t.role = Role::Other("tool".into());
-        t.extra.insert(
-            "pi".into(),
-            serde_json::json!({
-                "toolCallId": "tc1",
-                "toolName": "read",
-                "isError": false,
-            }),
-        );
-        let session = PiProjector::default().project(&view_with(vec![t])).unwrap();
-        match &session.entries[1] {
-            Entry::Message {
-                message:
-                    AgentMessage::ToolResult {
-                        tool_call_id,
-                        tool_name,
-                        is_error,
-                        ..
-                    },
-                ..
-            } => {
-                assert_eq!(tool_call_id, "tc1");
-                assert_eq!(tool_name, "read");
-                assert!(!is_error);
-            }
-            _ => panic!("expected ToolResult"),
-        }
-    }
-
-    #[test]
-    fn test_bash_role_becomes_bash_execution() {
-        let mut t = user_turn("b1", "$ ls\nfile-a\nfile-b");
-        t.role = Role::Other("bash".into());
-        t.extra.insert(
-            "pi".into(),
-            serde_json::json!({
-                "command": "ls",
-                "exitCode": 0,
-                "cancelled": false,
-                "truncated": false,
-            }),
-        );
-        let session = PiProjector::default().project(&view_with(vec![t])).unwrap();
-        match &session.entries[1] {
-            Entry::Message {
-                message:
-                    AgentMessage::BashExecution {
-                        command,
-                        output,
-                        exit_code,
-                        ..
-                    },
-                ..
-            } => {
-                assert_eq!(command, "ls");
-                assert_eq!(*exit_code, Some(0));
-                // Leading `$ ls\n` is stripped to recover the original output.
-                assert_eq!(output, "file-a\nfile-b");
-            }
-            _ => panic!("expected BashExecution"),
-        }
-    }
-
-    #[test]
-    fn test_foreign_namespace_extras_dropped() {
-        // Turn.extra["claude"] / Turn.extra["gemini"] must NOT appear
-        // anywhere on the projected entries — only Turn.extra["pi"] is
-        // honored.
-        let mut t = assistant_turn("a1", "hi");
-        t.extra.insert(
-            "claude".into(),
-            serde_json::json!({"version": "2.1.116", "user_type": "external"}),
-        );
-        t.extra
-            .insert("gemini".into(), serde_json::json!({"foo": "bar"}));
-
-        let session = PiProjector::default().project(&view_with(vec![t])).unwrap();
-        let serialized = serde_json::to_string(&session.entries[1]).unwrap();
-        assert!(
-            !serialized.contains("\"version\":\"2.1.116\""),
-            "claude extras leaked: {}",
-            serialized
-        );
-        assert!(
-            !serialized.contains("\"foo\":\"bar\""),
-            "gemini extras leaked: {}",
-            serialized
-        );
-    }
-
-    #[test]
-    fn test_compaction_synthetic_turn_becomes_compaction_entry() {
-        let mut t = user_turn("c1", "Compacted (summary): old stuff");
-        t.role = Role::System;
-        t.extra.insert(
-            "pi".into(),
-            serde_json::json!({
-                "compaction": {
-                    "summary": "old stuff",
-                    "firstKeptEntryId": "m5",
-                    "tokensBefore": 50000,
-                    "fromHook": false,
-                }
-            }),
-        );
-        let session = PiProjector::default().project(&view_with(vec![t])).unwrap();
-        match &session.entries[1] {
-            Entry::Compaction {
-                summary,
-                first_kept_entry_id,
-                tokens_before,
-                ..
-            } => {
-                assert_eq!(summary, "old stuff");
-                assert_eq!(first_kept_entry_id, "m5");
-                assert_eq!(*tokens_before, 50000);
-            }
-            other => panic!("expected Compaction, got {:?}", other),
         }
     }
 

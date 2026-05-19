@@ -32,14 +32,7 @@ use toolpath_convo::{
 ///
 /// let view = ConversationView {
 ///     id: "my-session".to_string(),
-///     started_at: None,
-///     last_activity: None,
-///     turns: vec![],
-///     total_usage: None,
-///     provider_id: None,
-///     files_changed: vec![],
-///     session_ids: vec![],
-///     events: vec![],
+///     ..Default::default()
 /// };
 ///
 /// let projector = ClaudeProjector;
@@ -305,27 +298,11 @@ fn apply_turn_metadata(entry: &mut ConversationEntry, turn: &Turn) {
         }
     }
 
-    // From Turn.extra["claude"]
-    if let Some(claude) = turn.extra.get("claude").and_then(|v| v.as_object()) {
-        if let Some(v) = claude.get("version").and_then(|v| v.as_str()) {
-            entry.version = entry.version.take().or_else(|| Some(v.to_string()));
-        }
-        if let Some(v) = claude.get("user_type").and_then(|v| v.as_str()) {
-            entry.user_type = entry.user_type.take().or_else(|| Some(v.to_string()));
-        }
-        if let Some(v) = claude.get("request_id").and_then(|v| v.as_str()) {
-            entry.request_id = entry.request_id.take().or_else(|| Some(v.to_string()));
-        }
-        // Merge remaining fields into entry.extra
-        for (k, v) in claude {
-            match k.as_str() {
-                "version" | "user_type" | "request_id" => {} // Already handled above
-                _ => {
-                    entry.extra.entry(k.clone()).or_insert_with(|| v.clone());
-                }
-            }
-        }
-    }
+    // Source-format details (`version`, `user_type`, `request_id`,
+    // per-entry catch-all) used to ride through `Turn.extra["claude"]` for
+    // claude → IR → claude round-trip. The IR no longer carries
+    // provider-specific extras; the projected entry's fields stay `None`
+    // and the harness fills in defaults at write time.
 }
 
 /// Build a `ConversationEntry` for a user turn.
@@ -1016,6 +993,7 @@ mod tests {
             files_changed: vec![],
             session_ids: vec![],
             events: vec![],
+            ..Default::default()
         }
     }
 
@@ -1033,7 +1011,7 @@ mod tests {
             token_usage: None,
             environment: None,
             delegations: vec![],
-            extra: Default::default(),
+            file_mutations: Vec::new(),
         }
     }
 
@@ -1051,7 +1029,7 @@ mod tests {
             token_usage: None,
             environment: None,
             delegations: vec![],
-            extra: Default::default(),
+            file_mutations: Vec::new(),
         }
     }
 
@@ -1498,80 +1476,6 @@ mod tests {
         }
     }
 
-    // ── Metadata: user entries get cwd, gitBranch, version, userType ─
-
-    #[test]
-    fn test_user_entry_metadata_from_turn() {
-        let mut turn = user_turn("u1", "Hello");
-        turn.environment = Some(EnvironmentSnapshot {
-            working_dir: Some("/home/user/project".to_string()),
-            vcs_branch: Some("main".to_string()),
-            vcs_revision: None,
-        });
-        turn.extra.insert(
-            "claude".to_string(),
-            json!({
-                "version": "2.1.37",
-                "user_type": "external",
-                "entrypoint": "cli",
-            }),
-        );
-
-        let view = make_view("sess-1", vec![turn]);
-        let convo = ClaudeProjector.project(&view).unwrap();
-
-        let entry = &content_entries(&convo)[0];
-        assert_eq!(entry.cwd.as_deref(), Some("/home/user/project"));
-        assert_eq!(entry.git_branch.as_deref(), Some("main"));
-        assert_eq!(entry.version.as_deref(), Some("2.1.37"));
-        assert_eq!(entry.user_type.as_deref(), Some("external"));
-        assert_eq!(entry.extra.get("entrypoint"), Some(&json!("cli")));
-    }
-
-    // ── Metadata: assistant entries get requestId ─────────────────────
-
-    #[test]
-    fn test_assistant_entry_metadata_request_id() {
-        let mut turn = assistant_turn("a1", "Done.");
-        turn.extra.insert(
-            "claude".to_string(),
-            json!({
-                "request_id": "req_abc123",
-                "version": "2.1.37",
-            }),
-        );
-
-        let view = make_view("sess-1", vec![turn]);
-        let convo = ClaudeProjector.project(&view).unwrap();
-
-        let entry = &content_entries(&convo)[0];
-        assert_eq!(entry.request_id.as_deref(), Some("req_abc123"));
-        assert_eq!(entry.version.as_deref(), Some("2.1.37"));
-    }
-
-    // ── Metadata: extras (entrypoint, isMeta, slug) appear ───────────
-
-    #[test]
-    fn test_entry_extras_appear_in_projected_entries() {
-        let mut turn = user_turn("u1", "Hello");
-        turn.extra.insert(
-            "claude".to_string(),
-            json!({
-                "entrypoint": "cli",
-                "isMeta": true,
-                "slug": "my-slug",
-            }),
-        );
-
-        let view = make_view("sess-1", vec![turn]);
-        let convo = ClaudeProjector.project(&view).unwrap();
-
-        let entry = &content_entries(&convo)[0];
-        assert_eq!(entry.extra.get("entrypoint"), Some(&json!("cli")));
-        assert_eq!(entry.extra.get("isMeta"), Some(&json!(true)));
-        assert_eq!(entry.extra.get("slug"), Some(&json!("my-slug")));
-    }
-
     // ── Tool result entries inherit metadata from parent turn ─────────
 
     #[test]
@@ -1582,14 +1486,6 @@ mod tests {
             vcs_branch: Some("dev".to_string()),
             vcs_revision: None,
         });
-        turn.extra.insert(
-            "claude".to_string(),
-            json!({
-                "version": "2.1.37",
-                "user_type": "external",
-                "entrypoint": "cli",
-            }),
-        );
         turn.tool_uses = vec![ToolInvocation {
             id: "t1".to_string(),
             name: "Read".to_string(),
@@ -1610,9 +1506,6 @@ mod tests {
         let result_entry = &entries[1];
         assert_eq!(result_entry.cwd.as_deref(), Some("/project"));
         assert_eq!(result_entry.git_branch.as_deref(), Some("dev"));
-        assert_eq!(result_entry.version.as_deref(), Some("2.1.37"));
-        assert_eq!(result_entry.user_type.as_deref(), Some("external"));
-        assert_eq!(result_entry.extra.get("entrypoint"), Some(&json!("cli")));
         // sourceToolAssistantUUID should be the parent turn's ID
         assert_eq!(
             result_entry.extra.get("sourceToolAssistantUUID"),

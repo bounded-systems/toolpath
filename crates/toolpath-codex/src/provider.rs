@@ -27,13 +27,14 @@ use std::collections::HashMap;
 
 use crate::io::ConvoIO;
 use crate::types::{
-    EventMsg, ExecCommandEnd, Message, PatchApplyEnd, ResponseItem, RolloutItem, Session,
-    TokenCountInfo, TokenUsage as CodexTokenUsage,
+    EventMsg, ExecCommandEnd, Message, PatchApplyEnd, PatchChange, ResponseItem, RolloutItem,
+    Session, TokenCountInfo, TokenUsage as CodexTokenUsage,
 };
-use serde_json::{Map, Value};
+use serde_json::Value;
 use toolpath_convo::{
     ConversationEvent, ConversationMeta, ConversationProvider, ConversationView, ConvoError,
-    EnvironmentSnapshot, Role, TokenUsage, ToolCategory, ToolInvocation, ToolResult, Turn,
+    EnvironmentSnapshot, FileMutation, ProducerInfo, Role, SessionBase, TokenUsage, ToolCategory,
+    ToolInvocation, ToolResult, Turn,
 };
 
 /// Provider for Codex sessions.
@@ -179,11 +180,6 @@ struct Builder<'a> {
     /// Plaintext reasoning summaries (rare — only in configurations where
     /// OpenAI exposes public reasoning). These land on `Turn.thinking`.
     pending_reasoning_plaintext: Vec<String>,
-    /// Opaque encrypted ciphertext from OpenAI's servers. Preserved on
-    /// the next assistant turn's `extra["codex"]["reasoning_encrypted"]`
-    /// for round-trip fidelity. Never goes to `Turn.thinking` — it
-    /// would render as garbage.
-    pending_reasoning_encrypted: Vec<String>,
     pending_token_usage: Option<TokenUsage>,
     working_dir: Option<String>,
     current_model: Option<String>,
@@ -201,7 +197,6 @@ impl<'a> Builder<'a> {
             turns: Vec::new(),
             events: Vec::new(),
             pending_reasoning_plaintext: Vec::new(),
-            pending_reasoning_encrypted: Vec::new(),
             pending_token_usage: None,
             working_dir: None,
             current_model: None,
@@ -257,6 +252,81 @@ impl<'a> Builder<'a> {
             }
         }
 
+        // Path-level base context from session_meta (cwd + git).
+        let meta = self.session.meta();
+        let base = {
+            let wd = meta
+                .as_ref()
+                .map(|m| m.cwd.to_string_lossy().to_string())
+                .filter(|s| !s.is_empty())
+                .or_else(|| self.working_dir.clone());
+            let git = meta.as_ref().and_then(|m| m.git.as_ref());
+            let revision = git.and_then(|g| g.commit_hash.clone());
+            let branch = git.and_then(|g| g.branch.clone());
+            let remote = git.and_then(|g| g.repository_url.clone());
+            if wd.is_some() || revision.is_some() || branch.is_some() || remote.is_some() {
+                Some(SessionBase {
+                    working_dir: wd,
+                    vcs_revision: revision,
+                    vcs_branch: branch,
+                    vcs_remote: remote,
+                })
+            } else {
+                None
+            }
+        };
+
+        // Producer (originator + cli_version) lifts onto the typed view
+        // field. `model_provider` already lives on each assistant
+        // `ActorDefinition.provider`. Codex's `source` and `forked_from_id`
+        // are wire-level fields with no cross-harness analog — the codex
+        // projector hard-codes defaults on the return path, so we let them
+        // drop on this side.
+        let producer = meta.as_ref().map(|m| ProducerInfo {
+            name: m.originator.clone(),
+            version: Some(m.cli_version.clone()),
+        });
+
+        // Filter empty carrier turns (no text, no thinking, no tool calls).
+        // Previously done inside `derive_path_from_view`; moved here so the
+        // canonical `derive_path` sees only meaningful turns.
+        self.turns
+            .retain(|t| !(t.text.is_empty() && t.thinking.is_none() && t.tool_uses.is_empty()));
+
+        // Assign synthetic ids to turns whose source message didn't carry
+        // one, then link sequentially via `parent_id` so the shared
+        // `derive_path` can walk a connected DAG. Codex turns don't carry
+        // explicit parent ids on the wire; this preserves the linear
+        // ordering the old `derive_path_from_view` produced.
+        for (idx, t) in self.turns.iter_mut().enumerate() {
+            if t.id.is_empty() {
+                t.id = format!("codex-turn-{:04}", idx + 1);
+            }
+        }
+        let mut prev: Option<String> = None;
+        for t in self.turns.iter_mut() {
+            if t.parent_id.is_none() {
+                t.parent_id = prev.clone();
+            }
+            prev = Some(t.id.clone());
+        }
+
+        // Disambiguate event ids. `event_from_raw` synthesizes
+        // `<event_type>-<timestamp>`, which collides when codex emits
+        // multiple events of the same type at the same timestamp (rare
+        // but real). Suffix duplicates with their position so each step
+        // gets a unique id.
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for t in &self.turns {
+            seen.insert(t.id.clone());
+        }
+        for (i, e) in self.events.iter_mut().enumerate() {
+            if !seen.insert(e.id.clone()) {
+                e.id = format!("{}-{:04}", e.id, i);
+                seen.insert(e.id.clone());
+            }
+        }
+
         ConversationView {
             id: self.session.id.clone(),
             started_at: self.session.started_at(),
@@ -271,6 +341,8 @@ impl<'a> Builder<'a> {
             files_changed: self.files_changed_order,
             session_ids: vec![],
             events: self.events,
+            base,
+            producer,
         }
     }
 
@@ -286,10 +358,6 @@ impl<'a> Builder<'a> {
                 self.push_turn(turn);
             }
             ResponseItem::Reasoning(r) => {
-                // Encrypted blob → round-trip preservation only.
-                if let Some(s) = r.encrypted_content {
-                    self.pending_reasoning_encrypted.push(s);
-                }
                 // Plaintext content (rare) → Turn.thinking.
                 if let Some(Value::Array(arr)) = r.content.as_ref() {
                     for v in arr {
@@ -313,12 +381,7 @@ impl<'a> Builder<'a> {
                 } else {
                     input
                 };
-                let mut extra: Map<String, Value> = Map::new();
-                extra.insert("raw_arguments".into(), Value::String(fc.arguments.clone()));
-                if let Some(ns) = fc.namespace.as_ref() {
-                    extra.insert("namespace".into(), Value::String(ns.clone()));
-                }
-                self.attach_tool_call(timestamp, fc.call_id, name, input, extra, false);
+                self.attach_tool_call(timestamp, fc.call_id, name, input);
             }
             ResponseItem::FunctionCallOutput(out) => {
                 let is_error = out
@@ -330,12 +393,7 @@ impl<'a> Builder<'a> {
             }
             ResponseItem::CustomToolCall(ct) => {
                 let input = Value::String(ct.input.clone());
-                let mut extra: Map<String, Value> = Map::new();
-                extra.insert("tool_call_kind".into(), Value::String("custom".into()));
-                if let Some(s) = ct.status.as_ref() {
-                    extra.insert("status".into(), Value::String(s.clone()));
-                }
-                self.attach_tool_call(timestamp, ct.call_id, ct.name, input, extra, true);
+                self.attach_tool_call(timestamp, ct.call_id, ct.name, input);
             }
             ResponseItem::CustomToolCallOutput(out) => {
                 let is_error = out
@@ -399,8 +457,6 @@ impl<'a> Builder<'a> {
         call_id: String,
         name: String,
         input: Value,
-        codex_tool_extra: Map<String, Value>,
-        _is_custom: bool,
     ) {
         let category = tool_category(&name);
         let invocation = ToolInvocation {
@@ -425,15 +481,6 @@ impl<'a> Builder<'a> {
             }
         };
         let tool_idx = self.turns[turn_idx].tool_uses.len();
-        if !codex_tool_extra.is_empty() {
-            let codex = turn_extra_codex_mut(&mut self.turns[turn_idx]);
-            let tool_extras = codex
-                .entry("tool_extras")
-                .or_insert_with(|| Value::Object(Map::new()));
-            if let Value::Object(m) = tool_extras {
-                m.insert(call_id.clone(), Value::Object(codex_tool_extra));
-            }
-        }
         self.turns[turn_idx].tool_uses.push(invocation);
         self.call_index.insert(call_id, (turn_idx, tool_idx));
     }
@@ -482,64 +529,35 @@ impl<'a> Builder<'a> {
                         content: body,
                         is_error,
                     });
-                } else if is_error {
-                    // Escalate existing result to error if exit indicates failure.
-                    if let Some(r) = inv.result.as_mut() {
-                        r.is_error = true;
-                    }
-                }
-                let codex = turn_extra_codex_mut(turn);
-                let tool_extras = codex
-                    .entry("tool_extras")
-                    .or_insert_with(|| Value::Object(Map::new()));
-                if let Value::Object(m) = tool_extras {
-                    let entry = m
-                        .entry(exec.call_id.clone())
-                        .or_insert_with(|| Value::Object(Map::new()));
-                    if let Value::Object(inner) = entry {
-                        inner.insert(
-                            "exit_code".into(),
-                            exec.exit_code
-                                .map(|c| Value::Number(serde_json::Number::from(c)))
-                                .unwrap_or(Value::Null),
-                        );
-                        if !exec.command.is_empty() {
-                            inner.insert(
-                                "command".into(),
-                                Value::Array(
-                                    exec.command
-                                        .iter()
-                                        .map(|s| Value::String(s.clone()))
-                                        .collect(),
-                                ),
-                            );
-                        }
-                    }
+                } else if is_error && let Some(r) = inv.result.as_mut() {
+                    r.is_error = true;
                 }
             }
         }
     }
 
     fn apply_patch_apply_end(&mut self, patch: &PatchApplyEnd) {
-        let turn_idx = self.call_index.get(&patch.call_id).map(|(i, _)| *i);
+        let loc = self.call_index.get(&patch.call_id).copied();
 
-        if let Some(turn_idx) = turn_idx {
+        // `patch.changes` is a HashMap — iterate in sorted order so the
+        // derived order is deterministic across runs.
+        let mut paths: Vec<&String> = patch.changes.keys().collect();
+        paths.sort();
+
+        // Populate `turn.file_mutations` on the matching turn, with
+        // `tool_id` set to the `call_id` so `derive_path` can link the
+        // sibling `file.write` change back to this specific tool call.
+        if let Some((turn_idx, _tool_idx)) = loc {
             let turn = &mut self.turns[turn_idx];
-            let codex = turn_extra_codex_mut(turn);
-            let patches = codex
-                .entry("patch_changes")
-                .or_insert_with(|| Value::Array(Vec::new()));
-            if let Value::Array(arr) = patches
-                && let Ok(v) = serde_json::to_value(patch)
-            {
-                arr.push(v);
+            for path in &paths {
+                if let Some(change) = patch.changes.get(*path) {
+                    let mut fm = patch_change_to_file_mutation(path, change);
+                    fm.tool_id = Some(patch.call_id.clone());
+                    turn.file_mutations.push(fm);
+                }
             }
         }
 
-        // `patch.changes` is a HashMap — iterate in sorted order so the
-        // derived `files_changed` list is deterministic across runs.
-        let mut paths: Vec<&String> = patch.changes.keys().collect();
-        paths.sort();
         for path in paths {
             if self.files_changed_seen.insert(path.clone()) {
                 self.files_changed_order.push(path.clone());
@@ -561,15 +579,6 @@ impl<'a> Builder<'a> {
             turn.thinking = Some(self.pending_reasoning_plaintext.join("\n\n"));
             self.pending_reasoning_plaintext.clear();
         }
-        // Encrypted ciphertext goes into extra for round-trip only.
-        if !self.pending_reasoning_encrypted.is_empty() {
-            let drained: Vec<String> = self.pending_reasoning_encrypted.drain(..).collect();
-            let codex = turn_extra_codex_mut(turn);
-            codex.insert(
-                "reasoning_encrypted".into(),
-                Value::Array(drained.into_iter().map(Value::String).collect()),
-            );
-        }
         if let Some(tu) = self.pending_token_usage.take() {
             turn.token_usage = Some(tu);
         }
@@ -581,6 +590,74 @@ impl<'a> Builder<'a> {
             .rposition(|t| t.role == Role::Assistant)
             .or_else(|| self.turns.len().checked_sub(1))
     }
+}
+
+// ── Patch → FileMutation conversion ─────────────────────────────────
+
+fn patch_change_to_file_mutation(path: &str, change: &PatchChange) -> FileMutation {
+    let mut fm = FileMutation {
+        path: path.to_string(),
+        ..Default::default()
+    };
+    match change {
+        PatchChange::Add { content, .. } => {
+            fm.operation = Some("add".into());
+            fm.after = Some(content.clone());
+            fm.raw_diff = Some(synth_add_diff(content));
+        }
+        PatchChange::Update {
+            unified_diff,
+            move_path,
+            ..
+        } => {
+            fm.operation = Some("update".into());
+            fm.raw_diff = Some(unified_diff.clone());
+            fm.rename_to = move_path.clone();
+        }
+        PatchChange::Delete {
+            original_content, ..
+        } => {
+            fm.operation = Some("delete".into());
+            fm.before = original_content.clone();
+            fm.raw_diff = original_content.as_deref().map(synth_delete_diff);
+        }
+        PatchChange::Unknown => {
+            fm.operation = Some("unknown".into());
+        }
+    }
+    fm
+}
+
+fn synth_add_diff(content: &str) -> String {
+    let lines: Vec<&str> = content.split('\n').collect();
+    let effective: &[&str] = if lines.last() == Some(&"") {
+        &lines[..lines.len().saturating_sub(1)]
+    } else {
+        &lines[..]
+    };
+    let mut buf = format!("@@ -0,0 +1,{} @@\n", effective.len());
+    for l in effective {
+        buf.push('+');
+        buf.push_str(l);
+        buf.push('\n');
+    }
+    buf
+}
+
+fn synth_delete_diff(original: &str) -> String {
+    let lines: Vec<&str> = original.split('\n').collect();
+    let effective: &[&str] = if lines.last() == Some(&"") {
+        &lines[..lines.len().saturating_sub(1)]
+    } else {
+        &lines[..]
+    };
+    let mut buf = format!("@@ -1,{} +0,0 @@\n", effective.len());
+    for l in effective {
+        buf.push('-');
+        buf.push_str(l);
+        buf.push('\n');
+    }
+    buf
 }
 
 fn message_to_turn(
@@ -604,24 +681,6 @@ fn message_to_turn(
         vcs_revision: None,
     });
 
-    let mut extra: HashMap<String, Value> = HashMap::new();
-    let mut codex_extra: Map<String, Value> = Map::new();
-    if msg.role == "developer" {
-        codex_extra.insert("role".into(), Value::String("developer".into()));
-    }
-    if let Some(phase) = &msg.phase {
-        codex_extra.insert("phase".into(), Value::String(phase.clone()));
-    }
-    if let Some(end_turn) = msg.end_turn {
-        codex_extra.insert("end_turn".into(), Value::Bool(end_turn));
-    }
-    if let Some(id) = &msg.id {
-        codex_extra.insert("message_id".into(), Value::String(id.clone()));
-    }
-    if !codex_extra.is_empty() {
-        extra.insert("codex".into(), Value::Object(codex_extra));
-    }
-
     Turn {
         id: msg.id.clone().unwrap_or_default(),
         parent_id: None,
@@ -639,7 +698,7 @@ fn message_to_turn(
         token_usage: None,
         environment,
         delegations: Vec::new(),
-        extra,
+        file_mutations: Vec::new(),
     }
 }
 
@@ -665,7 +724,7 @@ fn synthetic_assistant_turn(
             vcs_revision: None,
         }),
         delegations: Vec::new(),
-        extra: HashMap::new(),
+        file_mutations: Vec::new(),
     }
 }
 
@@ -709,19 +768,6 @@ fn data_from_value(v: &Value) -> HashMap<String, Value> {
             m
         }
     }
-}
-
-fn turn_extra_codex_mut(turn: &mut Turn) -> &mut Map<String, Value> {
-    let entry = turn
-        .extra
-        .entry("codex".to_string())
-        .or_insert_with(|| Value::Object(Map::new()));
-    if !entry.is_object() {
-        *entry = Value::Object(Map::new());
-    }
-    entry
-        .as_object_mut()
-        .expect("entry was just ensured to be an object")
 }
 
 // ── ConversationProvider trait impl ────────────────────────────────
@@ -844,10 +890,10 @@ mod tests {
     }
 
     #[test]
-    fn encrypted_reasoning_preserved_in_extra_not_thinking() {
-        // The fixture only has encrypted_content. That must land under
-        // `extra["codex"]["reasoning_encrypted"]` — and NOT be rendered
-        // as `Turn.thinking` (which would be opaque ciphertext).
+    fn encrypted_reasoning_does_not_land_on_thinking() {
+        // The fixture only has encrypted_content. That must NOT be rendered
+        // as `Turn.thinking` (which would be opaque ciphertext). Since
+        // Turn.extra was removed, encrypted ciphertext is simply dropped.
         let (_t, mgr, id) = setup_session_fixture(&minimal_session());
         let view = to_view(&mgr.read_session(&id).unwrap());
         let assistant = &view.turns[1];
@@ -855,13 +901,6 @@ mod tests {
             assistant.thinking.is_none(),
             "encrypted ciphertext must not appear as thinking"
         );
-        let codex = assistant.extra.get("codex").expect("codex extra");
-        let enc = codex
-            .get("reasoning_encrypted")
-            .and_then(|v| v.as_array())
-            .expect("reasoning_encrypted array");
-        assert_eq!(enc.len(), 1);
-        assert_eq!(enc[0], "encrypted-blob-1");
     }
 
     #[test]
@@ -880,14 +919,6 @@ mod tests {
             view.turns[0].thinking.as_deref(),
             Some("I should check the file")
         );
-        // No encrypted blob on this one, so extra["codex"] either omits
-        // `reasoning_encrypted` or has no such key.
-        let has_enc = view.turns[0]
-            .extra
-            .get("codex")
-            .and_then(|c| c.get("reasoning_encrypted"))
-            .is_some();
-        assert!(!has_enc, "no encrypted content was emitted");
     }
 
     #[test]
@@ -946,14 +977,27 @@ mod tests {
     }
 
     #[test]
-    fn patch_apply_end_attached_to_turn_extra() {
+    fn patch_apply_end_populates_turn_file_mutations() {
         let (_t, mgr, id) = setup_session_fixture(&minimal_session());
         let view = to_view(&mgr.read_session(&id).unwrap());
-        let assistant = &view.turns[1];
-        let codex = assistant.extra.get("codex").unwrap();
-        let patches = codex.get("patch_changes").unwrap().as_array().unwrap();
-        assert_eq!(patches.len(), 1);
-        assert_eq!(patches[0]["changes"]["/tmp/proj/a.rs"]["type"], "add");
+        // Find the turn that hosts the `apply_patch` file mutation. The
+        // mutation's `tool_id` should link back to the apply_patch tool.
+        let apply_patch_id = view
+            .turns
+            .iter()
+            .flat_map(|t| t.tool_uses.iter())
+            .find(|tu| tu.name == "apply_patch")
+            .map(|tu| tu.id.clone())
+            .expect("apply_patch tool invocation present");
+        let fm = view
+            .turns
+            .iter()
+            .flat_map(|t| t.file_mutations.iter())
+            .find(|fm| fm.path == "/tmp/proj/a.rs")
+            .expect("file mutation present");
+        assert_eq!(fm.tool_id.as_ref(), Some(&apply_patch_id));
+        assert_eq!(fm.operation.as_deref(), Some("add"));
+        assert!(fm.raw_diff.is_some());
     }
 
     #[test]
@@ -1019,7 +1063,5 @@ mod tests {
         let (_t, mgr, id) = setup_session_fixture(&body);
         let view = to_view(&mgr.read_session(&id).unwrap());
         assert_eq!(view.turns[0].role, Role::System);
-        let codex = view.turns[0].extra.get("codex").unwrap();
-        assert_eq!(codex["role"], "developer");
     }
 }

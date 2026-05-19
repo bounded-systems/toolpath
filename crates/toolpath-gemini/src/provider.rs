@@ -9,11 +9,9 @@
 //!   chat, the matching sub-agent file's turns are populated onto a
 //!   [`DelegatedWork`].
 
-use std::collections::HashMap;
-
 use crate::GeminiConvo;
 use crate::types::{ChatFile, Conversation, GeminiMessage, GeminiRole, Thought, ToolCall};
-use serde_json::{Map, Value};
+use serde_json::Value;
 use toolpath_convo::{
     ConversationMeta, ConversationProvider, ConversationView, ConvoError, DelegatedWork,
     EnvironmentSnapshot, Role, TokenUsage, ToolCategory, ToolInvocation, ToolResult, Turn,
@@ -103,6 +101,7 @@ fn message_to_turn(msg: &GeminiMessage, working_dir: Option<&str>) -> Turn {
         .iter()
         .map(tool_call_to_invocation)
         .collect();
+    let file_mutations = compute_file_mutations(msg.tool_calls());
 
     let token_usage = msg.tokens.as_ref().map(|t| TokenUsage {
         input_tokens: t.input,
@@ -117,12 +116,6 @@ fn message_to_turn(msg: &GeminiMessage, working_dir: Option<&str>) -> Turn {
         vcs_revision: None,
     });
 
-    let mut extra = HashMap::new();
-    let gemini_extra = build_gemini_extra(msg);
-    if !gemini_extra.is_empty() {
-        extra.insert("gemini".to_string(), Value::Object(gemini_extra));
-    }
-
     Turn {
         id: msg.id.clone(),
         parent_id: None,
@@ -136,7 +129,89 @@ fn message_to_turn(msg: &GeminiMessage, working_dir: Option<&str>) -> Turn {
         token_usage,
         environment,
         delegations: vec![],
-        extra,
+        file_mutations,
+    }
+}
+
+/// For each file-write tool call in this message, build a
+/// `FileMutation` with a pre-resolved unified diff. Preference order:
+///   1. Gemini's own `resultDisplay.fileDiff` when present (real diff
+///      computed by the harness).
+///   2. Hand-rolled fallback from `args` (`old_string`/`new_string` for
+///      `replace`, `content` for `write_file`).
+///
+/// `tool_id` links back to the [`ToolCall`].
+fn compute_file_mutations(calls: &[ToolCall]) -> Vec<toolpath_convo::FileMutation> {
+    let mut out = Vec::new();
+    for call in calls {
+        if tool_category(&call.name) != Some(ToolCategory::FileWrite) {
+            continue;
+        }
+        let Some(path) = file_path_from_args(&call.args) else {
+            continue;
+        };
+        let raw_diff = call.file_diff().or_else(|| fallback_raw_diff(call));
+        let operation = match call.name.as_str() {
+            "write_file" => Some("add".to_string()),
+            "replace" | "edit" => Some("update".to_string()),
+            _ => Some(call.name.clone()),
+        };
+        let after = match call.name.as_str() {
+            "write_file" => call
+                .args
+                .get("content")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string()),
+            _ => None,
+        };
+        out.push(toolpath_convo::FileMutation {
+            path,
+            tool_id: Some(call.id.clone()),
+            operation,
+            raw_diff,
+            before: None,
+            after,
+            rename_to: None,
+        });
+    }
+    out
+}
+
+/// Synthesize a unified-diff hunk when Gemini's `resultDisplay.fileDiff`
+/// is absent. Not pixel-perfect but enough to give readers a change
+/// perspective.
+fn fallback_raw_diff(call: &ToolCall) -> Option<String> {
+    match call.name.as_str() {
+        "replace" => {
+            let old_s = call.args.get("old_string").and_then(|v| v.as_str())?;
+            let new_s = call.args.get("new_string").and_then(|v| v.as_str())?;
+            let old_lines: Vec<&str> = old_s.split('\n').collect();
+            let new_lines: Vec<&str> = new_s.split('\n').collect();
+            let mut buf = format!("@@ -1,{} +1,{} @@\n", old_lines.len(), new_lines.len());
+            for l in old_lines {
+                buf.push('-');
+                buf.push_str(l);
+                buf.push('\n');
+            }
+            for l in new_lines {
+                buf.push('+');
+                buf.push_str(l);
+                buf.push('\n');
+            }
+            Some(buf)
+        }
+        "write_file" => {
+            let content = call.args.get("content").and_then(|v| v.as_str())?;
+            let lines: Vec<&str> = content.split('\n').collect();
+            let mut buf = format!("@@ -0,0 +1,{} @@\n", lines.len());
+            for l in lines {
+                buf.push('+');
+                buf.push_str(l);
+                buf.push('\n');
+            }
+            Some(buf)
+        }
+        _ => None,
     }
 }
 
@@ -178,63 +253,6 @@ fn tool_call_to_invocation(call: &ToolCall) -> ToolInvocation {
         result,
         category: tool_category(&call.name),
     }
-}
-
-/// Collect fields that don't map cleanly onto the common `Turn` schema
-/// into a map that lives under `Turn.extra["gemini"]`.
-fn build_gemini_extra(msg: &GeminiMessage) -> Map<String, Value> {
-    let mut map = Map::new();
-
-    // Raw tokens struct (includes thoughts/tool/total not in the common schema).
-    if let Some(t) = &msg.tokens
-        && let Ok(v) = serde_json::to_value(t)
-    {
-        map.insert("tokens".to_string(), v);
-    }
-
-    // Full thought structs preserved verbatim. The flattened text also
-    // lands in Turn.thinking; this map is what the reverse projector uses
-    // to rebuild Gemini's `thoughts[]` array losslessly.
-    if !msg.thoughts().is_empty() {
-        let meta: Vec<Value> = msg
-            .thoughts()
-            .iter()
-            .map(|t| {
-                serde_json::json!({
-                    "subject": t.subject,
-                    "description": t.description,
-                    "timestamp": t.timestamp,
-                })
-            })
-            .collect();
-        map.insert("thoughts_meta".to_string(), Value::Array(meta));
-    }
-
-    // Tool call statuses (pending/executing/etc. — the result-only view
-    // on ToolInvocation loses this nuance).
-    if !msg.tool_calls().is_empty() {
-        let statuses: Vec<Value> = msg
-            .tool_calls()
-            .iter()
-            .map(|t| {
-                serde_json::json!({
-                    "id": t.id,
-                    "status": t.status,
-                    "result_display": t.result_display,
-                    "description": t.description,
-                    "display_name": t.display_name,
-                })
-            })
-            .collect();
-        map.insert("tool_call_meta".to_string(), Value::Array(statuses));
-    }
-
-    // Anything else that serde picked up via #[serde(flatten)]
-    for (k, v) in &msg.extra {
-        map.insert(k.clone(), v.clone());
-    }
-
-    map
 }
 
 // ── Delegation wiring ────────────────────────────────────────────────
@@ -359,8 +377,26 @@ fn conversation_to_view(convo: &Conversation) -> ConversationView {
         }
     }
 
+    // Gemini's wire format doesn't carry parent_id on messages, so link
+    // turns sequentially. (Matches the old `derive_path_from_view`,
+    // which used `last_step_id` as the parent for each new step.)
+    let mut prev: Option<String> = None;
+    for t in turns.iter_mut() {
+        if t.parent_id.is_none() {
+            t.parent_id = prev.clone();
+        }
+        prev = Some(t.id.clone());
+    }
+
     let total_usage = sum_usage(&turns);
     let files_changed = extract_files_changed(&turns);
+
+    let view_base = working_dir.as_ref().map(|wd| toolpath_convo::SessionBase {
+        working_dir: Some(wd.clone()),
+        vcs_revision: None,
+        vcs_branch: None,
+        vcs_remote: None,
+    });
 
     ConversationView {
         id: convo.session_uuid.clone(),
@@ -372,6 +408,11 @@ fn conversation_to_view(convo: &Conversation) -> ConversationView {
         files_changed,
         session_ids: vec![],
         events: vec![],
+        base: view_base,
+        producer: Some(toolpath_convo::ProducerInfo {
+            name: "gemini-cli".into(),
+            version: None,
+        }),
     }
 }
 
@@ -711,18 +752,6 @@ mod tests {
         let thinking = sub_turn.thinking.as_ref().unwrap();
         assert!(thinking.contains("Searching"));
         assert!(thinking.contains("looking in /auth"));
-    }
-
-    #[test]
-    fn test_extra_gemini_tokens_preserved() {
-        let (_t, p) = setup_provider();
-        let view =
-            ConversationProvider::load_conversation(&p, "/abs/myrepo", "session-uuid").unwrap();
-        let claude = view.turns[1].extra.get("gemini").expect("extra[gemini]");
-        let tokens = claude.get("tokens").unwrap();
-        assert_eq!(tokens["input"], 100);
-        assert_eq!(tokens["thoughts"], 10);
-        assert_eq!(tokens["total"], 160);
     }
 
     #[test]

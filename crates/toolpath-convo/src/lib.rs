@@ -69,6 +69,73 @@ pub struct TokenUsage {
     pub cache_write_tokens: Option<u32>,
 }
 
+/// Identity of the software that produced a session: e.g.
+/// `{ name: "codex-tui", version: "0.118.0" }`. Distinct from
+/// [`ConversationView::provider_id`] (which is the high-level family —
+/// `"codex"`, `"claude-code"` — used for dispatch).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ProducerInfo {
+    /// Producer name (e.g. `"codex-tui"`, `"claude-code"`, `"gemini-cli"`).
+    pub name: String,
+    /// Producer version, when the source format records one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+}
+
+/// Path-level base context for a conversation: where the session was rooted
+/// and against what VCS state. Populated by the provider's `to_view`; projects
+/// straight onto `Path.base` by `derive_path`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SessionBase {
+    /// Working directory (absolute path).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub working_dir: Option<String>,
+    /// VCS revision (commit hash, changeset id).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vcs_revision: Option<String>,
+    /// VCS branch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vcs_branch: Option<String>,
+    /// Repository URL or other origin identifier.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vcs_remote: Option<String>,
+}
+
+/// A file mutation resolved at view-construction time. Lives on the `Turn`
+/// that produced it; `derive_path` projects each entry into a sibling
+/// artifact change keyed by `path` with `structural.type == "file.write"`.
+/// `tool_id` links back to the specific `ToolInvocation` that caused the
+/// mutation when the provider can identify it (codex via `patch_apply_end`
+/// call_id, claude/gemini via tool-input attribution); `None` when the
+/// mutation is attributable only to the turn as a whole (opencode's
+/// snapshot diffs between turns).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct FileMutation {
+    /// File path (relative to `view.base.working_dir` if relative, or
+    /// `file://`/absolute).
+    pub path: String,
+    /// `ToolInvocation::id` of the tool call that produced this mutation,
+    /// when the provider can attribute it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_id: Option<String>,
+    /// Operation: `"add"`, `"update"`, `"delete"`, or a provider-specific tag.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operation: Option<String>,
+    /// Unified diff (the canonical perspective).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub raw_diff: Option<String>,
+    /// File contents before this mutation (when known).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub before: Option<String>,
+    /// File contents after this mutation (when known).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after: Option<String>,
+    /// When this mutation is a rename, the new path. Projected to
+    /// `structural.extra.rename_to`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rename_to: Option<String>,
+}
+
 /// Snapshot of the working environment when a turn was produced.
 ///
 /// All fields are optional. Providers populate what they have.
@@ -145,7 +212,7 @@ pub enum ToolCategory {
 }
 
 /// A tool invocation within a turn.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ToolInvocation {
     /// Provider-assigned identifier for this invocation.
     pub id: String,
@@ -211,17 +278,17 @@ pub struct Turn {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub delegations: Vec<DelegatedWork>,
 
-    /// Provider-specific data that doesn't fit the common schema.
-    ///
-    /// Providers namespace their data under a provider key (e.g.
-    /// `extra["claude"]` for Claude Code) to avoid collisions when
-    /// consumers work with multiple providers.
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    pub extra: HashMap<String, serde_json::Value>,
+    /// File mutations produced by this turn, with diffs pre-resolved by
+    /// the provider's `to_view`. Each entry projects to a sibling
+    /// `file.write` artifact change in the derived step. When the
+    /// mutation is attributable to a specific tool call, `tool_id` on
+    /// the entry links back to that `ToolInvocation::id`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub file_mutations: Vec<FileMutation>,
 }
 
 /// A complete conversation from any provider.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ConversationView {
     /// Unique session/conversation identifier.
     pub id: String,
@@ -259,6 +326,16 @@ pub struct ConversationView {
     /// be preserved for round-trip fidelity.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub events: Vec<ConversationEvent>,
+
+    /// Path-level base: where this session was rooted (`cwd`, git
+    /// commit/branch/remote). Projects directly to `Path.base`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base: Option<SessionBase>,
+
+    /// Producing software (CLI name + version). Distinct from
+    /// `provider_id`, which is the dispatch family.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub producer: Option<ProducerInfo>,
 }
 
 impl ConversationView {
@@ -476,7 +553,7 @@ mod tests {
                     token_usage: None,
                     environment: None,
                     delegations: vec![],
-                    extra: HashMap::new(),
+                    file_mutations: Vec::new(),
                 },
                 Turn {
                     id: "t2".into(),
@@ -505,7 +582,7 @@ mod tests {
                     }),
                     environment: None,
                     delegations: vec![],
-                    extra: HashMap::new(),
+                    file_mutations: Vec::new(),
                 },
                 Turn {
                     id: "t3".into(),
@@ -520,7 +597,7 @@ mod tests {
                     token_usage: None,
                     environment: None,
                     delegations: vec![],
-                    extra: HashMap::new(),
+                    file_mutations: Vec::new(),
                 },
             ],
             total_usage: None,
@@ -528,6 +605,7 @@ mod tests {
             files_changed: vec![],
             session_ids: vec![],
             events: vec![],
+            ..Default::default()
         }
     }
 
@@ -557,6 +635,7 @@ mod tests {
             files_changed: vec![],
             session_ids: vec![],
             events: vec![],
+            ..Default::default()
         };
         assert!(view.title(50).is_none());
     }
@@ -864,7 +943,7 @@ mod tests {
                 turns: vec![],
                 result: None,
             }],
-            extra: HashMap::new(),
+            file_mutations: Vec::new(),
         };
         let json = serde_json::to_string(&turn).unwrap();
         let back: Turn = serde_json::from_str(&json).unwrap();
@@ -902,6 +981,7 @@ mod tests {
             files_changed: vec!["src/main.rs".into(), "src/lib.rs".into()],
             session_ids: vec![],
             events: vec![],
+            ..Default::default()
         };
         let json = serde_json::to_string(&view).unwrap();
         let back: ConversationView = serde_json::from_str(&json).unwrap();
@@ -994,6 +1074,7 @@ mod tests {
                 event_type: "attachment".into(),
                 data: HashMap::new(),
             }],
+            ..Default::default()
         };
         let json = serde_json::to_string(&view).unwrap();
         assert!(json.contains("events"));
@@ -1014,6 +1095,7 @@ mod tests {
             files_changed: vec![],
             session_ids: vec![],
             events: vec![],
+            ..Default::default()
         };
         let json = serde_json::to_string(&view).unwrap();
         assert!(!json.contains("events"));

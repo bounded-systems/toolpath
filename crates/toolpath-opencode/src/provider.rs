@@ -28,7 +28,7 @@
 //!    its own id, linked by `session.parent_id`).
 
 use chrono::{TimeZone, Utc};
-use serde_json::{Map, Value};
+use serde_json::Value;
 use std::collections::HashMap;
 
 use crate::error::Result;
@@ -40,8 +40,8 @@ use crate::types::{
 };
 use toolpath_convo::{
     ConversationEvent, ConversationMeta, ConversationProvider, ConversationView,
-    ConvoError as ConvoTraitError, DelegatedWork, EnvironmentSnapshot, Role, TokenUsage,
-    ToolCategory, ToolInvocation, ToolResult, Turn,
+    ConvoError as ConvoTraitError, DelegatedWork, EnvironmentSnapshot, FileMutation, ProducerInfo,
+    Role, SessionBase, TokenUsage, ToolCategory, ToolInvocation, ToolResult, Turn,
 };
 
 /// Provider for opencode sessions.
@@ -149,9 +149,17 @@ pub fn native_name(category: ToolCategory, args: &Value) -> Option<&'static str>
 // ── Session → ConversationView ─────────────────────────────────────
 
 /// Convert a parsed opencode [`Session`] to the provider-agnostic
-/// [`ConversationView`] shape.
+/// [`ConversationView`] shape. File mutations from the snapshot git repo
+/// are not populated; use [`to_view_with_resolver`] when you have one.
 pub fn to_view(session: &Session) -> ConversationView {
-    Builder::new(session).build()
+    to_view_with_resolver(session, &PathResolver::new())
+}
+
+/// Like [`to_view`] but opens opencode's snapshot git repository via the
+/// resolver and pre-resolves each turn's file mutations against the
+/// snapshot pair. Falls back silently when the repo isn't present.
+pub fn to_view_with_resolver(session: &Session, resolver: &PathResolver) -> ConversationView {
+    Builder::new(session).build_with_resolver(resolver)
 }
 
 struct Builder<'a> {
@@ -162,6 +170,14 @@ struct Builder<'a> {
     files_changed_seen: std::collections::HashSet<String>,
     total_usage: TokenUsage,
     total_usage_set: bool,
+    /// Snapshot git repo, when one's been opened by `build_with_resolver`.
+    /// Used inline by `handle_assistant_message` to compute per-turn
+    /// `file_mutations` from snapshot tree↔tree diffs.
+    snapshot_repo: Option<git2::Repository>,
+    /// The previous assistant turn's ending snapshot SHA. Used as the
+    /// `before` of the next turn's snapshot pair so intermediate state
+    /// captures correctly.
+    prev_snapshot_after: Option<String>,
 }
 
 impl<'a> Builder<'a> {
@@ -174,7 +190,54 @@ impl<'a> Builder<'a> {
             files_changed_seen: std::collections::HashSet::new(),
             total_usage: TokenUsage::default(),
             total_usage_set: false,
+            snapshot_repo: None,
+            prev_snapshot_after: None,
         }
+    }
+
+    fn build_with_resolver(mut self, resolver: &PathResolver) -> ConversationView {
+        let session_version = self.session.version.clone();
+        let session_directory = self.session.directory.to_string_lossy().to_string();
+        let session_project_id = self.session.project_id.clone();
+        self.snapshot_repo = resolver
+            .snapshot_gitdir(&session_project_id, &self.session.directory)
+            .ok()
+            .and_then(|gd| git2::Repository::open(gd).ok());
+
+        let mut view = self.build();
+
+        // Producer + base.
+        view.producer = Some(ProducerInfo {
+            name: "opencode".into(),
+            version: Some(session_version),
+        });
+        view.base = Some(SessionBase {
+            working_dir: Some(session_directory),
+            vcs_revision: Some(session_project_id),
+            vcs_branch: None,
+            vcs_remote: None,
+        });
+
+        // opencode's wire format carries `parentID` on assistant messages
+        // pointing back at the previous user message — that's the natural
+        // chain. User messages legitimately have no parent. Don't
+        // synthesize anything here (would break the matrix idempotence:
+        // user turns would gain a synthetic parent that the projector
+        // can't preserve, causing parent_id graphs to diverge across
+        // iterations).
+
+        // Refresh files_changed so it matches what landed on turns.
+        let mut seen = std::collections::HashSet::new();
+        let mut ordered = Vec::new();
+        for turn in &view.turns {
+            for fm in &turn.file_mutations {
+                if seen.insert(fm.path.clone()) {
+                    ordered.push(fm.path.clone());
+                }
+            }
+        }
+        view.files_changed = ordered;
+        view
     }
 
     fn build(mut self) -> ConversationView {
@@ -208,37 +271,17 @@ impl<'a> Builder<'a> {
             files_changed: self.files_changed_order,
             session_ids: vec![self.session.id.clone()],
             events: self.events,
+            ..Default::default()
         }
     }
 
-    fn handle_user_message(&mut self, msg: &Message, u: &UserMessage) {
+    fn handle_user_message(&mut self, msg: &Message, _u: &UserMessage) {
         let text = concat_text_parts(&msg.parts);
         let environment = Some(EnvironmentSnapshot {
             working_dir: Some(self.session.directory.to_string_lossy().to_string()),
             vcs_branch: None,
             vcs_revision: None,
         });
-        let mut extra: HashMap<String, Value> = HashMap::new();
-        let mut opencode_extra = Map::new();
-        opencode_extra.insert("agent".into(), Value::String(u.agent.clone()));
-        opencode_extra.insert(
-            "model".into(),
-            serde_json::to_value(&u.model).unwrap_or(Value::Null),
-        );
-        if let Some(tools) = &u.tools {
-            opencode_extra.insert(
-                "tools".into(),
-                serde_json::to_value(tools).unwrap_or(Value::Null),
-            );
-        }
-        if let Some(system) = &u.system
-            && !system.is_empty()
-        {
-            opencode_extra.insert("system".into(), Value::String(system.clone()));
-        }
-        if !opencode_extra.is_empty() {
-            extra.insert("opencode".into(), Value::Object(opencode_extra));
-        }
 
         self.turns.push(Turn {
             id: msg.id.clone(),
@@ -253,7 +296,7 @@ impl<'a> Builder<'a> {
             token_usage: None,
             environment,
             delegations: Vec::new(),
-            extra,
+            file_mutations: Vec::new(),
         });
     }
 
@@ -262,11 +305,9 @@ impl<'a> Builder<'a> {
         let mut thinking_chunks: Vec<String> = Vec::new();
         let mut tool_uses: Vec<ToolInvocation> = Vec::new();
         let mut snapshots: Vec<String> = Vec::new();
-        let mut patches: Vec<Value> = Vec::new();
         let mut delegations: Vec<DelegatedWork> = Vec::new();
         let mut step_usage = TokenUsage::default();
         let mut step_usage_set = false;
-        let mut step_cost_total = 0.0_f64;
         let mut stop_reason: Option<String> = None;
 
         for p in &msg.parts {
@@ -303,7 +344,6 @@ impl<'a> Builder<'a> {
                     }
                     accumulate_tokens(&mut step_usage, &sf.tokens);
                     step_usage_set = true;
-                    step_cost_total += sf.cost;
                     stop_reason = Some(sf.reason.clone());
                 }
                 PartData::Snapshot(s) => {
@@ -312,10 +352,6 @@ impl<'a> Builder<'a> {
                     }
                 }
                 PartData::Patch(pp) => {
-                    patches.push(serde_json::json!({
-                        "hash": pp.hash,
-                        "files": pp.files,
-                    }));
                     for f in &pp.files {
                         if self.files_changed_seen.insert(f.clone()) {
                             self.files_changed_order.push(f.clone());
@@ -398,29 +434,14 @@ impl<'a> Builder<'a> {
             vcs_revision: None,
         });
 
-        let mut extra: HashMap<String, Value> = HashMap::new();
-        let mut opencode_extra: Map<String, Value> = Map::new();
-        opencode_extra.insert("agent".into(), Value::String(a.agent.clone()));
-        opencode_extra.insert("providerID".into(), Value::String(a.provider_id.clone()));
-        opencode_extra.insert("modelID".into(), Value::String(a.model_id.clone()));
-        opencode_extra.insert("cost_step_total".into(), json_num(step_cost_total));
-        opencode_extra.insert("cost_message".into(), json_num(a.cost));
-        if !snapshots.is_empty() {
-            opencode_extra.insert(
-                "snapshots".into(),
-                Value::Array(snapshots.into_iter().map(Value::String).collect()),
-            );
-        }
-        if !patches.is_empty() {
-            opencode_extra.insert("patches".into(), Value::Array(patches));
-        }
-        if let Some(v) = &a.variant {
-            opencode_extra.insert("variant".into(), Value::String(v.clone()));
-        }
-        if let Some(err) = &a.error {
-            opencode_extra.insert("error".into(), err.clone());
-        }
-        extra.insert("opencode".into(), Value::Object(opencode_extra));
+        // Compute `file_mutations` for this turn inline:
+        //   1. If we have a snapshot repo AND a snapshot pair (prev_after,
+        //      this turn's last snapshot), walk the git2 tree↔tree diff
+        //      and add a FileMutation per touched file.
+        //   2. For any file-write tool whose path wasn't covered by the
+        //      snapshot diff, add a tool-input-derived FileMutation
+        //      (catches gitignored paths and the no-repo case).
+        let file_mutations = self.compute_turn_mutations(&snapshots, &tool_uses);
 
         self.turns.push(Turn {
             id: msg.id.clone(),
@@ -447,8 +468,71 @@ impl<'a> Builder<'a> {
             token_usage,
             environment,
             delegations,
-            extra,
+            file_mutations,
         });
+    }
+
+    fn compute_turn_mutations(
+        &mut self,
+        snapshots: &[String],
+        tool_uses: &[ToolInvocation],
+    ) -> Vec<FileMutation> {
+        let mut out: Vec<FileMutation> = Vec::new();
+        let mut covered: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+        // Snapshot diff (when repo + pair available).
+        if let (Some(repo), Some(first), Some(last)) =
+            (self.snapshot_repo.as_ref(), snapshots.first(), snapshots.last())
+        {
+            let before = self
+                .prev_snapshot_after
+                .clone()
+                .unwrap_or_else(|| first.clone());
+            let after = last.clone();
+            self.prev_snapshot_after = Some(after.clone());
+            if before != after {
+                match diff_trees(repo, &before, &after) {
+                    Ok(mutations) => {
+                        for fm in mutations {
+                            covered.insert(fm.path.clone());
+                            out.push(fm);
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!(
+                            "Warning: snapshot diff {}..{} failed: {}",
+                            &before[..before.len().min(8)],
+                            &after[..after.len().min(8)],
+                            e
+                        );
+                    }
+                }
+            }
+        } else if let Some(last) = snapshots.last() {
+            // Track even when we can't diff, so subsequent turns still
+            // chain off the right `before`.
+            self.prev_snapshot_after = Some(last.clone());
+        }
+
+        // Tool-input fallback for file-write tools whose paths aren't
+        // already covered by a snapshot-diff mutation.
+        for tu in tool_uses {
+            let Some(path) = tool_input_file_path(tu) else {
+                continue;
+            };
+            if covered.contains(&path) {
+                continue;
+            }
+            covered.insert(path.clone());
+            out.push(FileMutation {
+                path,
+                tool_id: Some(tu.id.clone()),
+                operation: Some(tool_to_operation(&tu.name).to_string()),
+                ..Default::default()
+            });
+        }
+
+        out
     }
 }
 
@@ -583,12 +667,6 @@ fn to_data_map(v: &Value) -> HashMap<String, Value> {
     }
 }
 
-fn json_num(v: f64) -> Value {
-    serde_json::Number::from_f64(v)
-        .map(Value::Number)
-        .unwrap_or(Value::Null)
-}
-
 // ── ConversationProvider trait impl ─────────────────────────────────
 
 impl ConversationProvider for OpencodeConvo {
@@ -646,6 +724,119 @@ impl ConversationProvider for OpencodeConvo {
                 successor: None,
             })
             .collect())
+    }
+}
+
+// ── Snapshot diff helpers ──────────────────────────────────────────────
+
+fn tool_input_file_path(tu: &ToolInvocation) -> Option<String> {
+    tu.input
+        .get("filePath")
+        .or_else(|| tu.input.get("file_path"))
+        .or_else(|| tu.input.get("path"))
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+}
+
+fn tool_to_operation(name: &str) -> &'static str {
+    match name {
+        "write" => "add",
+        "edit" | "multiedit" | "patch" => "update",
+        "delete" | "rm" => "delete",
+        _ => "touch",
+    }
+}
+
+fn diff_trees(
+    repo: &git2::Repository,
+    before: &str,
+    after: &str,
+) -> std::result::Result<Vec<FileMutation>, git2::Error> {
+    let before_obj = repo.revparse_single(before)?;
+    let after_obj = repo.revparse_single(after)?;
+    let before_tree = before_obj.peel_to_tree()?;
+    let after_tree = after_obj.peel_to_tree()?;
+
+    let mut opts = git2::DiffOptions::new();
+    opts.context_lines(3);
+    opts.include_ignored(false);
+    opts.ignore_submodules(true);
+    let diff = repo.diff_tree_to_tree(Some(&before_tree), Some(&after_tree), Some(&mut opts))?;
+
+    use std::path::PathBuf;
+    let mut by_path: HashMap<PathBuf, (String, &'static str, Option<PathBuf>)> = HashMap::new();
+
+    diff.print(git2::DiffFormat::Patch, |delta, _hunk, line| {
+        let Some(new_path) = delta.new_file().path() else {
+            if let Some(old) = delta.old_file().path() {
+                let buf = by_path
+                    .entry(old.to_path_buf())
+                    .or_insert_with(|| (String::new(), "delete", None));
+                append_diff_line(&mut buf.0, line);
+            }
+            return true;
+        };
+        let op = classify_delta(&delta);
+        let entry = by_path.entry(new_path.to_path_buf()).or_insert_with(|| {
+            (
+                String::new(),
+                op,
+                delta.old_file().path().map(|p| p.to_path_buf()),
+            )
+        });
+        append_diff_line(&mut entry.0, line);
+        true
+    })?;
+
+    let mut out: Vec<FileMutation> = by_path
+        .into_iter()
+        .map(|(path, (raw_diff, op, old_path))| FileMutation {
+            path: path.to_string_lossy().into_owned(),
+            tool_id: None,
+            operation: Some(op.to_string()),
+            raw_diff: if raw_diff.is_empty() {
+                None
+            } else {
+                Some(raw_diff)
+            },
+            before: None,
+            after: None,
+            rename_to: if op == "rename" {
+                old_path.map(|p| p.to_string_lossy().into_owned())
+            } else {
+                None
+            },
+        })
+        .collect();
+    out.sort_by(|a, b| a.path.cmp(&b.path));
+    Ok(out)
+}
+
+fn classify_delta(delta: &git2::DiffDelta) -> &'static str {
+    use git2::Delta;
+    match delta.status() {
+        Delta::Added => "add",
+        Delta::Deleted => "delete",
+        Delta::Modified => "update",
+        Delta::Renamed => "rename",
+        Delta::Copied => "copy",
+        Delta::Typechange => "update",
+        _ => "update",
+    }
+}
+
+fn append_diff_line(buf: &mut String, line: git2::DiffLine<'_>) {
+    use git2::DiffLineType;
+    let prefix = match line.origin_value() {
+        DiffLineType::Context => " ",
+        DiffLineType::Addition => "+",
+        DiffLineType::Deletion => "-",
+        DiffLineType::ContextEOFNL | DiffLineType::AddEOFNL | DiffLineType::DeleteEOFNL => "",
+        _ => "",
+    };
+    buf.push_str(prefix);
+    if let Ok(s) = std::str::from_utf8(line.content()) {
+        buf.push_str(s);
     }
 }
 
@@ -752,21 +943,6 @@ mod tests {
         let write = &assistant.tool_uses[1];
         assert_eq!(write.name, "write");
         assert_eq!(write.category, Some(ToolCategory::FileWrite));
-    }
-
-    #[test]
-    fn snapshots_surface_on_assistant_extra() {
-        let (_t, mgr) = setup(BASIC_SQL);
-        let view = to_view(&mgr.read_session("ses_x").unwrap());
-        let assistant = &view.turns[1];
-        let snaps = assistant.extra["opencode"]["snapshots"].as_array().unwrap();
-        assert_eq!(
-            snaps,
-            &[
-                Value::String("snap_a".into()),
-                Value::String("snap_b".into())
-            ]
-        );
     }
 
     #[test]

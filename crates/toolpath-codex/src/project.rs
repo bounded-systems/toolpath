@@ -53,14 +53,8 @@ use crate::types::{
 ///
 /// let view = ConversationView {
 ///     id: "session-uuid".into(),
-///     started_at: None,
-///     last_activity: None,
-///     turns: vec![],
-///     total_usage: None,
 ///     provider_id: Some("codex".into()),
-///     files_changed: vec![],
-///     session_ids: vec![],
-///     events: vec![],
+///     ..Default::default()
 /// };
 ///
 /// let session = CodexProjector::default().project(&view).unwrap();
@@ -243,13 +237,12 @@ fn make_turn_context_line(
     }
 }
 
-/// Pull `Turn.extra["codex"]` if present (the namespace forward path
-/// uses). Foreign-namespace extras are intentionally not consulted.
-fn codex_extras(turn: &Turn) -> Option<&Map<String, Value>> {
-    turn.extra.get("codex").and_then(|v| match v {
-        Value::Object(m) => Some(m),
-        _ => None,
-    })
+/// Used to return `Turn.extra["codex"]`; the IR no longer carries
+/// provider-namespaced extras. Always `None`. Callers fall back to
+/// reconstructing source-format details from typed IR fields and
+/// reasonable defaults.
+fn codex_extras(_turn: &Turn) -> Option<&'static Map<String, Value>> {
+    None
 }
 
 fn emit_turn_lines(
@@ -656,7 +649,6 @@ fn convo_usage_to_codex_json(u: &toolpath_convo::TokenUsage) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
     use toolpath_convo::{TokenUsage, ToolCategory, ToolInvocation, ToolResult};
 
     fn user_turn(id: &str, text: &str) -> Turn {
@@ -673,7 +665,7 @@ mod tests {
             token_usage: None,
             environment: None,
             delegations: vec![],
-            extra: HashMap::new(),
+            file_mutations: Vec::new(),
         }
     }
 
@@ -696,7 +688,7 @@ mod tests {
             }),
             environment: None,
             delegations: vec![],
-            extra: HashMap::new(),
+            file_mutations: Vec::new(),
         }
     }
 
@@ -711,6 +703,7 @@ mod tests {
             files_changed: vec![],
             session_ids: vec![],
             events: vec![],
+            ..Default::default()
         }
     }
 
@@ -905,62 +898,6 @@ mod tests {
         assert!(summary.is_array());
         assert_eq!(summary[0]["type"], "summary_text");
         assert_eq!(summary[0]["text"], "hmm let me consider");
-    }
-
-    #[test]
-    fn codex_extras_reasoning_encrypted_round_trips_verbatim() {
-        let mut t = assistant_turn("a1", "Done.");
-        t.extra.insert(
-            "codex".into(),
-            json!({
-                "reasoning_encrypted": ["gAAAAAB-fake-blob-1", "gAAAAAB-fake-blob-2"]
-            }),
-        );
-        let s = CodexProjector::default()
-            .project(&view_with(vec![t]))
-            .unwrap();
-        let reasoning_lines: Vec<&RolloutLine> = s
-            .lines
-            .iter()
-            .filter(|l| l.payload.get("type").and_then(Value::as_str) == Some("reasoning"))
-            .collect();
-        assert_eq!(reasoning_lines.len(), 2);
-        assert_eq!(
-            reasoning_lines[0].payload["encrypted_content"],
-            "gAAAAAB-fake-blob-1"
-        );
-        assert_eq!(
-            reasoning_lines[1].payload["encrypted_content"],
-            "gAAAAAB-fake-blob-2"
-        );
-    }
-
-    #[test]
-    fn foreign_namespace_extras_are_dropped() {
-        // Turn.extra["claude"] / Turn.extra["gemini"] must NOT appear
-        // anywhere on the projected lines.
-        let mut t = assistant_turn("a1", "hi");
-        t.extra.insert(
-            "claude".into(),
-            json!({"version": "2.1.116", "user_type": "external"}),
-        );
-        t.extra.insert("gemini".into(), json!({"foo": "bar"}));
-        let s = CodexProjector::default()
-            .project(&view_with(vec![t]))
-            .unwrap();
-        for line in &s.lines {
-            let serialized = serde_json::to_string(line).unwrap();
-            assert!(
-                !serialized.contains("\"version\":\"2.1.116\""),
-                "claude leak: {}",
-                serialized
-            );
-            assert!(
-                !serialized.contains("\"foo\":\"bar\""),
-                "gemini leak: {}",
-                serialized
-            );
-        }
     }
 
     #[test]

@@ -17,11 +17,12 @@ use crate::types::{
     AgentMessage, ContentBlock, Entry, MessageContent, StopReason, ToolResultContent, Usage,
 };
 use chrono::{DateTime, Utc};
-use serde_json::{Map, Value, json};
+use serde_json::{Value, json};
 use std::collections::HashMap;
 use toolpath_convo::{
     ConversationMeta, ConversationProvider, ConversationView, ConvoError, DelegatedWork,
-    EnvironmentSnapshot, Role, TokenUsage, ToolCategory, ToolInvocation, ToolResult, Turn,
+    EnvironmentSnapshot, Role, SessionBase, TokenUsage, ToolCategory, ToolInvocation, ToolResult,
+    Turn,
 };
 
 // ── Classification helpers ───────────────────────────────────────────
@@ -204,30 +205,6 @@ fn truncate_output(output: &str, max: usize) -> String {
     }
 }
 
-// ── Pending-metadata buffer ──────────────────────────────────────────
-
-#[derive(Default)]
-struct PendingMeta {
-    model_change: Option<Value>,
-    thinking_level_change: Option<Value>,
-    labels: Vec<Value>,
-}
-
-impl PendingMeta {
-    fn drain_into(&mut self, pi: &mut Map<String, Value>) {
-        if let Some(v) = self.model_change.take() {
-            pi.insert("modelChange".to_string(), v);
-        }
-        if let Some(v) = self.thinking_level_change.take() {
-            pi.insert("thinkingLevelChange".to_string(), v);
-        }
-        if !self.labels.is_empty() {
-            let labels = std::mem::take(&mut self.labels);
-            pi.insert("labels".to_string(), Value::Array(labels));
-        }
-    }
-}
-
 // ── Main conversion ──────────────────────────────────────────────────
 
 /// Convert a PiSession into a provider-agnostic ConversationView.
@@ -248,86 +225,18 @@ pub fn session_to_view(session: &PiSession) -> ConversationView {
     // Per-turn tool-result info: (tool_call_id, content, is_error).
     let mut tool_result_payloads: Vec<(usize, String, String, bool)> = Vec::new();
 
-    let mut pending = PendingMeta::default();
-    let mut is_first_turn = true;
-
     for entry in &session.entries {
         match entry {
             Entry::Session(_) => continue,
 
-            Entry::ModelChange {
-                base,
-                provider,
-                model_id,
-                extra,
-                ..
-            } => {
-                let mut m = Map::new();
-                m.insert("id".to_string(), json!(base.id));
-                m.insert("timestamp".to_string(), json!(base.timestamp));
-                m.insert("provider".to_string(), json!(provider));
-                m.insert("modelId".to_string(), json!(model_id));
-                if !extra.is_empty() {
-                    m.insert("rawExtra".to_string(), json!(extra));
-                }
-                pending.model_change = Some(Value::Object(m));
+            Entry::ModelChange { .. }
+            | Entry::ThinkingLevelChange { .. }
+            | Entry::Label { .. } => {
+                // Discarded — these influence rendering only and don't map onto
+                // a cross-harness IR field.
             }
 
-            Entry::ThinkingLevelChange {
-                base,
-                thinking_level,
-                extra,
-                ..
-            } => {
-                let mut m = Map::new();
-                m.insert("id".to_string(), json!(base.id));
-                m.insert("timestamp".to_string(), json!(base.timestamp));
-                m.insert("thinkingLevel".to_string(), json!(thinking_level));
-                if !extra.is_empty() {
-                    m.insert("rawExtra".to_string(), json!(extra));
-                }
-                pending.thinking_level_change = Some(Value::Object(m));
-            }
-
-            Entry::Label { base, extra, .. } => {
-                let mut m = Map::new();
-                m.insert("id".to_string(), json!(base.id));
-                m.insert("timestamp".to_string(), json!(base.timestamp));
-                if !extra.is_empty() {
-                    m.insert("rawExtra".to_string(), json!(extra));
-                }
-                pending.labels.push(Value::Object(m));
-            }
-
-            Entry::Compaction {
-                base,
-                summary,
-                first_kept_entry_id,
-                tokens_before,
-                details,
-                from_hook,
-                extra,
-                ..
-            } => {
-                let mut pi = Map::new();
-                let mut comp = Map::new();
-                comp.insert("summary".to_string(), json!(summary));
-                comp.insert("firstKeptEntryId".to_string(), json!(first_kept_entry_id));
-                comp.insert("tokensBefore".to_string(), json!(tokens_before));
-                if let Some(d) = details {
-                    comp.insert("details".to_string(), d.clone());
-                }
-                if let Some(fh) = from_hook {
-                    comp.insert("fromHook".to_string(), json!(fh));
-                }
-                pi.insert("compaction".to_string(), Value::Object(comp));
-                if !extra.is_empty() {
-                    pi.insert("rawExtra".to_string(), json!(extra));
-                }
-                pending.drain_into(&mut pi);
-                attach_first_turn_meta(&mut pi, &mut is_first_turn, session);
-                let mut extra_map = HashMap::new();
-                extra_map.insert("pi".to_string(), Value::Object(pi));
+            Entry::Compaction { base, summary, .. } => {
                 turns.push(Turn {
                     id: base.id.clone(),
                     parent_id: base.parent_id.clone(),
@@ -341,36 +250,11 @@ pub fn session_to_view(session: &PiSession) -> ConversationView {
                     token_usage: None,
                     environment: Some(env.clone()),
                     delegations: vec![],
-                    extra: extra_map,
+                    file_mutations: Vec::new(),
                 });
             }
 
-            Entry::BranchSummary {
-                base,
-                from_id,
-                summary,
-                details,
-                from_hook,
-                extra,
-                ..
-            } => {
-                let mut pi = Map::new();
-                let mut bs = Map::new();
-                bs.insert("fromId".to_string(), json!(from_id));
-                if let Some(d) = details {
-                    bs.insert("details".to_string(), d.clone());
-                }
-                if let Some(fh) = from_hook {
-                    bs.insert("fromHook".to_string(), json!(fh));
-                }
-                pi.insert("branchSummary".to_string(), Value::Object(bs));
-                if !extra.is_empty() {
-                    pi.insert("rawExtra".to_string(), json!(extra));
-                }
-                pending.drain_into(&mut pi);
-                attach_first_turn_meta(&mut pi, &mut is_first_turn, session);
-                let mut extra_map = HashMap::new();
-                extra_map.insert("pi".to_string(), Value::Object(pi));
+            Entry::BranchSummary { base, summary, .. } => {
                 turns.push(Turn {
                     id: base.id.clone(),
                     parent_id: base.parent_id.clone(),
@@ -384,29 +268,11 @@ pub fn session_to_view(session: &PiSession) -> ConversationView {
                     token_usage: None,
                     environment: Some(env.clone()),
                     delegations: vec![],
-                    extra: extra_map,
+                    file_mutations: Vec::new(),
                 });
             }
 
-            Entry::Custom {
-                base,
-                custom_type,
-                data,
-                extra,
-                ..
-            } => {
-                let mut pi = Map::new();
-                let mut c = Map::new();
-                c.insert("customType".to_string(), json!(custom_type));
-                c.insert("data".to_string(), Value::Object(data.clone()));
-                pi.insert("custom".to_string(), Value::Object(c));
-                if !extra.is_empty() {
-                    pi.insert("rawExtra".to_string(), json!(extra));
-                }
-                pending.drain_into(&mut pi);
-                attach_first_turn_meta(&mut pi, &mut is_first_turn, session);
-                let mut extra_map = HashMap::new();
-                extra_map.insert("pi".to_string(), Value::Object(pi));
+            Entry::Custom { base, .. } => {
                 turns.push(Turn {
                     id: base.id.clone(),
                     parent_id: base.parent_id.clone(),
@@ -420,7 +286,7 @@ pub fn session_to_view(session: &PiSession) -> ConversationView {
                     token_usage: None,
                     environment: Some(env.clone()),
                     delegations: vec![],
-                    extra: extra_map,
+                    file_mutations: Vec::new(),
                 });
             }
 
@@ -428,26 +294,8 @@ pub fn session_to_view(session: &PiSession) -> ConversationView {
                 base,
                 custom_type,
                 content,
-                display,
-                details,
-                extra,
                 ..
             } => {
-                let mut pi = Map::new();
-                let mut cm = Map::new();
-                cm.insert("customType".to_string(), json!(custom_type));
-                cm.insert("display".to_string(), json!(display));
-                if let Some(d) = details {
-                    cm.insert("details".to_string(), d.clone());
-                }
-                pi.insert("customMessage".to_string(), Value::Object(cm));
-                if !extra.is_empty() {
-                    pi.insert("rawExtra".to_string(), json!(extra));
-                }
-                pending.drain_into(&mut pi);
-                attach_first_turn_meta(&mut pi, &mut is_first_turn, session);
-                let mut extra_map = HashMap::new();
-                extra_map.insert("pi".to_string(), Value::Object(pi));
                 turns.push(Turn {
                     id: base.id.clone(),
                     parent_id: base.parent_id.clone(),
@@ -461,17 +309,11 @@ pub fn session_to_view(session: &PiSession) -> ConversationView {
                     token_usage: None,
                     environment: Some(env.clone()),
                     delegations: vec![],
-                    extra: extra_map,
+                    file_mutations: Vec::new(),
                 });
             }
 
-            Entry::Message {
-                base,
-                message,
-                extra: entry_extra,
-                ..
-            } => {
-                let mut pi = Map::new();
+            Entry::Message { base, message, .. } => {
                 let text;
                 let mut thinking = None;
                 let mut tool_uses: Vec<ToolInvocation> = Vec::new();
@@ -482,23 +324,16 @@ pub fn session_to_view(session: &PiSession) -> ConversationView {
                 let role: Role;
 
                 match message {
-                    AgentMessage::User { content, extra, .. } => {
+                    AgentMessage::User { content, .. } => {
                         role = Role::User;
                         text = extract_user_text(content);
-                        if !extra.is_empty() {
-                            pi.insert("rawExtra".to_string(), json!(extra));
-                        }
                     }
 
                     AgentMessage::Assistant {
                         content,
-                        api,
-                        provider,
                         model: m,
                         usage,
                         stop_reason,
-                        error_message,
-                        extra,
                         ..
                     } => {
                         role = Role::Assistant;
@@ -539,74 +374,38 @@ pub fn session_to_view(session: &PiSession) -> ConversationView {
                                 });
                             }
                         }
-
-                        let mut api_obj = Map::new();
-                        api_obj.insert("provider".to_string(), json!(provider));
-                        api_obj.insert("api".to_string(), json!(api));
-                        pi.insert("api".to_string(), Value::Object(api_obj));
-                        pi.insert(
-                            "stopReason".to_string(),
-                            serde_json::to_value(stop_reason).unwrap_or(Value::Null),
-                        );
-                        if let Some(err) = error_message {
-                            pi.insert("errorMessage".to_string(), json!(err));
-                        }
-                        if !extra.is_empty() {
-                            pi.insert("rawExtra".to_string(), json!(extra));
-                        }
                     }
 
                     AgentMessage::ToolResult {
                         tool_call_id,
-                        tool_name,
                         content,
                         is_error,
-                        details,
-                        extra,
                         ..
                     } => {
-                        role = Role::Other("tool".to_string());
-                        text = extract_tool_result_text(content);
-                        pi.insert("toolCallId".to_string(), json!(tool_call_id));
-                        pi.insert("toolName".to_string(), json!(tool_name));
-                        pi.insert("isError".to_string(), json!(is_error));
-                        if let Some(d) = details {
-                            pi.insert("details".to_string(), d.clone());
-                        }
-                        if !extra.is_empty() {
-                            pi.insert("rawExtra".to_string(), json!(extra));
-                        }
+                        // Tool results fold onto the matching assistant
+                        // turn's `tool_uses[i].result` via pass 2. We don't
+                        // emit them as standalone turns — that mirrors how
+                        // claude/gemini/codex/opencode derive treats tool
+                        // results, and keeps Pi → Pi idempotent without
+                        // smuggling tool_call_id through Turn.extra.
                         tool_result_payloads.push((
-                            turns.len(),
+                            usize::MAX,
                             tool_call_id.clone(),
-                            text.clone(),
+                            extract_tool_result_text(content),
                             *is_error,
                         ));
+                        continue;
                     }
 
                     AgentMessage::BashExecution {
                         command,
                         output,
                         exit_code,
-                        cancelled,
-                        truncated,
-                        full_output_path,
-                        extra,
                         ..
                     } => {
                         role = Role::Other("bash".to_string());
                         let out_trunc = truncate_output(output, 4096);
                         text = format!("$ {}\n{}", command, out_trunc);
-                        pi.insert("command".to_string(), json!(command));
-                        pi.insert("exitCode".to_string(), json!(exit_code));
-                        pi.insert("cancelled".to_string(), json!(cancelled));
-                        pi.insert("truncated".to_string(), json!(truncated));
-                        if let Some(fop) = full_output_path {
-                            pi.insert("fullOutputPath".to_string(), json!(fop));
-                        }
-                        if !extra.is_empty() {
-                            pi.insert("rawExtra".to_string(), json!(extra));
-                        }
                         // Synthetic ToolInvocation representing the bash run itself.
                         tool_uses.push(ToolInvocation {
                             id: base.id.clone(),
@@ -623,49 +422,17 @@ pub fn session_to_view(session: &PiSession) -> ConversationView {
                     AgentMessage::Custom {
                         custom_type,
                         content,
-                        display,
-                        details,
-                        extra,
                         ..
                     } => {
                         role = Role::Other(format!("custom:{}", custom_type));
                         text = extract_user_text(content);
-                        pi.insert("customType".to_string(), json!(custom_type));
-                        pi.insert("display".to_string(), json!(display));
-                        if let Some(d) = details {
-                            pi.insert("details".to_string(), d.clone());
-                        }
-                        if !extra.is_empty() {
-                            pi.insert("rawExtra".to_string(), json!(extra));
-                        }
                     }
 
-                    AgentMessage::BranchSummary { extra, .. } => {
+                    AgentMessage::BranchSummary { .. } | AgentMessage::CompactionSummary { .. } => {
                         role = Role::System;
                         text = String::new();
-                        if !extra.is_empty() {
-                            pi.insert("rawExtra".to_string(), json!(extra));
-                        }
-                    }
-
-                    AgentMessage::CompactionSummary { extra, .. } => {
-                        role = Role::System;
-                        text = String::new();
-                        if !extra.is_empty() {
-                            pi.insert("rawExtra".to_string(), json!(extra));
-                        }
                     }
                 }
-
-                if !entry_extra.is_empty() {
-                    pi.insert("entryExtra".to_string(), json!(entry_extra));
-                }
-
-                pending.drain_into(&mut pi);
-                attach_first_turn_meta(&mut pi, &mut is_first_turn, session);
-
-                let mut extra_map = HashMap::new();
-                extra_map.insert("pi".to_string(), Value::Object(pi));
 
                 turns.push(Turn {
                     id: base.id.clone(),
@@ -680,7 +447,7 @@ pub fn session_to_view(session: &PiSession) -> ConversationView {
                     token_usage,
                     environment: Some(env.clone()),
                     delegations,
-                    extra: extra_map,
+                    file_mutations: Vec::new(),
                 });
             }
         }
@@ -752,6 +519,15 @@ pub fn session_to_view(session: &PiSession) -> ConversationView {
     let started_at = parse_ts(&session.header.timestamp);
     let last_activity = turns.last().and_then(|t| parse_ts(&t.timestamp));
 
+    let base = if session.header.cwd.is_empty() {
+        None
+    } else {
+        Some(SessionBase {
+            working_dir: Some(session.header.cwd.clone()),
+            ..Default::default()
+        })
+    };
+
     ConversationView {
         id: session.header.id.clone(),
         started_at,
@@ -762,16 +538,8 @@ pub fn session_to_view(session: &PiSession) -> ConversationView {
         files_changed,
         session_ids,
         events: vec![],
-    }
-}
-
-/// On the first emitted turn, attach `parentSession` annotation if present.
-fn attach_first_turn_meta(pi: &mut Map<String, Value>, is_first: &mut bool, session: &PiSession) {
-    if *is_first {
-        if let Some(parent) = &session.header.parent_session {
-            pi.insert("parentSession".to_string(), json!(parent));
-        }
-        *is_first = false;
+        base,
+        ..Default::default()
     }
 }
 
@@ -1103,7 +871,9 @@ mod tests {
     }
 
     #[test]
-    fn test_tool_result_appears_as_own_turn() {
+    fn test_orphan_tool_result_is_dropped() {
+        // A ToolResult entry without a matching assistant turn folds
+        // into nothing — the IR doesn't model standalone tool turns.
         let tr = Entry::Message {
             base: base("a", None, "t"),
             message: AgentMessage::ToolResult {
@@ -1121,8 +891,7 @@ mod tests {
             extra: HashMap::new(),
         };
         let v = session_to_view(&session_from(vec![tr], "/tmp/p"));
-        assert_eq!(v.turns.len(), 1);
-        assert_eq!(v.turns[0].role, Role::Other("tool".to_string()));
+        assert_eq!(v.turns.len(), 0);
     }
 
     #[test]
@@ -1175,8 +944,6 @@ mod tests {
         let v = session_to_view(&session_from(vec![c], "/tmp/p"));
         assert_eq!(v.turns[0].role, Role::System);
         assert!(v.turns[0].text.starts_with("Compacted"));
-        let pi = v.turns[0].extra.get("pi").unwrap();
-        assert!(pi.get("compaction").is_some());
     }
 
     #[test]
@@ -1192,12 +959,10 @@ mod tests {
         let v = session_to_view(&session_from(vec![bs], "/tmp/p"));
         assert_eq!(v.turns[0].role, Role::System);
         assert!(v.turns[0].text.starts_with("Branch summary"));
-        let pi = v.turns[0].extra.get("pi").unwrap();
-        assert!(pi.get("branchSummary").is_some());
     }
 
     #[test]
-    fn test_model_change_attaches_to_next_message() {
+    fn test_model_change_drops_silently() {
         let mc = Entry::ModelChange {
             base: base("mc", None, "t"),
             provider: "anthropic".into(),
@@ -1207,8 +972,6 @@ mod tests {
         let msg = user_text_entry("u", None, "hi");
         let v = session_to_view(&session_from(vec![mc, msg], "/tmp/p"));
         assert_eq!(v.turns.len(), 1);
-        let pi = v.turns[0].extra.get("pi").unwrap();
-        assert!(pi.get("modelChange").is_some());
     }
 
     #[test]

@@ -83,14 +83,7 @@ where
 ///
 /// let view = ConversationView {
 ///     id: "s1".into(),
-///     started_at: None,
-///     last_activity: None,
-///     turns: vec![],
-///     total_usage: None,
-///     provider_id: None,
-///     files_changed: vec![],
-///     session_ids: vec![],
-///     events: vec![],
+///     ..Default::default()
 /// };
 ///
 /// let projector = AnyProjector::new(TurnCounter);
@@ -142,7 +135,6 @@ impl AnyProjector {
 mod tests {
     use super::*;
     use crate::{Role, TokenUsage, ToolInvocation, ToolResult, Turn};
-    use std::collections::HashMap;
 
     // ── helpers ──────────────────────────────────────────────────────
 
@@ -157,6 +149,7 @@ mod tests {
             files_changed: vec![],
             session_ids: vec![],
             events: vec![],
+            ..Default::default()
         }
     }
 
@@ -174,7 +167,7 @@ mod tests {
             token_usage: None,
             environment: None,
             delegations: vec![],
-            extra: HashMap::new(),
+            file_mutations: Vec::new(),
         }
     }
 
@@ -193,6 +186,7 @@ mod tests {
             files_changed: vec![],
             session_ids: vec![],
             events: vec![],
+            ..Default::default()
         }
     }
 
@@ -371,12 +365,13 @@ mod tests {
                 token_usage: None,
                 environment: None,
                 delegations: vec![],
-                extra: HashMap::new(),
+                file_mutations: Vec::new(),
             }],
             total_usage: None,
             provider_id: None,
             files_changed: vec![],
             session_ids: vec![],
+            ..Default::default()
         };
 
         let any = AnyProjector::new(ToolNameCollector);
@@ -431,7 +426,7 @@ mod tests {
                     }),
                     environment: None,
                     delegations: vec![],
-                    extra: HashMap::new(),
+                    file_mutations: Vec::new(),
                 },
                 Turn {
                     id: "t2".into(),
@@ -451,13 +446,14 @@ mod tests {
                     }),
                     environment: None,
                     delegations: vec![],
-                    extra: HashMap::new(),
+                    file_mutations: Vec::new(),
                 },
             ],
             total_usage: None,
             provider_id: None,
             files_changed: vec![],
             session_ids: vec![],
+            ..Default::default()
         };
 
         let any = AnyProjector::new(TotalInputTokens);

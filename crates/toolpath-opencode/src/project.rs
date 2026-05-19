@@ -668,11 +668,8 @@ fn synthesize_edit_diff(input: &Value) -> Option<String> {
     Some(out)
 }
 
-fn opencode_extras(turn: &Turn) -> Option<&Map<String, Value>> {
-    turn.extra.get("opencode").and_then(|v| match v {
-        Value::Object(m) => Some(m),
-        _ => None,
-    })
+fn opencode_extras(_turn: &Turn) -> Option<&'static Map<String, Value>> {
+    None
 }
 
 fn mint_session_id(seed: &str) -> String {
@@ -767,7 +764,7 @@ mod tests {
             token_usage: None,
             environment: None,
             delegations: vec![],
-            extra: HashMap::new(),
+            file_mutations: Vec::new(),
         }
     }
 
@@ -785,7 +782,7 @@ mod tests {
             token_usage: None,
             environment: None,
             delegations: vec![],
-            extra: HashMap::new(),
+            file_mutations: Vec::new(),
         }
     }
 
@@ -800,6 +797,7 @@ mod tests {
             files_changed: vec![],
             session_ids: vec![],
             events: vec![],
+            ..Default::default()
         }
     }
 
@@ -939,20 +937,6 @@ mod tests {
             kinds,
             vec!["step-start", "reasoning", "text", "step-finish"]
         );
-    }
-
-    #[test]
-    fn foreign_namespace_extras_are_dropped() {
-        let mut t = assistant_turn("hi");
-        t.extra
-            .insert("claude".into(), json!({"version": "2.1.116"}));
-        t.extra.insert("gemini".into(), json!({"foo": "bar"}));
-        let s = OpencodeProjector::default()
-            .project(&view_with(vec![t]))
-            .unwrap();
-        let serialized = serde_json::to_string(&s).unwrap();
-        assert!(!serialized.contains("\"version\":\"2.1.116\""));
-        assert!(!serialized.contains("\"foo\":\"bar\""));
     }
 
     #[test]
