@@ -139,31 +139,14 @@ fn token_usage_captured() {
 }
 
 #[test]
-fn encrypted_reasoning_preserved_in_extra() {
+fn encrypted_reasoning_does_not_land_on_thinking() {
     // Codex rollouts almost always carry OpenAI's encrypted reasoning
-    // ciphertext — not plaintext. It's round-trip material, not something
-    // we can render, so it lives under `turn.extra["codex"].reasoning_encrypted`
-    // and never on `turn.thinking`.
+    // ciphertext — not plaintext. With `Turn.extra` gone, the ciphertext is
+    // dropped on the conversion to the IR; the invariant we still preserve
+    // is that it must not pollute `turn.thinking` (which would render as
+    // garbage).
     let s = session();
     let view = to_view(&s);
-    let with_encrypted = view
-        .turns
-        .iter()
-        .filter(|t| {
-            t.extra
-                .get("codex")
-                .and_then(|v| v.get("reasoning_encrypted"))
-                .and_then(|v| v.as_array())
-                .map(|a| !a.is_empty())
-                .unwrap_or(false)
-        })
-        .count();
-    assert!(
-        with_encrypted >= 1,
-        "expected at least one turn with encrypted reasoning preserved in extra"
-    );
-    // And nothing should have landed on `thinking` — the fixture has no
-    // plaintext summaries, just ciphertext.
     let with_thinking = view.turns.iter().filter(|t| t.thinking.is_some()).count();
     assert_eq!(
         with_thinking, 0,

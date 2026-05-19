@@ -135,7 +135,6 @@ impl AnyProjector {
 mod tests {
     use super::*;
     use crate::{Role, TokenUsage, ToolInvocation, ToolResult, Turn};
-    use std::collections::HashMap;
 
     // ── helpers ──────────────────────────────────────────────────────
 
@@ -168,7 +167,6 @@ mod tests {
             token_usage: None,
             environment: None,
             delegations: vec![],
-            extra: HashMap::new(),
             file_mutations: Vec::new(),
         }
     }
@@ -353,7 +351,6 @@ mod tests {
                             is_error: false,
                         }),
                         category: None,
-                        ..Default::default()
                     },
                     ToolInvocation {
                         id: "u2".into(),
@@ -361,7 +358,6 @@ mod tests {
                         input: serde_json::json!({"command": "cargo test"}),
                         result: None,
                         category: None,
-                        ..Default::default()
                     },
                 ],
                 model: None,
@@ -369,7 +365,6 @@ mod tests {
                 token_usage: None,
                 environment: None,
                 delegations: vec![],
-                extra: HashMap::new(),
                 file_mutations: Vec::new(),
             }],
             total_usage: None,
@@ -431,7 +426,6 @@ mod tests {
                     }),
                     environment: None,
                     delegations: vec![],
-                    extra: HashMap::new(),
                     file_mutations: Vec::new(),
                 },
                 Turn {
@@ -452,7 +446,6 @@ mod tests {
                     }),
                     environment: None,
                     delegations: vec![],
-                    extra: HashMap::new(),
                     file_mutations: Vec::new(),
                 },
             ],

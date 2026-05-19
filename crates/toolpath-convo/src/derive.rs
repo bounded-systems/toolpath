@@ -202,12 +202,6 @@ pub fn derive_path(view: &ConversationView, config: &DeriveConfig) -> Path {
             extra.insert("environment".to_string(), v);
         }
 
-        if !turn.extra.is_empty()
-            && let Ok(v) = serde_json::to_value(&turn.extra)
-        {
-            extra.insert("turn_extra".to_string(), v);
-        }
-
         step.change.insert(
             conv_artifact_key.clone(),
             ArtifactChange {
@@ -662,7 +656,6 @@ mod tests {
             token_usage: None,
             environment: None,
             delegations: vec![],
-            extra: HashMap::new(),
             file_mutations: Vec::new(),
         }
     }
@@ -755,7 +748,6 @@ mod tests {
             input,
             result: None,
             category: Some(ToolCategory::FileWrite),
-            ..Default::default()
         }
     }
 
@@ -826,7 +818,6 @@ mod tests {
             input: serde_json::json!({"file_path": "x.rs"}),
             result: None,
             category: Some(ToolCategory::FileRead),
-            ..Default::default()
         }];
         let view = view_with(vec![turn]);
         let path = derive_path(&view, &DeriveConfig::default());
@@ -1024,7 +1015,6 @@ mod tests {
                 is_error: false,
             }),
             category: Some(ToolCategory::FileRead),
-            ..Default::default()
         }];
         let view = view_with(vec![turn]);
         let path = derive_path(&view, &DeriveConfig::default());
@@ -1041,7 +1031,6 @@ mod tests {
             input: serde_json::json!({}),
             result: None,
             category: Some(ToolCategory::FileRead),
-            ..Default::default()
         }];
         let view = view_with(vec![turn]);
         let cfg = DeriveConfig {

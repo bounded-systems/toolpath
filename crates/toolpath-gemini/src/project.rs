@@ -4,13 +4,9 @@
 //! This is the inverse of [`crate::provider::to_view`]: where `to_view`
 //! reads a Gemini session directory into a provider-agnostic view,
 //! `GeminiProjector` serializes that view back into the on-disk chat
-//! format.
-//!
-//! The projector relies on the provider-specific data that
-//! [`crate::provider::to_view`] stashes under `Turn.extra["gemini"]`:
-//! the full `tokens` struct, per-thought metadata, per-tool-call
-//! metadata (`status`, `resultDisplay`, `description`, `displayName`),
-//! and any message-level extras picked up via `#[serde(flatten)]`.
+//! format. Round-tripping is best-effort and lossy on Gemini-only
+//! fields (full token breakdown, per-thought timestamps, per-tool-call
+//! status/displayName) — the IR no longer carries them.
 
 use std::collections::HashMap;
 
@@ -137,7 +133,13 @@ fn project_view(
 // ── Turn → GeminiMessage ─────────────────────────────────────────────
 
 fn turn_to_message(turn: &Turn) -> GeminiMessage {
-    let (gemini_extras, msg_extras) = split_gemini_extras(&turn.extra);
+    // `Turn.extra` is gone; previously the Gemini projector pulled
+    // `extra["gemini"]` for structured thought meta, full tokens, and
+    // per-tool-call status. With that source removed, `build_thoughts` /
+    // `build_tokens` / `build_tool_calls` fall back to the typed IR
+    // fields (`Turn.thinking` as a string, `Turn.token_usage`, etc.).
+    let gemini_extras: Map<String, Value> = Map::new();
+    let msg_extras: HashMap<String, Value> = HashMap::new();
 
     GeminiMessage {
         id: turn.id.clone(),
@@ -174,45 +176,6 @@ fn build_content(turn: &Turn) -> GeminiContent {
         }]),
         _ => GeminiContent::Text(turn.text.clone()),
     }
-}
-
-/// Separate the `"gemini"` submap from `Turn.extra` and partition it
-/// into Gemini-specific projector metadata (tokens / thoughts_meta /
-/// tool_call_meta — consumed locally) and message-level extras
-/// (everything else under the gemini key — got there by being flattened
-/// in via `#[serde(flatten)]` on forward, restored to the message on
-/// reverse).
-///
-/// **Foreign namespaces are dropped.** `Turn.extra["claude"]` and
-/// similar exist to round-trip through Path documents under the
-/// originating provider; they have no meaning to Gemini and would
-/// pollute the JSON if we let them flatten onto messages. The Path
-/// doc still carries them; only the *Gemini view* discards them.
-fn split_gemini_extras(
-    extra: &HashMap<String, Value>,
-) -> (Map<String, Value>, HashMap<String, Value>) {
-    let mut gemini_meta = Map::new();
-    let mut msg_extra: HashMap<String, Value> = HashMap::new();
-
-    if let Some(Value::Object(gem)) = extra.get("gemini") {
-        for (k, v) in gem {
-            match k.as_str() {
-                // Projector-internal metadata — used to rebuild Tokens,
-                // Thought[], and per-tool-call render hints.
-                "tokens" | "thoughts_meta" | "tool_call_meta" => {
-                    gemini_meta.insert(k.clone(), v.clone());
-                }
-                // Anything else under `gemini.*` was a flattened
-                // message-level extra during forward; restore it to
-                // the message.
-                _ => {
-                    msg_extra.insert(k.clone(), v.clone());
-                }
-            }
-        }
-    }
-
-    (gemini_meta, msg_extra)
 }
 
 /// Rebuild `Thought[]`.
@@ -604,7 +567,6 @@ mod tests {
             token_usage: None,
             environment: None,
             delegations: vec![],
-            extra: HashMap::new(),
             file_mutations: Vec::new(),
         }
     }
@@ -623,7 +585,6 @@ mod tests {
             token_usage: None,
             environment: None,
             delegations: vec![],
-            extra: HashMap::new(),
             file_mutations: Vec::new(),
         }
     }
@@ -691,31 +652,6 @@ mod tests {
     }
 
     #[test]
-    fn test_thoughts_rebuilt_from_meta() {
-        let mut t = assistant_turn("a1", "");
-        let meta = serde_json::json!([
-            {"subject": "Searching", "description": "looking in /auth", "timestamp": "2026-04-17T15:00:02Z"},
-            {"subject": "Plan", "description": "try token path", "timestamp": "2026-04-17T15:00:03Z"},
-        ]);
-        t.extra
-            .insert("gemini".into(), serde_json::json!({"thoughts_meta": meta}));
-        t.thinking = Some("**Searching**\nlooking in /auth\n\n**Plan**\ntry token path".into());
-
-        let convo = GeminiProjector::default()
-            .project(&view_with(vec![t]))
-            .unwrap();
-        let thoughts = convo.main.messages[0].thoughts.as_ref().unwrap();
-        assert_eq!(thoughts.len(), 2);
-        assert_eq!(thoughts[0].subject.as_deref(), Some("Searching"));
-        assert_eq!(thoughts[0].description.as_deref(), Some("looking in /auth"));
-        assert_eq!(
-            thoughts[0].timestamp.as_deref(),
-            Some("2026-04-17T15:00:02Z")
-        );
-        assert_eq!(thoughts[1].subject.as_deref(), Some("Plan"));
-    }
-
-    #[test]
     fn test_thoughts_fallback_from_flattened_string() {
         // No gemini.thoughts_meta — projector should still un-flatten the string.
         let mut t = assistant_turn("a1", "");
@@ -727,25 +663,6 @@ mod tests {
         assert_eq!(thoughts.len(), 2);
         assert_eq!(thoughts[0].subject.as_deref(), Some("Searching"));
         assert_eq!(thoughts[0].description.as_deref(), Some("looking in /auth"));
-    }
-
-    #[test]
-    fn test_tokens_from_gemini_extras_preserved() {
-        let mut t = assistant_turn("a1", "Done.");
-        t.extra.insert(
-            "gemini".into(),
-            serde_json::json!({
-                "tokens": {"input": 10, "output": 5, "cached": 0, "thoughts": 2, "tool": 0, "total": 17}
-            }),
-        );
-        let convo = GeminiProjector::default()
-            .project(&view_with(vec![t]))
-            .unwrap();
-        let tokens = convo.main.messages[0].tokens.as_ref().unwrap();
-        assert_eq!(tokens.input, Some(10));
-        assert_eq!(tokens.output, Some(5));
-        assert_eq!(tokens.thoughts, Some(2));
-        assert_eq!(tokens.total, Some(17));
     }
 
     #[test]
@@ -780,7 +697,6 @@ mod tests {
                 is_error: false,
             }),
             category: Some(ToolCategory::FileRead),
-            ..Default::default()
         }];
         let convo = GeminiProjector::default()
             .project(&view_with(vec![t]))
@@ -811,48 +727,12 @@ mod tests {
                 is_error: true,
             }),
             category: Some(ToolCategory::Shell),
-            ..Default::default()
         }];
         let convo = GeminiProjector::default()
             .project(&view_with(vec![t]))
             .unwrap();
         let call = &convo.main.messages[0].tool_calls.as_ref().unwrap()[0];
         assert_eq!(call.status, "error");
-    }
-
-    #[test]
-    fn test_tool_call_meta_preserves_result_display_and_description() {
-        let mut t = assistant_turn("a1", "");
-        t.tool_uses = vec![ToolInvocation {
-            id: "tc1".into(),
-            name: "write_file".into(),
-            input: serde_json::json!({"file_path": "a.rs"}),
-            result: Some(ToolResult {
-                content: "wrote".into(),
-                is_error: false,
-            }),
-            category: Some(ToolCategory::FileWrite),
-            ..Default::default()
-        }];
-        t.extra.insert(
-            "gemini".into(),
-            serde_json::json!({
-                "tool_call_meta": [{
-                    "id": "tc1",
-                    "status": "success",
-                    "result_display": {"fileDiff": "@@\n+x"},
-                    "description": "write a.rs",
-                    "display_name": "Write a.rs",
-                }],
-            }),
-        );
-        let convo = GeminiProjector::default()
-            .project(&view_with(vec![t]))
-            .unwrap();
-        let call = &convo.main.messages[0].tool_calls.as_ref().unwrap()[0];
-        assert_eq!(call.description.as_deref(), Some("write a.rs"));
-        assert_eq!(call.display_name.as_deref(), Some("Write a.rs"));
-        assert_eq!(call.file_diff().as_deref(), Some("@@\n+x"));
     }
 
     #[test]
@@ -898,54 +778,6 @@ mod tests {
     }
 
     #[test]
-    fn test_foreign_namespace_extras_are_dropped() {
-        // Provider-namespaced extras from other harnesses (e.g.
-        // `Turn.extra["claude"]`) must NOT leak as top-level fields on
-        // a Gemini message — they pollute the JSON and have no meaning
-        // to Gemini. Only the `gemini` submap (and its non-projector
-        // contents) is honored.
-        let mut t = user_turn("u1", "hi");
-        t.extra.insert(
-            "claude".into(),
-            serde_json::json!({"version": "2.1.116", "user_type": "external"}),
-        );
-        t.extra
-            .insert("codex".into(), serde_json::json!({"some": "data"}));
-        let convo = GeminiProjector::default()
-            .project(&view_with(vec![t]))
-            .unwrap();
-        let msg = &convo.main.messages[0];
-        assert!(
-            !msg.extra.contains_key("claude"),
-            "claude namespace should not leak onto Gemini messages"
-        );
-        assert!(!msg.extra.contains_key("codex"));
-    }
-
-    #[test]
-    fn test_gemini_native_message_extras_are_preserved() {
-        // Gemini-native message-level extras are flattened INTO the
-        // gemini submap on forward (provider.rs::build_gemini_extra).
-        // The projector must restore them at the message level.
-        let mut t = user_turn("u1", "hi");
-        t.extra.insert(
-            "gemini".into(),
-            serde_json::json!({
-                "tokens": {"input": 10},
-                "some_native_extra": "round-tripped value",
-            }),
-        );
-        let convo = GeminiProjector::default()
-            .project(&view_with(vec![t]))
-            .unwrap();
-        let msg = &convo.main.messages[0];
-        assert_eq!(
-            msg.extra.get("some_native_extra"),
-            Some(&serde_json::json!("round-tripped value"))
-        );
-    }
-
-    #[test]
     fn test_project_hash_and_path_propagate() {
         let view = view_with(vec![user_turn("u1", "hi")]);
         let projector = GeminiProjector::new()
@@ -976,7 +808,6 @@ mod tests {
                 is_error: false,
             }),
             category: Some(ToolCategory::FileRead),
-            ..Default::default()
         }];
 
         let convo = GeminiProjector::default()

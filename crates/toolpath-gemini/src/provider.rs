@@ -9,11 +9,9 @@
 //!   chat, the matching sub-agent file's turns are populated onto a
 //!   [`DelegatedWork`].
 
-use std::collections::HashMap;
-
 use crate::GeminiConvo;
 use crate::types::{ChatFile, Conversation, GeminiMessage, GeminiRole, Thought, ToolCall};
-use serde_json::{Map, Value};
+use serde_json::Value;
 use toolpath_convo::{
     ConversationMeta, ConversationProvider, ConversationView, ConvoError, DelegatedWork,
     EnvironmentSnapshot, Role, TokenUsage, ToolCategory, ToolInvocation, ToolResult, Turn,
@@ -118,12 +116,6 @@ fn message_to_turn(msg: &GeminiMessage, working_dir: Option<&str>) -> Turn {
         vcs_revision: None,
     });
 
-    let mut extra = HashMap::new();
-    let gemini_extra = build_gemini_extra(msg);
-    if !gemini_extra.is_empty() {
-        extra.insert("gemini".to_string(), Value::Object(gemini_extra));
-    }
-
     Turn {
         id: msg.id.clone(),
         parent_id: None,
@@ -137,7 +129,6 @@ fn message_to_turn(msg: &GeminiMessage, working_dir: Option<&str>) -> Turn {
         token_usage,
         environment,
         delegations: vec![],
-        extra,
         file_mutations,
     }
 }
@@ -148,6 +139,7 @@ fn message_to_turn(msg: &GeminiMessage, working_dir: Option<&str>) -> Turn {
 ///      computed by the harness).
 ///   2. Hand-rolled fallback from `args` (`old_string`/`new_string` for
 ///      `replace`, `content` for `write_file`).
+///
 /// `tool_id` links back to the [`ToolCall`].
 fn compute_file_mutations(calls: &[ToolCall]) -> Vec<toolpath_convo::FileMutation> {
     let mut out = Vec::new();
@@ -260,65 +252,7 @@ fn tool_call_to_invocation(call: &ToolCall) -> ToolInvocation {
         input: call.args.clone(),
         result,
         category: tool_category(&call.name),
-        ..Default::default()
     }
-}
-
-/// Collect fields that don't map cleanly onto the common `Turn` schema
-/// into a map that lives under `Turn.extra["gemini"]`.
-fn build_gemini_extra(msg: &GeminiMessage) -> Map<String, Value> {
-    let mut map = Map::new();
-
-    // Raw tokens struct (includes thoughts/tool/total not in the common schema).
-    if let Some(t) = &msg.tokens
-        && let Ok(v) = serde_json::to_value(t)
-    {
-        map.insert("tokens".to_string(), v);
-    }
-
-    // Full thought structs preserved verbatim. The flattened text also
-    // lands in Turn.thinking; this map is what the reverse projector uses
-    // to rebuild Gemini's `thoughts[]` array losslessly.
-    if !msg.thoughts().is_empty() {
-        let meta: Vec<Value> = msg
-            .thoughts()
-            .iter()
-            .map(|t| {
-                serde_json::json!({
-                    "subject": t.subject,
-                    "description": t.description,
-                    "timestamp": t.timestamp,
-                })
-            })
-            .collect();
-        map.insert("thoughts_meta".to_string(), Value::Array(meta));
-    }
-
-    // Tool call statuses (pending/executing/etc. — the result-only view
-    // on ToolInvocation loses this nuance).
-    if !msg.tool_calls().is_empty() {
-        let statuses: Vec<Value> = msg
-            .tool_calls()
-            .iter()
-            .map(|t| {
-                serde_json::json!({
-                    "id": t.id,
-                    "status": t.status,
-                    "result_display": t.result_display,
-                    "description": t.description,
-                    "display_name": t.display_name,
-                })
-            })
-            .collect();
-        map.insert("tool_call_meta".to_string(), Value::Array(statuses));
-    }
-
-    // Anything else that serde picked up via #[serde(flatten)]
-    for (k, v) in &msg.extra {
-        map.insert(k.clone(), v.clone());
-    }
-
-    map
 }
 
 // ── Delegation wiring ────────────────────────────────────────────────
@@ -818,18 +752,6 @@ mod tests {
         let thinking = sub_turn.thinking.as_ref().unwrap();
         assert!(thinking.contains("Searching"));
         assert!(thinking.contains("looking in /auth"));
-    }
-
-    #[test]
-    fn test_extra_gemini_tokens_preserved() {
-        let (_t, p) = setup_provider();
-        let view =
-            ConversationProvider::load_conversation(&p, "/abs/myrepo", "session-uuid").unwrap();
-        let claude = view.turns[1].extra.get("gemini").expect("extra[gemini]");
-        let tokens = claude.get("tokens").unwrap();
-        assert_eq!(tokens["input"], 100);
-        assert_eq!(tokens["thoughts"], 10);
-        assert_eq!(tokens["total"], 160);
     }
 
     #[test]

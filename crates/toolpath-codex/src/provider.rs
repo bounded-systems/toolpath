@@ -30,7 +30,7 @@ use crate::types::{
     EventMsg, ExecCommandEnd, Message, PatchApplyEnd, PatchChange, ResponseItem, RolloutItem,
     Session, TokenCountInfo, TokenUsage as CodexTokenUsage,
 };
-use serde_json::{Map, Value};
+use serde_json::Value;
 use toolpath_convo::{
     ConversationEvent, ConversationMeta, ConversationProvider, ConversationView, ConvoError,
     EnvironmentSnapshot, FileMutation, ProducerInfo, Role, SessionBase, TokenUsage, ToolCategory,
@@ -180,11 +180,6 @@ struct Builder<'a> {
     /// Plaintext reasoning summaries (rare — only in configurations where
     /// OpenAI exposes public reasoning). These land on `Turn.thinking`.
     pending_reasoning_plaintext: Vec<String>,
-    /// Opaque encrypted ciphertext from OpenAI's servers. Preserved on
-    /// the next assistant turn's `extra["codex"]["reasoning_encrypted"]`
-    /// for round-trip fidelity. Never goes to `Turn.thinking` — it
-    /// would render as garbage.
-    pending_reasoning_encrypted: Vec<String>,
     pending_token_usage: Option<TokenUsage>,
     working_dir: Option<String>,
     current_model: Option<String>,
@@ -202,7 +197,6 @@ impl<'a> Builder<'a> {
             turns: Vec::new(),
             events: Vec::new(),
             pending_reasoning_plaintext: Vec::new(),
-            pending_reasoning_encrypted: Vec::new(),
             pending_token_usage: None,
             working_dir: None,
             current_model: None,
@@ -349,7 +343,6 @@ impl<'a> Builder<'a> {
             events: self.events,
             base,
             producer,
-            ..Default::default()
         }
     }
 
@@ -365,10 +358,6 @@ impl<'a> Builder<'a> {
                 self.push_turn(turn);
             }
             ResponseItem::Reasoning(r) => {
-                // Encrypted blob → round-trip preservation only.
-                if let Some(s) = r.encrypted_content {
-                    self.pending_reasoning_encrypted.push(s);
-                }
                 // Plaintext content (rare) → Turn.thinking.
                 if let Some(Value::Array(arr)) = r.content.as_ref() {
                     for v in arr {
@@ -392,12 +381,7 @@ impl<'a> Builder<'a> {
                 } else {
                     input
                 };
-                let mut extra: Map<String, Value> = Map::new();
-                extra.insert("raw_arguments".into(), Value::String(fc.arguments.clone()));
-                if let Some(ns) = fc.namespace.as_ref() {
-                    extra.insert("namespace".into(), Value::String(ns.clone()));
-                }
-                self.attach_tool_call(timestamp, fc.call_id, name, input, extra, false);
+                self.attach_tool_call(timestamp, fc.call_id, name, input);
             }
             ResponseItem::FunctionCallOutput(out) => {
                 let is_error = out
@@ -409,12 +393,7 @@ impl<'a> Builder<'a> {
             }
             ResponseItem::CustomToolCall(ct) => {
                 let input = Value::String(ct.input.clone());
-                let mut extra: Map<String, Value> = Map::new();
-                extra.insert("tool_call_kind".into(), Value::String("custom".into()));
-                if let Some(s) = ct.status.as_ref() {
-                    extra.insert("status".into(), Value::String(s.clone()));
-                }
-                self.attach_tool_call(timestamp, ct.call_id, ct.name, input, extra, true);
+                self.attach_tool_call(timestamp, ct.call_id, ct.name, input);
             }
             ResponseItem::CustomToolCallOutput(out) => {
                 let is_error = out
@@ -478,8 +457,6 @@ impl<'a> Builder<'a> {
         call_id: String,
         name: String,
         input: Value,
-        codex_tool_extra: Map<String, Value>,
-        _is_custom: bool,
     ) {
         let category = tool_category(&name);
         let invocation = ToolInvocation {
@@ -488,7 +465,6 @@ impl<'a> Builder<'a> {
             input,
             result: None,
             category,
-            ..Default::default()
         };
 
         let turn_idx = match self.last_assistant_turn_index() {
@@ -505,15 +481,6 @@ impl<'a> Builder<'a> {
             }
         };
         let tool_idx = self.turns[turn_idx].tool_uses.len();
-        if !codex_tool_extra.is_empty() {
-            let codex = turn_extra_codex_mut(&mut self.turns[turn_idx]);
-            let tool_extras = codex
-                .entry("tool_extras")
-                .or_insert_with(|| Value::Object(Map::new()));
-            if let Value::Object(m) = tool_extras {
-                m.insert(call_id.clone(), Value::Object(codex_tool_extra));
-            }
-        }
         self.turns[turn_idx].tool_uses.push(invocation);
         self.call_index.insert(call_id, (turn_idx, tool_idx));
     }
@@ -562,39 +529,8 @@ impl<'a> Builder<'a> {
                         content: body,
                         is_error,
                     });
-                } else if is_error {
-                    // Escalate existing result to error if exit indicates failure.
-                    if let Some(r) = inv.result.as_mut() {
-                        r.is_error = true;
-                    }
-                }
-                let codex = turn_extra_codex_mut(turn);
-                let tool_extras = codex
-                    .entry("tool_extras")
-                    .or_insert_with(|| Value::Object(Map::new()));
-                if let Value::Object(m) = tool_extras {
-                    let entry = m
-                        .entry(exec.call_id.clone())
-                        .or_insert_with(|| Value::Object(Map::new()));
-                    if let Value::Object(inner) = entry {
-                        inner.insert(
-                            "exit_code".into(),
-                            exec.exit_code
-                                .map(|c| Value::Number(serde_json::Number::from(c)))
-                                .unwrap_or(Value::Null),
-                        );
-                        if !exec.command.is_empty() {
-                            inner.insert(
-                                "command".into(),
-                                Value::Array(
-                                    exec.command
-                                        .iter()
-                                        .map(|s| Value::String(s.clone()))
-                                        .collect(),
-                                ),
-                            );
-                        }
-                    }
+                } else if is_error && let Some(r) = inv.result.as_mut() {
+                    r.is_error = true;
                 }
             }
         }
@@ -642,15 +578,6 @@ impl<'a> Builder<'a> {
         if !self.pending_reasoning_plaintext.is_empty() {
             turn.thinking = Some(self.pending_reasoning_plaintext.join("\n\n"));
             self.pending_reasoning_plaintext.clear();
-        }
-        // Encrypted ciphertext goes into extra for round-trip only.
-        if !self.pending_reasoning_encrypted.is_empty() {
-            let drained: Vec<String> = self.pending_reasoning_encrypted.drain(..).collect();
-            let codex = turn_extra_codex_mut(turn);
-            codex.insert(
-                "reasoning_encrypted".into(),
-                Value::Array(drained.into_iter().map(Value::String).collect()),
-            );
         }
         if let Some(tu) = self.pending_token_usage.take() {
             turn.token_usage = Some(tu);
@@ -754,24 +681,6 @@ fn message_to_turn(
         vcs_revision: None,
     });
 
-    let mut extra: HashMap<String, Value> = HashMap::new();
-    let mut codex_extra: Map<String, Value> = Map::new();
-    if msg.role == "developer" {
-        codex_extra.insert("role".into(), Value::String("developer".into()));
-    }
-    if let Some(phase) = &msg.phase {
-        codex_extra.insert("phase".into(), Value::String(phase.clone()));
-    }
-    if let Some(end_turn) = msg.end_turn {
-        codex_extra.insert("end_turn".into(), Value::Bool(end_turn));
-    }
-    if let Some(id) = &msg.id {
-        codex_extra.insert("message_id".into(), Value::String(id.clone()));
-    }
-    if !codex_extra.is_empty() {
-        extra.insert("codex".into(), Value::Object(codex_extra));
-    }
-
     Turn {
         id: msg.id.clone().unwrap_or_default(),
         parent_id: None,
@@ -789,7 +698,6 @@ fn message_to_turn(
         token_usage: None,
         environment,
         delegations: Vec::new(),
-        extra,
         file_mutations: Vec::new(),
     }
 }
@@ -816,7 +724,6 @@ fn synthetic_assistant_turn(
             vcs_revision: None,
         }),
         delegations: Vec::new(),
-        extra: HashMap::new(),
         file_mutations: Vec::new(),
     }
 }
@@ -861,19 +768,6 @@ fn data_from_value(v: &Value) -> HashMap<String, Value> {
             m
         }
     }
-}
-
-fn turn_extra_codex_mut(turn: &mut Turn) -> &mut Map<String, Value> {
-    let entry = turn
-        .extra
-        .entry("codex".to_string())
-        .or_insert_with(|| Value::Object(Map::new()));
-    if !entry.is_object() {
-        *entry = Value::Object(Map::new());
-    }
-    entry
-        .as_object_mut()
-        .expect("entry was just ensured to be an object")
 }
 
 // ── ConversationProvider trait impl ────────────────────────────────
@@ -996,10 +890,10 @@ mod tests {
     }
 
     #[test]
-    fn encrypted_reasoning_preserved_in_extra_not_thinking() {
-        // The fixture only has encrypted_content. That must land under
-        // `extra["codex"]["reasoning_encrypted"]` — and NOT be rendered
-        // as `Turn.thinking` (which would be opaque ciphertext).
+    fn encrypted_reasoning_does_not_land_on_thinking() {
+        // The fixture only has encrypted_content. That must NOT be rendered
+        // as `Turn.thinking` (which would be opaque ciphertext). Since
+        // Turn.extra was removed, encrypted ciphertext is simply dropped.
         let (_t, mgr, id) = setup_session_fixture(&minimal_session());
         let view = to_view(&mgr.read_session(&id).unwrap());
         let assistant = &view.turns[1];
@@ -1007,13 +901,6 @@ mod tests {
             assistant.thinking.is_none(),
             "encrypted ciphertext must not appear as thinking"
         );
-        let codex = assistant.extra.get("codex").expect("codex extra");
-        let enc = codex
-            .get("reasoning_encrypted")
-            .and_then(|v| v.as_array())
-            .expect("reasoning_encrypted array");
-        assert_eq!(enc.len(), 1);
-        assert_eq!(enc[0], "encrypted-blob-1");
     }
 
     #[test]
@@ -1032,14 +919,6 @@ mod tests {
             view.turns[0].thinking.as_deref(),
             Some("I should check the file")
         );
-        // No encrypted blob on this one, so extra["codex"] either omits
-        // `reasoning_encrypted` or has no such key.
-        let has_enc = view.turns[0]
-            .extra
-            .get("codex")
-            .and_then(|c| c.get("reasoning_encrypted"))
-            .is_some();
-        assert!(!has_enc, "no encrypted content was emitted");
     }
 
     #[test]
@@ -1184,7 +1063,5 @@ mod tests {
         let (_t, mgr, id) = setup_session_fixture(&body);
         let view = to_view(&mgr.read_session(&id).unwrap());
         assert_eq!(view.turns[0].role, Role::System);
-        let codex = view.turns[0].extra.get("codex").unwrap();
-        assert_eq!(codex["role"], "developer");
     }
 }

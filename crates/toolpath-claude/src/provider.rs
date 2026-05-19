@@ -94,7 +94,6 @@ fn message_to_turn(entry: &ConversationEntry, msg: &Message) -> Turn {
                 input: tu.input.clone(),
                 result,
                 category,
-                ..Default::default()
             }
         })
         .collect();
@@ -120,41 +119,6 @@ fn message_to_turn(entry: &ConversationEntry, msg: &Message) -> Turn {
 
     let delegations = extract_delegations(&tool_uses);
 
-    // Fold the entry's typed top-level fields into the claude extras blob
-    // so projection can restore them. Without this, requestId / userType /
-    // version / sessionId vanish on roundtrip and Claude's UI loses its
-    // request-correlation metadata.
-    let mut claude_extras: serde_json::Map<String, serde_json::Value> =
-        serde_json::to_value(&entry.extra)
-            .ok()
-            .and_then(|v| v.as_object().cloned())
-            .unwrap_or_default();
-    if let Some(v) = &entry.version {
-        claude_extras
-            .entry("version".to_string())
-            .or_insert_with(|| serde_json::Value::String(v.clone()));
-    }
-    if let Some(v) = &entry.user_type {
-        claude_extras
-            .entry("user_type".to_string())
-            .or_insert_with(|| serde_json::Value::String(v.clone()));
-    }
-    if let Some(v) = &entry.request_id {
-        claude_extras
-            .entry("request_id".to_string())
-            .or_insert_with(|| serde_json::Value::String(v.clone()));
-    }
-    let extra = if claude_extras.is_empty() {
-        HashMap::new()
-    } else {
-        let mut map = HashMap::new();
-        map.insert(
-            "claude".to_string(),
-            serde_json::Value::Object(claude_extras),
-        );
-        map
-    };
-
     Turn {
         id: entry.uuid.clone(),
         parent_id: entry.parent_uuid.clone(),
@@ -168,7 +132,6 @@ fn message_to_turn(entry: &ConversationEntry, msg: &Message) -> Turn {
         token_usage,
         environment,
         delegations,
-        extra,
         file_mutations,
     }
 }
@@ -1183,7 +1146,6 @@ mod tests {
                     input: serde_json::json!({}),
                     result: None,
                     category: Some(ToolCategory::FileRead),
-                    ..Default::default()
                 },
                 ToolInvocation {
                     id: "tool-b".into(),
@@ -1191,7 +1153,6 @@ mod tests {
                     input: serde_json::json!({}),
                     result: None,
                     category: Some(ToolCategory::FileWrite),
-                    ..Default::default()
                 },
             ],
             model: None,
@@ -1199,7 +1160,6 @@ mod tests {
             token_usage: None,
             environment: None,
             delegations: vec![],
-            extra: Default::default(),
             file_mutations: Vec::new(),
         }];
 
@@ -1418,29 +1378,6 @@ mod tests {
             d.result.as_deref(),
             Some("Found the bug in auth.rs line 42")
         );
-    }
-
-    // ── Provider-specific extras (Turn.extra["claude"]) ─────────────
-
-    #[test]
-    fn test_turn_extra_populated_from_entry() {
-        let entry: ConversationEntry = serde_json::from_str(
-            r#"{"uuid":"u1","type":"user","timestamp":"2024-01-01T00:00:00Z","subtype":"init","message":{"role":"user","content":"hello"}}"#,
-        )
-        .unwrap();
-        let turn = to_turn(&entry).unwrap();
-        let claude = turn.extra.get("claude").expect("extra[\"claude\"] missing");
-        assert_eq!(claude["subtype"], "init");
-    }
-
-    #[test]
-    fn test_turn_extra_empty_when_no_extras() {
-        let entry: ConversationEntry = serde_json::from_str(
-            r#"{"uuid":"u1","type":"user","timestamp":"2024-01-01T00:00:00Z","message":{"role":"user","content":"hello"}}"#,
-        )
-        .unwrap();
-        let turn = to_turn(&entry).unwrap();
-        assert!(turn.extra.is_empty());
     }
 
     #[test]

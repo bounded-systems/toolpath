@@ -6,7 +6,7 @@
 //! than aborting on the first; one cell's failures land grouped under
 //! its label so triage is possible from a single test run.
 
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use serde_json::Value;
@@ -893,25 +893,6 @@ mod invariants {
         }
     }
 
-    pub fn no_foreign_extras(
-        view: &ConversationView,
-        source: &str,
-        target: &str,
-        failures: &mut Vec<String>,
-    ) {
-        let allowed: HashSet<&str> = [source, target].into_iter().collect();
-        const NAMESPACES: &[&str] = &["claude", "gemini", "codex", "pi", "opencode"];
-        for (i, turn) in view.turns.iter().enumerate() {
-            for key in turn.extra.keys() {
-                if NAMESPACES.contains(&key.as_str()) && !allowed.contains(key.as_str()) {
-                    failures.push(format!(
-                        "turn {} carries foreign-namespace extras key {:?} (allowed: {:?})",
-                        i, key, allowed
-                    ));
-                }
-            }
-        }
-    }
 }
 
 // ── Matrix runner ────────────────────────────────────────────────────
@@ -945,7 +926,6 @@ fn run_cell(
     invariants::delegations(&view_first, &view_second, &mut failures);
     invariants::delegations_survive(&view_after_source, &view_first, &mut failures);
     invariants::files_changed(&view_first, &view_second, &mut failures);
-    invariants::no_foreign_extras(&view_second, source.name(), target.name(), &mut failures);
     failures
 }
 

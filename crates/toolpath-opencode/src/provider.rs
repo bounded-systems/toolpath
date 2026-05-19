@@ -28,7 +28,7 @@
 //!    its own id, linked by `session.parent_id`).
 
 use chrono::{TimeZone, Utc};
-use serde_json::{Map, Value};
+use serde_json::Value;
 use std::collections::HashMap;
 
 use crate::error::Result;
@@ -275,34 +275,13 @@ impl<'a> Builder<'a> {
         }
     }
 
-    fn handle_user_message(&mut self, msg: &Message, u: &UserMessage) {
+    fn handle_user_message(&mut self, msg: &Message, _u: &UserMessage) {
         let text = concat_text_parts(&msg.parts);
         let environment = Some(EnvironmentSnapshot {
             working_dir: Some(self.session.directory.to_string_lossy().to_string()),
             vcs_branch: None,
             vcs_revision: None,
         });
-        let mut extra: HashMap<String, Value> = HashMap::new();
-        let mut opencode_extra = Map::new();
-        opencode_extra.insert("agent".into(), Value::String(u.agent.clone()));
-        opencode_extra.insert(
-            "model".into(),
-            serde_json::to_value(&u.model).unwrap_or(Value::Null),
-        );
-        if let Some(tools) = &u.tools {
-            opencode_extra.insert(
-                "tools".into(),
-                serde_json::to_value(tools).unwrap_or(Value::Null),
-            );
-        }
-        if let Some(system) = &u.system
-            && !system.is_empty()
-        {
-            opencode_extra.insert("system".into(), Value::String(system.clone()));
-        }
-        if !opencode_extra.is_empty() {
-            extra.insert("opencode".into(), Value::Object(opencode_extra));
-        }
 
         self.turns.push(Turn {
             id: msg.id.clone(),
@@ -317,7 +296,6 @@ impl<'a> Builder<'a> {
             token_usage: None,
             environment,
             delegations: Vec::new(),
-            extra,
             file_mutations: Vec::new(),
         });
     }
@@ -327,11 +305,9 @@ impl<'a> Builder<'a> {
         let mut thinking_chunks: Vec<String> = Vec::new();
         let mut tool_uses: Vec<ToolInvocation> = Vec::new();
         let mut snapshots: Vec<String> = Vec::new();
-        let mut patches: Vec<Value> = Vec::new();
         let mut delegations: Vec<DelegatedWork> = Vec::new();
         let mut step_usage = TokenUsage::default();
         let mut step_usage_set = false;
-        let mut step_cost_total = 0.0_f64;
         let mut stop_reason: Option<String> = None;
 
         for p in &msg.parts {
@@ -368,7 +344,6 @@ impl<'a> Builder<'a> {
                     }
                     accumulate_tokens(&mut step_usage, &sf.tokens);
                     step_usage_set = true;
-                    step_cost_total += sf.cost;
                     stop_reason = Some(sf.reason.clone());
                 }
                 PartData::Snapshot(s) => {
@@ -377,10 +352,6 @@ impl<'a> Builder<'a> {
                     }
                 }
                 PartData::Patch(pp) => {
-                    patches.push(serde_json::json!({
-                        "hash": pp.hash,
-                        "files": pp.files,
-                    }));
                     for f in &pp.files {
                         if self.files_changed_seen.insert(f.clone()) {
                             self.files_changed_order.push(f.clone());
@@ -463,30 +434,6 @@ impl<'a> Builder<'a> {
             vcs_revision: None,
         });
 
-        let mut extra: HashMap<String, Value> = HashMap::new();
-        let mut opencode_extra: Map<String, Value> = Map::new();
-        opencode_extra.insert("agent".into(), Value::String(a.agent.clone()));
-        opencode_extra.insert("providerID".into(), Value::String(a.provider_id.clone()));
-        opencode_extra.insert("modelID".into(), Value::String(a.model_id.clone()));
-        opencode_extra.insert("cost_step_total".into(), json_num(step_cost_total));
-        opencode_extra.insert("cost_message".into(), json_num(a.cost));
-        if !snapshots.is_empty() {
-            opencode_extra.insert(
-                "snapshots".into(),
-                Value::Array(snapshots.iter().cloned().map(Value::String).collect()),
-            );
-        }
-        if !patches.is_empty() {
-            opencode_extra.insert("patches".into(), Value::Array(patches));
-        }
-        if let Some(v) = &a.variant {
-            opencode_extra.insert("variant".into(), Value::String(v.clone()));
-        }
-        if let Some(err) = &a.error {
-            opencode_extra.insert("error".into(), err.clone());
-        }
-        extra.insert("opencode".into(), Value::Object(opencode_extra));
-
         // Compute `file_mutations` for this turn inline:
         //   1. If we have a snapshot repo AND a snapshot pair (prev_after,
         //      this turn's last snapshot), walk the git2 tree↔tree diff
@@ -521,7 +468,6 @@ impl<'a> Builder<'a> {
             token_usage,
             environment,
             delegations,
-            extra,
             file_mutations,
         });
     }
@@ -639,7 +585,6 @@ fn to_invocation(
         input,
         result,
         category: tool_category(&tp.tool),
-        ..Default::default()
     }
 }
 
@@ -720,12 +665,6 @@ fn to_data_map(v: &Value) -> HashMap<String, Value> {
             m
         }
     }
-}
-
-fn json_num(v: f64) -> Value {
-    serde_json::Number::from_f64(v)
-        .map(Value::Number)
-        .unwrap_or(Value::Null)
 }
 
 // ── ConversationProvider trait impl ─────────────────────────────────
@@ -1004,21 +943,6 @@ mod tests {
         let write = &assistant.tool_uses[1];
         assert_eq!(write.name, "write");
         assert_eq!(write.category, Some(ToolCategory::FileWrite));
-    }
-
-    #[test]
-    fn snapshots_surface_on_assistant_extra() {
-        let (_t, mgr) = setup(BASIC_SQL);
-        let view = to_view(&mgr.read_session("ses_x").unwrap());
-        let assistant = &view.turns[1];
-        let snaps = assistant.extra["opencode"]["snapshots"].as_array().unwrap();
-        assert_eq!(
-            snaps,
-            &[
-                Value::String("snap_a".into()),
-                Value::String("snap_b".into())
-            ]
-        );
     }
 
     #[test]

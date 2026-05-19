@@ -75,8 +75,10 @@ fn test_to_view_produces_expected_turns() {
     let session = manager.read_session(PROJECT_CWD, "demo-session-1").unwrap();
     let view = manager.to_view(&session);
 
-    // Turn count: user + assistant + toolResult + assistant = 4
-    assert_eq!(view.turns.len(), 4);
+    // Turn count: user + assistant + assistant = 3
+    // (tool-result entries fold into the assistant's tool_uses[i].result;
+    // they no longer surface as standalone turns.)
+    assert_eq!(view.turns.len(), 3);
     assert_eq!(view.provider_id.as_deref(), Some("pi"));
     // files_changed should include "hello.rs"
     assert!(view.files_changed.iter().any(|f| f == "hello.rs"));
@@ -94,11 +96,11 @@ fn test_derive_path_from_fixture() {
 
     let path = toolpath_pi::derive_path(&session, &DeriveConfig::default());
 
-    // Path has 4 steps (one per turn).
-    assert_eq!(path.steps.len(), 4);
+    // Path has 3 steps (one per turn; tool-result entries fold into the
+    // matching assistant turn rather than emitting standalone turns).
+    assert_eq!(path.steps.len(), 3);
     // Path ID format.
     assert!(path.path.id.starts_with("path-pi-"));
-    // Head points at the last step.
     // Head matches the last turn's native id (which is the source entry id).
     assert_eq!(path.path.head, "m4");
     // Base URI derived from cwd.

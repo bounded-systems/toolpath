@@ -228,7 +228,10 @@ fn roundtrip_preserves_tool_calls_with_results() {
 }
 
 #[test]
-fn roundtrip_preserves_tokens() {
+fn roundtrip_preserves_input_output_tokens() {
+    // Input/output/cached tokens survive via Turn.token_usage.
+    // Thoughts/tool/total tokens were Gemini-extra only and don't
+    // round-trip now that Turn.extra is gone.
     let source = load_source_conversation();
     let (_, rebuilt, _) = roundtrip(&source);
 
@@ -247,14 +250,14 @@ fn roundtrip_preserves_tokens() {
         assert_eq!(bt.input, at.input, "input tokens at msg {}", i);
         assert_eq!(bt.output, at.output, "output tokens at msg {}", i);
         assert_eq!(bt.cached, at.cached, "cached tokens at msg {}", i);
-        assert_eq!(bt.thoughts, at.thoughts, "thoughts tokens at msg {}", i);
-        assert_eq!(bt.tool, at.tool, "tool tokens at msg {}", i);
-        assert_eq!(bt.total, at.total, "total tokens at msg {}", i);
     }
 }
 
 #[test]
-fn roundtrip_preserves_thoughts_losslessly() {
+fn roundtrip_preserves_thought_subjects_and_descriptions() {
+    // Subject/description survive via the flattened `Turn.thinking`
+    // string, which the projector splits and re-parses. Thought
+    // timestamps lived only in Gemini extras and are now lost.
     let source = load_source_conversation();
     let (_, rebuilt, _) = roundtrip(&source);
 
@@ -284,11 +287,6 @@ fn roundtrip_preserves_thoughts_losslessly() {
             assert_eq!(
                 b.description, a.description,
                 "thought description mismatch at msg {} idx {}",
-                i, j
-            );
-            assert_eq!(
-                b.timestamp, a.timestamp,
-                "thought timestamp mismatch at msg {} idx {}",
                 i, j
             );
         }

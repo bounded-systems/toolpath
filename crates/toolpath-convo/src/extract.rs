@@ -304,8 +304,6 @@ fn build_turn(step: &Step, extra: &HashMap<String, serde_json::Value>) -> Turn {
 
     let delegations = build_delegations(extra);
 
-    let turn_extra = build_turn_extra(extra);
-
     let parent_id = step.step.parents.first().cloned();
 
     Turn {
@@ -322,7 +320,6 @@ fn build_turn(step: &Step, extra: &HashMap<String, serde_json::Value>) -> Turn {
         environment,
         delegations,
         file_mutations: Vec::new(),
-        extra: turn_extra,
     }
 }
 
@@ -377,7 +374,6 @@ fn build_inline_tool_uses(extra: &HashMap<String, serde_json::Value>) -> Vec<Too
                 input,
                 result,
                 category,
-                ..Default::default()
             })
         })
         .collect()
@@ -389,58 +385,6 @@ fn build_delegations(extra: &HashMap<String, serde_json::Value>) -> Vec<Delegate
         .get("delegations")
         .and_then(|v| serde_json::from_value::<Vec<DelegatedWork>>(v.clone()).ok())
         .unwrap_or_default()
-}
-
-/// Build `Turn.extra`. Merges:
-///   - the shared-derive `turn_extra` object (a map of provider-namespaced
-///     keys preserved verbatim);
-///   - Claude's bespoke `entry_extra` plus top-level `version`/`user_type`/
-///     `request_id` fields (packed under `extra["claude"]`).
-fn build_turn_extra(
-    extra: &HashMap<String, serde_json::Value>,
-) -> HashMap<String, serde_json::Value> {
-    let mut out: HashMap<String, serde_json::Value> = HashMap::new();
-
-    // Shared-derive path: verbatim map.
-    if let Some(obj) = extra.get("turn_extra").and_then(|v| v.as_object()) {
-        for (k, v) in obj {
-            out.insert(k.clone(), v.clone());
-        }
-    }
-
-    // Claude bespoke path: hoist known top-level fields under `"claude"`.
-    let mut claude_data = serde_json::Map::new();
-    if let Some(v) = extra.get("version") {
-        claude_data.insert("version".to_string(), v.clone());
-    }
-    if let Some(v) = extra.get("user_type") {
-        claude_data.insert("user_type".to_string(), v.clone());
-    }
-    if let Some(v) = extra.get("request_id") {
-        claude_data.insert("request_id".to_string(), v.clone());
-    }
-    if let Some(entry_extra) = extra.get("entry_extra").and_then(|v| v.as_object()) {
-        for (k, v) in entry_extra {
-            claude_data.insert(k.clone(), v.clone());
-        }
-    }
-    if !claude_data.is_empty() {
-        // Merge with any existing `"claude"` key from turn_extra so we
-        // don't clobber provider-supplied fields.
-        let merged = match out.remove("claude") {
-            Some(serde_json::Value::Object(existing)) => {
-                let mut m = existing;
-                for (k, v) in claude_data {
-                    m.entry(k).or_insert(v);
-                }
-                serde_json::Value::Object(m)
-            }
-            _ => serde_json::Value::Object(claude_data),
-        };
-        out.insert("claude".to_string(), merged);
-    }
-
-    out
 }
 
 fn build_token_usage(extra: &HashMap<String, serde_json::Value>) -> Option<TokenUsage> {
@@ -518,7 +462,6 @@ fn build_tool_invocation(extra: &HashMap<String, serde_json::Value>) -> ToolInvo
         input,
         result,
         category,
-        ..Default::default()
     }
 }
 
@@ -1226,86 +1169,6 @@ mod tests {
 
         let view = extract_conversation(&path);
         assert!(view.turns[0].environment.is_none());
-    }
-
-    #[test]
-    fn test_extra_claude_metadata() {
-        let path = make_path(vec![make_step(
-            "step-001",
-            "agent:claude-opus-4-6",
-            "2026-01-01T00:00:00Z",
-            vec![],
-            vec![(
-                "agent://claude-code/sess-1",
-                "conversation.append",
-                extras(&[
-                    ("role", serde_json::json!("assistant")),
-                    ("text", serde_json::json!("hi")),
-                    ("version", serde_json::json!("1.0.30")),
-                    ("user_type", serde_json::json!("pro")),
-                    ("request_id", serde_json::json!("req-abc-123")),
-                ]),
-            )],
-        )]);
-
-        let view = extract_conversation(&path);
-        let claude = view.turns[0].extra.get("claude").unwrap();
-        assert_eq!(claude["version"], serde_json::json!("1.0.30"));
-        assert_eq!(claude["user_type"], serde_json::json!("pro"));
-        assert_eq!(claude["request_id"], serde_json::json!("req-abc-123"));
-    }
-
-    #[test]
-    fn test_entry_extra_merged_into_claude() {
-        let path = make_path(vec![make_step(
-            "step-001",
-            "agent:claude-opus-4-6",
-            "2026-01-01T00:00:00Z",
-            vec![],
-            vec![(
-                "agent://claude-code/sess-1",
-                "conversation.append",
-                extras(&[
-                    ("role", serde_json::json!("assistant")),
-                    ("text", serde_json::json!("hi")),
-                    (
-                        "entry_extra",
-                        serde_json::json!({
-                            "entrypoint": "cli",
-                            "isMeta": true,
-                            "slug": "my-project"
-                        }),
-                    ),
-                ]),
-            )],
-        )]);
-
-        let view = extract_conversation(&path);
-        let claude = view.turns[0].extra.get("claude").unwrap();
-        assert_eq!(claude["entrypoint"], serde_json::json!("cli"));
-        assert_eq!(claude["isMeta"], serde_json::json!(true));
-        assert_eq!(claude["slug"], serde_json::json!("my-project"));
-    }
-
-    #[test]
-    fn test_extra_empty_when_no_metadata() {
-        let path = make_path(vec![make_step(
-            "step-001",
-            "human:alex",
-            "2026-01-01T00:00:00Z",
-            vec![],
-            vec![(
-                "agent://claude-code/sess-1",
-                "conversation.append",
-                extras(&[
-                    ("role", serde_json::json!("user")),
-                    ("text", serde_json::json!("hello")),
-                ]),
-            )],
-        )]);
-
-        let view = extract_conversation(&path);
-        assert!(view.turns[0].extra.is_empty());
     }
 
     #[test]

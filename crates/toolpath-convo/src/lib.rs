@@ -285,14 +285,6 @@ pub struct Turn {
     /// the entry links back to that `ToolInvocation::id`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub file_mutations: Vec<FileMutation>,
-
-    /// Provider-specific data that doesn't fit the common schema.
-    ///
-    /// Providers namespace their data under a provider key (e.g.
-    /// `extra["claude"]` for Claude Code) to avoid collisions when
-    /// consumers work with multiple providers.
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    pub extra: HashMap<String, serde_json::Value>,
 }
 
 /// A complete conversation from any provider.
@@ -561,7 +553,6 @@ mod tests {
                     token_usage: None,
                     environment: None,
                     delegations: vec![],
-                    extra: HashMap::new(),
                     file_mutations: Vec::new(),
                 },
                 Turn {
@@ -580,7 +571,6 @@ mod tests {
                             is_error: false,
                         }),
                         category: Some(ToolCategory::FileRead),
-                        ..Default::default()
                     }],
                     model: Some("claude-opus-4-6".into()),
                     stop_reason: Some("end_turn".into()),
@@ -592,7 +582,6 @@ mod tests {
                     }),
                     environment: None,
                     delegations: vec![],
-                    extra: HashMap::new(),
                     file_mutations: Vec::new(),
                 },
                 Turn {
@@ -608,7 +597,6 @@ mod tests {
                     token_usage: None,
                     environment: None,
                     delegations: vec![],
-                    extra: HashMap::new(),
                     file_mutations: Vec::new(),
                 },
             ],
@@ -886,7 +874,6 @@ mod tests {
             input: serde_json::json!({"command": "ls"}),
             result: None,
             category: Some(ToolCategory::Shell),
-            ..Default::default()
         };
         let json = serde_json::to_string(&ti).unwrap();
         assert!(json.contains("\"shell\""));
@@ -902,7 +889,6 @@ mod tests {
             input: serde_json::json!({}),
             result: None,
             category: None,
-            ..Default::default()
         };
         let json = serde_json::to_string(&ti).unwrap();
         assert!(!json.contains("category"));
@@ -957,7 +943,6 @@ mod tests {
                 turns: vec![],
                 result: None,
             }],
-            extra: HashMap::new(),
             file_mutations: Vec::new(),
         };
         let json = serde_json::to_string(&turn).unwrap();
