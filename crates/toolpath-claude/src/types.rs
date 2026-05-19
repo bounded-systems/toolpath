@@ -342,29 +342,26 @@ impl std::str::FromStr for MessageRole {
     }
 }
 
+// Claude's JSONL envelope is camelCase (`parentUuid`, `sessionId`, etc.),
+// but the embedded `message.usage` object is forwarded straight from the
+// Anthropic API — which is snake_case. Mismatching this breaks the UI's
+// context-window readout (it parses `input_tokens` etc. and renders NaN
+// when they're absent).
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "snake_case")]
 pub struct Usage {
-    #[serde(alias = "input_tokens")]
     pub input_tokens: Option<u32>,
-    #[serde(alias = "output_tokens")]
     pub output_tokens: Option<u32>,
-    #[serde(alias = "cache_creation_input_tokens")]
     pub cache_creation_input_tokens: Option<u32>,
-    #[serde(alias = "cache_read_input_tokens")]
     pub cache_read_input_tokens: Option<u32>,
-    #[serde(alias = "cache_creation")]
     pub cache_creation: Option<CacheCreation>,
-    #[serde(alias = "service_tier")]
     pub service_tier: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "snake_case")]
 pub struct CacheCreation {
-    #[serde(alias = "ephemeral_5m_input_tokens")]
     pub ephemeral_5m_input_tokens: Option<u32>,
-    #[serde(alias = "ephemeral_1h_input_tokens")]
     pub ephemeral_1h_input_tokens: Option<u32>,
 }
 

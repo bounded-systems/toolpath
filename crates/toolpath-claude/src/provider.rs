@@ -324,21 +324,52 @@ fn conversation_to_view(convo: &Conversation) -> ConversationView {
         events.push(preamble_to_event(idx, raw));
     }
 
+    // Map from "absorbed-or-skipped entry UUID" → "the previous
+    // turn-bearing entry's UUID". Used so that an assistant turn whose
+    // wire parentUuid points at a tool-result-only entry (or any other
+    // absorbed entry that didn't become a Turn) gets a Turn.parent_id
+    // that still maps onto a real Turn — keeping the IR's turn-to-turn
+    // chain intact for `derive_path`. The original UUID is preserved
+    // via the `tool_result_user` event.
+    let mut parent_rewrites: HashMap<String, String> = HashMap::new();
+    let mut last_turn_uuid: Option<String> = None;
+
     for entry in &convo.entries {
         let Some(msg) = &entry.message else {
             // Message-less entries (attachments, snapshots) survive as
             // events so the projector can re-emit them.
             events.push(entry_to_event(entry));
+            if let Some(prev) = &last_turn_uuid {
+                parent_rewrites.insert(entry.uuid.clone(), prev.clone());
+            }
             continue;
         };
 
-        // Tool-result-only user entries get merged into existing turns
+        // Tool-result-only user entries get merged into the preceding
+        // assistant's tool_uses[i].result and dropped from the turn
+        // stream. The next assistant entry's wire parentUuid points at
+        // this entry; we record a rewrite so the IR's turn-to-turn chain
+        // stays connected. (The projector re-synthesizes the wire-level
+        // tool-result entries on the way out from tool_uses[i].result —
+        // their original UUIDs aren't preserved across the roundtrip,
+        // but the Claude UI walks the chain by parentUuid, not by
+        // specific UUIDs, so that's fine.)
         if is_tool_result_only(entry) {
             merge_tool_results(&mut turns, msg);
+            if let Some(prev) = &last_turn_uuid {
+                parent_rewrites.insert(entry.uuid.clone(), prev.clone());
+            }
             continue;
         }
 
-        turns.push(message_to_turn(entry, msg));
+        let mut turn = message_to_turn(entry, msg);
+        if let Some(pid) = turn.parent_id.as_ref()
+            && let Some(real) = parent_rewrites.get(pid)
+        {
+            turn.parent_id = Some(real.clone());
+        }
+        last_turn_uuid = Some(turn.id.clone());
+        turns.push(turn);
     }
 
     // Re-derive delegation results now that tool results are merged
