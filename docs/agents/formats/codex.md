@@ -809,7 +809,7 @@ The mapping below is what the provider actually emits. Source:
 | `turn_context` (full) | `ConversationEvent` (round-trip preservation) |
 | `message` role `user` | `Turn { role: User }` → Step with `actor: "human:user"` |
 | `message` role `assistant` | `Turn { role: Assistant, model }` → Step with `actor: "agent:<model>"` |
-| `message` role `developer` | `Turn { role: System }` → Step with `actor: "system:codex"` |
+| `message` role `developer` | `Turn { role: System }` → Step with `actor: "tool:codex"` |
 | `reasoning.encrypted_content` | `Turn.extra["codex"]["reasoning_encrypted"]` (**not** `Turn.thinking` — it would render as ciphertext) |
 | `reasoning.summary[].text` / `reasoning.content[].text` (plaintext) | `Turn.thinking` on the next assistant turn |
 | `function_call` / `function_call_output` paired by `call_id` | `Turn.tool_uses[].{input, result}` |

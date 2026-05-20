@@ -151,9 +151,9 @@ fn head_equals_last_step_id() {
 #[test]
 fn actor_scheme_matches_source_role() {
     // Source role → actor-prefix mapping must be consistent:
-    //   "developer" | "system" → "system:*"
-    //   "user"                 → "human:*"
-    //   "assistant"            → "agent:*"
+    //   "user"                  → "human:*"
+    //   "assistant"             → "agent:*"
+    //   "developer" | "system"  → "tool:*"
     // We can't assert a strict 1:1 turn→step mapping (carrier turns
     // may collapse), but we can assert every observed role in the
     // view reaches a step with the expected actor prefix.
@@ -178,7 +178,7 @@ fn actor_scheme_matches_source_role() {
         assert!(prefixes.contains("agent"), "no step has an agent:* actor");
     }
     if system_seen {
-        assert!(prefixes.contains("system"), "no step has a system:* actor");
+        assert!(prefixes.contains("tool"), "no step has a tool:* actor");
     }
 }
 

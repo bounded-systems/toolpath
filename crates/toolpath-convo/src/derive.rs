@@ -318,7 +318,7 @@ pub fn derive_path(view: &ConversationView, config: &DeriveConfig) -> Path {
         } else {
             event.id.clone()
         };
-        let actor = format!("provider:{}", provider);
+        let actor = format!("tool:{}", provider);
         actors
             .entry(actor.clone())
             .or_insert_with(|| ActorDefinition {
@@ -448,8 +448,8 @@ fn actor_for_turn(turn: &Turn, provider: &str) -> String {
             let model = turn.model.as_deref().unwrap_or("unknown");
             format!("agent:{}", model)
         }
-        Role::System => format!("system:{}", provider),
-        Role::Other(s) => format!("{}:unknown", s),
+        Role::System => format!("tool:{}", provider),
+        Role::Other(_) => format!("tool:{}", provider),
     }
 }
 
@@ -477,10 +477,10 @@ fn record_actor(
             ..Default::default()
         }
     } else {
-        // system:*, other:*
         let name = actor.split_once(':').map(|x| x.1).unwrap_or("").to_string();
         ActorDefinition {
             name: Some(name),
+            provider: Some(provider.to_string()),
             ..Default::default()
         }
     };
@@ -719,7 +719,7 @@ mod tests {
         let turn = base_turn("t1", Role::System);
         let view = view_with(vec![turn]);
         let path = derive_path(&view, &DeriveConfig::default());
-        assert_eq!(path.steps[0].step.actor, "system:pi");
+        assert_eq!(path.steps[0].step.actor, "tool:pi");
     }
 
     #[test]
@@ -727,7 +727,7 @@ mod tests {
         let turn = base_turn("t1", Role::Other("tool".into()));
         let view = view_with(vec![turn]);
         let path = derive_path(&view, &DeriveConfig::default());
-        assert_eq!(path.steps[0].step.actor, "tool:unknown");
+        assert_eq!(path.steps[0].step.actor, "tool:pi");
     }
 
     #[test]
@@ -739,6 +739,39 @@ mod tests {
         let view = view_with(vec![t1, t2]);
         let path = derive_path(&view, &DeriveConfig::default());
         assert_eq!(path.steps[1].step.parents, vec!["t1".to_string()]);
+    }
+
+    #[test]
+    fn derived_path_validates_against_base_schema() {
+        let user = base_turn("t1", Role::User);
+        let mut assistant = base_turn("t2", Role::Assistant);
+        assistant.parent_id = Some("t1".into());
+        assistant.model = Some("gpt-5.5".into());
+        let system = base_turn("t3", Role::System);
+        let other = base_turn("t4", Role::Other("bash".into()));
+
+        let mut view = view_with(vec![user, assistant, system, other]);
+        view.events.push(crate::ConversationEvent {
+            id: "e1".into(),
+            timestamp: "2026-01-01T00:00:00Z".into(),
+            parent_id: None,
+            event_type: "attachment".into(),
+            data: HashMap::new(),
+        });
+
+        let path = derive_path(&view, &DeriveConfig::default());
+        let graph = serde_json::json!({
+            "graph": { "id": "g1" },
+            "paths": [serde_json::to_value(&path).unwrap()],
+        });
+
+        let schema: serde_json::Value = serde_json::from_str(toolpath::SCHEMA_JSON).unwrap();
+        let validator = jsonschema::validator_for(&schema).unwrap();
+        let errors: Vec<String> = validator
+            .iter_errors(&graph)
+            .map(|e| format!("at {}: {e}", e.instance_path()))
+            .collect();
+        assert!(errors.is_empty(), "base-schema violations:\n{}", errors.join("\n"));
     }
 
     fn fw_tool(name: &str, id: &str, input: serde_json::Value) -> ToolInvocation {

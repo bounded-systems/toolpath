@@ -2,6 +2,22 @@
 
 All notable changes to the Toolpath workspace are documented here.
 
+## Actor validation fixes — derived paths conform to the base schema — unreleased
+
+`derive_path` produced actor strings the base JSON Schema rejected: event steps
+used `provider:<name>`, system turns used `system:<provider>`, and `Role::Other`
+turns used `<role>:unknown` — none of those prefixes are in the schema's
+`actorRef` vocabulary. Separately the `actorRef` pattern's name segment
+disallowed `.`, so dotted model identifiers like `agent:gpt-5.5` failed
+validation.
+
+`toolpath`: `actorRef`'s name segment now allows `.`. `toolpath-convo`:
+`derive_path` emits `tool:<provider>` for event steps, system turns, and
+`Role::Other` turns (the role label stays in the change's `role` field), and a
+new test derives a path covering every actor variant and validates it against
+the embedded base schema so this can't regress. Touches `toolpath` and
+`toolpath-convo`; versions to be bumped at release.
+
 ## `path resume` — one-shot resume into a coding agent — 2026-05-09
 
 `path-cli` 0.9.0. New subcommand `path resume <input>` that fetches a
