@@ -11,58 +11,108 @@ permalink: /kinds/agent-coding-session/v1.0.0/
   <dd><code>https://toolpath.dev/kinds/agent-coding-session/v1.0.0</code></dd>
   <dt>Schema</dt>
   <dd><a href="./schema.json"><code>schema.json</code></a></dd>
-  <dt>Status</dt>
-  <dd>Stable. This URI is immutable; subsequent revisions ship at a new version URI.</dd>
 </dl>
 
-A Toolpath path whose `meta.kind` is this URI records an AI coding conversation. It is an ordinary Toolpath path — `head`-ancestry, dead ends, signatures, and `base` all work as in the [base format](/format/) — with the additional structure below.
+A Toolpath path whose `meta.kind` is this URI records an AI coding conversation. It is an ordinary path with the extra structure described here. `head`-ancestry, dead ends, signatures, and `base` all behave as in the [base format](/format/).
+
+Every such path comes from one place: the shared `ConversationView → Path` derivation in `toolpath-convo` (`derive_path`), which the provider crates (`toolpath-claude`, `toolpath-gemini`, `toolpath-codex`, `toolpath-opencode`, `toolpath-pi`) all call. The field shapes below are therefore exact. The only producer-specific parts are the contents of a tool's `input` and the diff text in a change's `raw`.
+
+Constraints apply by structural `type`, not by artifact key: a `change` entry is checked only when its `structural.type` is one named here, and extra properties never make a path invalid. [`schema.json`](./schema.json) encodes the rules; apply it alongside the base schema. The URI is immutable. Later revisions ship under a new version URI.
 
 ## The turn payload
 
-A step that represents a conversational turn has one entry in its `change` map that is an `ArtifactChange` whose `structural.type` is `"conversation.append"`. **Locate it by that `type`, not by artifact key** — the key is producer-specific (`agent://claude/<session-id>`, `gemini://<session-id>`, `codex://<session-id>`, `opencode://<session-id>`, or `<provider>://<conversation-id>`).
+One entry in a turn's `change` map has `structural.type` of `"conversation.append"`. Find it by that type: the artifact key is producer-specific, formed as `<source>://<conversation-id>` from the harness in `meta.source` (e.g. `claude-code://…`, `gemini-cli://…`, `codex://…`, `opencode://…`, `pi://…`).
 
-That change's `structural` object always carries:
+Its `structural` object always carries:
 
 | Field  | Type   | Meaning                                                            |
 | ------ | ------ | ------------------------------------------------------------------ |
 | `type` | string | the literal `"conversation.append"`                                |
 | `role` | string | `"user"`, `"assistant"`, `"system"`, or a producer-specific string |
+| `text` | string | the visible prose; present even when empty (`""`)                  |
 
-and, when the turn has prose, also carries `text` (string; treat a missing `text` as empty). It may additionally carry any of the following — all optional and producer-dependent, so check before using each:
+It may also carry any of the following, present only when the turn has them:
+
+| Field | Type | Meaning |
+| ----- | ---- | ------- |
+| `thinking` | string | the model's reasoning text |
+| `tool_uses` | array | tools the agent invoked (shape below) |
+| `token_usage` | object | per-turn token counts (shape below) |
+| `stop_reason` | string | why the model stopped (`end_turn`, `tool_use`, …) |
+| `delegations` | array | sub-agent work spawned from this turn (shape below) |
+| `environment` | object | working environment at this turn (shape below) |
+
+The model identifier is not on the change. It lives in `step.actor` (`agent:<model>`) and `meta.actors`. There is no provider-specific blob: every field the derivation captures is one of those listed above.
+
+### `tool_uses`
+
+Each element is an object:
+
+| Field | Type | Notes |
+| ----- | ---- | ----- |
+| `id` | string | provider-assigned invocation id |
+| `name` | string | provider tool name (`Read`, `Bash`, `edit`, …) |
+| `input` | any | tool arguments; shape is producer-specific |
+| `category` | string \| null | Toolpath's classification: `file_read`, `file_write`, `file_search`, `shell`, `network`, `delegation`, or `null` when unrecognized |
+| `result` | object | `{ "content": string, "is_error": boolean }`, when the result landed in the same turn |
+
+`id`, `name`, `input`, and `category` are always present (`category` may be `null`); `result` is optional.
+
+### `token_usage`
+
+| Field | Type | Notes |
+| ----- | ---- | ----- |
+| `input_tokens` | integer \| null | always present |
+| `output_tokens` | integer \| null | always present |
+| `cache_read_tokens` | integer | only when the source records it |
+| `cache_write_tokens` | integer | only when the source records it |
+
+### `environment`
+
+`{ "working_dir"?: string, "vcs_branch"?: string, "vcs_revision"?: string }`; every field optional.
+
+### `delegations`
+
+Each element is `{ "agent_id": string, "prompt": string, "turns"?: array, "result"?: string }`. `turns` holds the sub-agent's own turns when the producer inlines them.
+
+## File changes
+
+When a turn writes files, its step carries sibling `change` entries keyed by file path, each with `structural.type` of `"file.write"`. The unified diff, when available, is on the change's `raw`, not inside `structural`. The `structural` object holds, all optional:
 
 | Field | Meaning |
 | ----- | ------- |
-| `thinking` | the model's reasoning text for this turn |
-| `tool_uses` | the tools the agent invoked this turn; element shape is producer-specific — a bare tool-name string, or an object like `{ "id", "name", "input", "category", "result"? }` |
-| `token_usage`, or `input_tokens` / `output_tokens` / `cache_read_tokens` / `cache_write_tokens` | token accounting for the turn |
-| `stop_reason` | why the model stopped (`end_turn`, `tool_use`, …) |
-| `environment`, or `cwd` / `git_branch` / `version` / `user_type` | the session environment at this turn |
-| `delegations` | sub-agent work spawned from this turn |
-| `model` | the model that produced an assistant turn |
-| `turn_extra` / `entry_extra` / `<provider>` | a producer-namespaced bag of everything else, keyed by the producer's short name (`"claude"`, `"gemini"`, …) |
+| `tool_id` | the `tool_uses[].id` that produced the mutation, when attributable |
+| `tool` | that tool's `name` |
+| `operation` | `"add"`, `"update"`, `"delete"`, or a producer-specific tag |
+| `before` / `after` | file contents before / after, when known |
+| `rename_to` | the new path, for a rename |
+
+## Non-turn entries
+
+Entries that aren't turns (attachments, preamble lines, snapshots, hook results) become steps with `structural.type` of `"conversation.event"`, carrying `entry_type` and sometimes `event_source_id` plus the producer's event data. They exist so a document round-trips back to the source format. They are not part of the transcript.
 
 ## Actors
 
-`step.actor` follows the usual `type:name` convention:
+`step.actor` follows the `type:name` convention, assigned by role:
 
-| Actor pattern | Turn |
-| ------------- | ---- |
+| Actor | Turn |
+| ----- | ---- |
 | `human:user` | a user message |
-| `agent:<model>` | a model reply, named by model when the source records one (e.g. `agent:gpt-5.4`) |
-| `agent:<harness>` | a model reply when the model is not recorded (e.g. `agent:claude-code`) |
-| `system:<harness>` or `tool:<harness>` | a synthetic entry — session init, system prompt, environment note |
-| `agent:<harness>/tool:<tool-name>` | a tool execution that the producer broke out as its own step (e.g. `agent:claude-code/tool:Write`) |
+| `agent:<model>` | a model reply, named by the recorded model, or `agent:unknown` when none was recorded |
+| `tool:<provider>` | a system turn (session init, system prompt), any other producer role, or a non-turn event step |
 
-Walk steps in `head`-ancestry order for the linear transcript.
+`meta.actors` defines each actor the steps reference; `agent:` entries carry `provider` and `model`. A turn's original role is always in its `role` field, so collapsing system and other roles onto `tool:<provider>` loses nothing. Walk steps in `head`-ancestry order for the linear transcript.
 
 ## Path metadata
 
-`meta.source` names the producing harness: `claude-code`, `gemini-cli`, `codex`, `opencode`, or `pi`. `meta.actors` defines the actors the steps reference. `meta.extra` may carry a producer-namespaced aggregate (e.g. `meta.extra.codex.files_changed`).
+| Field | Meaning |
+| ----- | ------- |
+| `meta.kind` | this URI |
+| `meta.source` | the producing harness: `claude-code`, `gemini-cli`, `codex`, `opencode`, or `pi` |
+| `meta.title` | session title |
+| `meta.actors` | the actor definitions the steps reference |
+| `meta.files_changed` | file paths touched across the session |
+| `meta.vcs_remote` | repository URL, when known |
+| `meta.producer` | `{ "name": string, "version"?: string }`, the software that produced the session |
 
-## What's producer-specific
-
-Anything not described above. Some producers add synthetic steps (a session-init step, system-message steps) with their own `structural.type` rather than `conversation.append`; some attach tool calls as additional `change` entries on the turn's step (keyed by file path, with a producer-specific `structural.type` such as `file.write`, `codex.update`, or `gemini.write_file`, and often a unified diff in `raw`), while others record a tool execution as a separate child step. Treat anything that is not a `conversation.append` change as an ordinary Toolpath change — `meta.source` tells you whose conventions to expect.
-
-## Producers
-
-`agent-coding-session` paths are produced by every conversation provider crate (`toolpath-claude`, `toolpath-gemini`, `toolpath-codex`, `toolpath-opencode`) and by the shared `ConversationView → Path` derivation in `toolpath-convo` (which `toolpath-pi` uses).
+`files_changed`, `vcs_remote`, and `producer` sit directly under `meta` (they ride `PathMeta`'s flattened `extra`), not under a nested `meta.extra`.
