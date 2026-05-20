@@ -13,9 +13,9 @@
 
     "actorRef": {
       "type": "string",
-      "pattern": "^(human|agent|tool|ci):[a-zA-Z0-9_-]+(\/[a-zA-Z0-9_.-]+)?$",
-      "description": "Actor reference string (e.g., 'human:alex', 'agent:claude-code', 'tool:rustfmt/1.5.0')",
-      "examples": ["human:alex", "agent:claude-code", "tool:rustfmt", "ci:github-actions"]
+      "pattern": "^(human|agent|tool|ci):[a-zA-Z0-9_.-]+(\/[a-zA-Z0-9_.-]+)?$",
+      "description": "Actor reference string (e.g., 'human:alex', 'agent:gpt-5.5', 'tool:rustfmt/1.5.0').",
+      "examples": ["human:alex", "agent:claude-code", "agent:gpt-5.5", "tool:rustfmt", "ci:github-actions"]
     },
 
     "identity": {

@@ -260,11 +260,16 @@ An **actor** is anything that performs steps. The short form is a string:
 ```
 human:alex
 agent:claude-code
+agent:gpt-5.5
 agent:claude-code/session-xyz
 tool:rustfmt
 tool:rustfmt/1.5.0
 ci:github-actions/workflow-123
 ```
+
+The prefix is one of `human`, `agent`, `tool`, or `ci`; the name segment may
+contain letters, digits, `.`, `_`, and `-`, with an optional `/`-delimited
+suffix.
 
 Actor strings are referenced in `step.actor`. Full actor definitions with
 identity and key information are provided in `meta.actors`.

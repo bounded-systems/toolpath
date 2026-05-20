@@ -2690,6 +2690,7 @@ name = "toolpath-convo"
 version = "0.8.0"
 dependencies = [
  "chrono",
+ "jsonschema",
  "serde",
  "serde_json",
  "similar",
