@@ -37,7 +37,7 @@ export default function (eleventyConfig) {
   // Kind schema fragments — JSON files under site/kinds/ are served verbatim
   // alongside their HTML spec pages so a versioned kind URI can resolve to
   // either form.
-  eleventyConfig.addPassthroughCopy("kinds/**/*.json");
+  eleventyConfig.addPassthroughCopy("kinds/**/*.json", { expand: true });
 
   // Self-hosted fonts (latin subset only) — pulled from @fontsource packages
   // at install time, copied to /fonts/ at build time. Filenames are stable

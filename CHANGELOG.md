@@ -26,9 +26,14 @@ plus an additive JSON Schema fragment) and published under
 JSON Schema (`$defs/pathMeta`) reference the registry rather than carrying
 kind-specific contracts inline.
 
+`path validate` is now kind-aware: the kind schemas are bundled into the CLI
+and, for each path carrying a recognized `meta.kind`, the matching kind schema
+is applied on top of the base schema. An unrecognized `kind` validates against
+the base schema only.
+
 Touches `toolpath`, `toolpath-convo`, `toolpath-claude`, `toolpath-gemini`,
-`toolpath-codex`, `toolpath-opencode`, and `toolpath-pi`; versions to be
-bumped at release.
+`toolpath-codex`, `toolpath-opencode`, `toolpath-pi`, and `path-cli`; versions
+to be bumped at release.
 
 ## Plumbing/porcelain split — `path p …` — 2026-05-20
 
