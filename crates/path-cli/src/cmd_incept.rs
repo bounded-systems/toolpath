@@ -1,8 +1,12 @@
-//! Deprecation shim for `path incept`.
+//! `path p incept` — file/stdin-shaped sibling of `export claude`.
 //!
-//! `path incept --input X --project Y` became `path export claude --input X
-//! --project Y`. This shim preserves the old flag shape for one release,
-//! delegating to the new handler.
+//! `incept --input X --project Y` writes a toolpath document into a
+//! Claude session layout under `<project>`. `--input` defaults to
+//! stdin so `path p import claude … --no-cache | path p incept
+//! --project /tmp/sandbox` composes cleanly; `--project` defaults to
+//! the current directory. It's the older surface kept for shell
+//! pipelines that prefer that ergonomic over `export claude --input X
+//! --project Y`.
 
 use anyhow::Result;
 use clap::Args;
@@ -10,7 +14,7 @@ use std::path::PathBuf;
 
 #[derive(Args, Debug)]
 pub struct InceptArgs {
-    /// Input toolpath document (JSON path, or cache id)
+    /// Input toolpath document (JSON path, or cache id). Reads stdin when omitted.
     #[arg(short, long)]
     input: Option<String>,
 
@@ -20,10 +24,6 @@ pub struct InceptArgs {
 }
 
 pub fn run(args: InceptArgs) -> Result<()> {
-    eprintln!(
-        "warning: `path incept` is deprecated; use `path export claude --project <dir>` instead"
-    );
-
     let input = match args.input {
         Some(s) => s,
         None => {
