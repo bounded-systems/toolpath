@@ -793,6 +793,97 @@ mod tests {
         );
     }
 
+    #[test]
+    fn derived_path_conforms_to_agent_coding_session_kind() {
+        // derive_path stamps meta.kind = agent-coding-session, so its output
+        // must satisfy that kind's schema. This view exercises every shape
+        // the kind constrains: each turn role, a tool call with a result, a
+        // file mutation, a delegation, token usage, environment, and an event.
+        let mut user = base_turn("t1", Role::User);
+        user.text = "implement the feature".into();
+
+        let mut assistant = base_turn("t2", Role::Assistant);
+        assistant.parent_id = Some("t1".into());
+        assistant.model = Some("gpt-5.5".into());
+        assistant.text = "on it".into();
+        assistant.thinking = Some("plan the edit".into());
+        assistant.stop_reason = Some("tool_use".into());
+        assistant.token_usage = Some(TokenUsage {
+            input_tokens: Some(100),
+            output_tokens: Some(20),
+            cache_read_tokens: Some(50),
+            cache_write_tokens: None,
+        });
+        assistant.environment = Some(EnvironmentSnapshot {
+            working_dir: Some("/repo".into()),
+            vcs_branch: Some("main".into()),
+            vcs_revision: None,
+        });
+        assistant.tool_uses = vec![ToolInvocation {
+            id: "call-1".into(),
+            name: "write_file".into(),
+            input: serde_json::json!({ "file_path": "a.rs", "content": "fn main() {}" }),
+            result: Some(ToolResult {
+                content: "ok".into(),
+                is_error: false,
+            }),
+            category: Some(crate::ToolCategory::FileWrite),
+        }];
+        assistant.file_mutations = vec![crate::FileMutation {
+            path: "a.rs".into(),
+            tool_id: Some("call-1".into()),
+            operation: Some("add".into()),
+            raw_diff: Some("@@ -0,0 +1 @@\n+fn main() {}".into()),
+            before: None,
+            after: Some("fn main() {}".into()),
+            rename_to: None,
+        }];
+        assistant.delegations = vec![DelegatedWork {
+            agent_id: "sub-1".into(),
+            prompt: "do the subtask".into(),
+            turns: vec![],
+            result: Some("done".into()),
+        }];
+
+        let mut system = base_turn("t3", Role::System);
+        system.parent_id = Some("t2".into());
+        system.text = "system note".into();
+
+        let mut other = base_turn("t4", Role::Other("tool".into()));
+        other.parent_id = Some("t3".into());
+        other.text = "tool output".into();
+
+        let mut view = view_with(vec![user, assistant, system, other]);
+        view.events.push(crate::ConversationEvent {
+            id: "e1".into(),
+            timestamp: "2026-01-01T00:00:00Z".into(),
+            parent_id: None,
+            event_type: "attachment".into(),
+            data: HashMap::new(),
+        });
+
+        let path = derive_path(&view, &DeriveConfig::default());
+        assert_eq!(
+            path.meta.as_ref().and_then(|m| m.kind.as_deref()),
+            Some(toolpath::v1::PATH_KIND_AGENT_CODING_SESSION),
+            "derive_path must stamp the agent-coding-session kind"
+        );
+
+        let schema_src = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../path-cli/kinds/agent-coding-session/v1.0.0/schema.json"
+        ))
+        .expect("read kind schema");
+        let schema: serde_json::Value = serde_json::from_str(&schema_src).unwrap();
+        let validator = jsonschema::validator_for(&schema).unwrap();
+        let value = serde_json::to_value(&path).unwrap();
+        let errors: Vec<String> = validator
+            .iter_errors(&value)
+            .map(|e| format!("at {}: {e}", e.instance_path()))
+            .collect();
+        assert!(errors.is_empty(), "kind-schema violations:\n{}", errors.join("\n"));
+    }
+
     fn fw_tool(name: &str, id: &str, input: serde_json::Value) -> ToolInvocation {
         ToolInvocation {
             id: id.to_string(),
