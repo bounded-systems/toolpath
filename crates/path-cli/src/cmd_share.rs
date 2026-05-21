@@ -551,11 +551,11 @@ pub fn run(args: ShareArgs) -> Result<()> {
     let opts = crate::fzf::PickOptions {
         with_nth: "4..",
         prompt: "share> ",
-        preview: Some("path show {1} --project {2} --session {3}"),
+        preview: Some("path show --ansi {1} --project {2} --session {3}"),
         // Stacked layout: preview above the list, list below. Fits narrow
         // terminals better than the default side-by-side and gives the
         // session preview the full terminal width to render `path show`.
-        preview_window: "up:60%:wrap",
+        preview_window: "up:60%:wrap-word",
         header: Some(&header),
         tiebreak: "index",
         multi: false,

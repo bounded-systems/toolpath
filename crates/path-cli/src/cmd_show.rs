@@ -69,14 +69,19 @@ pub enum ShowSource {
     },
 }
 
-pub fn run(source: ShowSource) -> Result<()> {
+pub fn run(source: ShowSource, ansi: bool) -> Result<()> {
     let path = derive_one(source)?;
     let doc = Graph::from_path(path);
     let opts = toolpath_md::RenderOptions {
         detail: toolpath_md::Detail::Summary,
         front_matter: false,
     };
-    print!("{}", toolpath_md::render(&doc, &opts));
+    let md = toolpath_md::render(&doc, &opts);
+    if ansi {
+        print!("{}", crate::term::markdown_to_ansi(&md));
+    } else {
+        print!("{md}");
+    }
     Ok(())
 }
 

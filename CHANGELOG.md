@@ -2,6 +2,32 @@
 
 All notable changes to the Toolpath workspace are documented here.
 
+## Readable conversation previews — kind-aware rendering + ANSI — unreleased
+
+`toolpath-md` renders an `agent-coding-session` path as a flat conversation
+transcript instead of the generic step/DAG timeline. The active (head-ancestry)
+turns render in causal order, speaker-labeled (`**User:**` / `**Assistant:**`),
+with the per-step UUID headers, timestamps, parent links, dead-end markers, and
+attachment/event steps dropped; abandoned branches collapse to a count.
+
+Full detail shows each turn's text, reasoning (`thinking`), tool calls with
+inputs and results, delegations, `file.write` diffs, and a compact
+stop/tokens/cwd line. Summary is prose-focused: it keeps user prompts verbatim,
+truncates agent responses, drops text-less turns entirely (no bare
+`**Assistant:**`), and collapses runs of tool calls into a per-name breakdown
+(`*tools: Read (3), Write (1)*`). Paths without a recognized kind are unchanged.
+
+`path show` gains `--ansi`, which renders that Markdown as ANSI-styled terminal
+output (bold speakers, dim metadata, cyan inline code, red/green diff lines)
+rather than raw markers. The fzf preview panes for `path import` / `path share`
+use it, with fzf's `wrap-word` preview wrapping so lines break at word
+boundaries and reflow on resize (requires fzf ≥ 0.59). `path show` without the
+flag still emits plain Markdown.
+
+Also fixes `truncate_str` slicing on a byte index that could fall inside a
+multibyte character (it now truncates by character). Touches `toolpath-md` and
+`path-cli`; versions to be bumped at release.
+
 ## `meta.kind` — new path-kind field; hosted kind spec registry — unreleased
 
 New optional `meta.kind` field on `Path` (`toolpath::v1::PathMeta::kind`,

@@ -86,6 +86,10 @@ pub fn render_step(step: &Step, options: &RenderOptions) -> String {
 
 /// Render a [`Path`] as Markdown.
 pub fn render_path(path: &Path, options: &RenderOptions) -> String {
+    if is_agent_coding_session(path) {
+        return render_conversation_transcript(path, options);
+    }
+
     let mut out = String::new();
 
     if options.front_matter {
@@ -237,6 +241,12 @@ pub fn render_graph(graph: &Graph, options: &RenderOptions) -> String {
         writeln!(out).unwrap();
         writeln!(out, "## {path_title}").unwrap();
         writeln!(out).unwrap();
+
+        if is_agent_coding_session(path) {
+            write_path_context(&mut out, path);
+            write_conversation_transcript_body(&mut out, path, options);
+            continue;
+        }
 
         write_path_context(&mut out, path);
 
@@ -478,6 +488,373 @@ fn write_artifact_change(
                 }
             }
         }
+    }
+}
+
+// ── Kind: agent-coding-session rendering ────────────────────────────
+
+fn is_agent_coding_session(path: &Path) -> bool {
+    path.meta.as_ref().and_then(|m| m.kind.as_deref())
+        == Some(toolpath::v1::PATH_KIND_AGENT_CODING_SESSION)
+}
+
+/// Render an agent-coding-session path as a flat transcript: the active
+/// (head-ancestry) turns in order, speaker-labeled, with the generic
+/// step/DAG scaffolding dropped. Non-turn event steps are omitted.
+fn render_conversation_transcript(path: &Path, options: &RenderOptions) -> String {
+    let mut out = String::new();
+
+    if options.front_matter {
+        write_path_front_matter(&mut out, path);
+    }
+
+    let title = path
+        .meta
+        .as_ref()
+        .and_then(|m| m.title.as_deref())
+        .unwrap_or(&path.path.id);
+    writeln!(out, "# {title}").unwrap();
+    writeln!(out).unwrap();
+
+    write_transcript_context(&mut out, path);
+    write_conversation_transcript_body(&mut out, path, options);
+    out
+}
+
+/// Minimal header for a transcript: producing harness and base, without the
+/// diffstat/step-count framing the generic path context carries.
+fn write_transcript_context(out: &mut String, path: &Path) {
+    if let Some(src) = path.meta.as_ref().and_then(|m| m.source.as_deref()) {
+        writeln!(out, "**Source:** `{src}`").unwrap();
+    }
+    if let Some(base) = &path.path.base {
+        let branch = base
+            .branch
+            .as_deref()
+            .map(|b| format!(" (`{b}`)"))
+            .unwrap_or_default();
+        writeln!(out, "**Base:** `{}`{branch}", base.uri).unwrap();
+    }
+    writeln!(out).unwrap();
+}
+
+/// The turn-by-turn transcript body, shared by the single-path and graph
+/// layouts. Walks active (head-ancestry) turns in causal order; abandoned
+/// branches are summarized as a count, event steps are skipped.
+fn write_conversation_transcript_body(out: &mut String, path: &Path, options: &RenderOptions) {
+    let active = query::ancestors(&path.steps, &path.path.head);
+    let sorted = topo_sort(&path.steps);
+
+    let mut turns: Vec<&Step> = Vec::new();
+    let mut omitted = 0usize;
+    for &step in &sorted {
+        let is_turn = step.change.values().any(|c| {
+            c.structural.as_ref().map(|s| s.change_type.as_str()) == Some("conversation.append")
+        });
+        if !is_turn {
+            continue; // event-only / non-turn steps
+        }
+        if !active.contains(step.step.id.as_str()) {
+            omitted += 1;
+            continue;
+        }
+        turns.push(step);
+    }
+
+    if options.detail == Detail::Summary {
+        write_compact_transcript(out, &turns);
+    } else {
+        for step in &turns {
+            let append = step
+                .change
+                .values()
+                .find(|c| {
+                    c.structural.as_ref().map(|s| s.change_type.as_str())
+                        == Some("conversation.append")
+                })
+                .expect("turn step has a conversation.append change");
+            let mut files: Vec<(&String, &ArtifactChange)> = step
+                .change
+                .iter()
+                .filter(|(_, c)| {
+                    c.structural.as_ref().map(|s| s.change_type.as_str()) == Some("file.write")
+                })
+                .collect();
+            files.sort_by(|a, b| a.0.cmp(b.0));
+            write_transcript_turn(out, append, &files, options);
+        }
+    }
+
+    if omitted > 0 {
+        writeln!(
+            out,
+            "_{omitted} abandoned turn{} omitted._",
+            if omitted == 1 { "" } else { "s" }
+        )
+        .unwrap();
+        writeln!(out).unwrap();
+    }
+}
+
+/// Compact transcript: prose only. Turns with text render as speaker lines;
+/// runs of text-less turns collapse into a per-tool breakdown line
+/// (`*tools: Read (3), Write (1)*`). Empty turns produce no output.
+fn write_compact_transcript(out: &mut String, turns: &[&Step]) {
+    // Tool-name counts accumulated since the last speaker line, in first-seen
+    // order.
+    let mut pending: Vec<(String, usize)> = Vec::new();
+
+    for step in turns {
+        let Some(append) = step.change.values().find(|c| {
+            c.structural.as_ref().map(|s| s.change_type.as_str()) == Some("conversation.append")
+        }) else {
+            continue;
+        };
+        let Some(s) = append.structural.as_ref() else {
+            continue;
+        };
+        let extra = &s.extra;
+        let text = extra.get("text").and_then(|v| v.as_str()).unwrap_or("").trim();
+        let tools = extra.get("tool_uses").and_then(|v| v.as_array());
+
+        if text.is_empty() {
+            accumulate_tools(&mut pending, tools);
+            continue;
+        }
+
+        flush_tool_breakdown(out, &mut pending);
+
+        let role = extra.get("role").and_then(|v| v.as_str()).unwrap_or("");
+        let display = if role == "user" {
+            text.to_string()
+        } else {
+            truncate_str(&text.replace('\n', " "), 200)
+        };
+        writeln!(out, "**{}:** {display}", speaker_label(role)).unwrap();
+        writeln!(out).unwrap();
+
+        accumulate_tools(&mut pending, tools);
+    }
+
+    flush_tool_breakdown(out, &mut pending);
+}
+
+/// Tally each `tool_uses[].name` into `pending` (first-seen order preserved).
+fn accumulate_tools(pending: &mut Vec<(String, usize)>, tools: Option<&Vec<serde_json::Value>>) {
+    let Some(tools) = tools else { return };
+    for tool in tools {
+        let name = tool.get("name").and_then(|v| v.as_str()).unwrap_or("?");
+        match pending.iter_mut().find(|(n, _)| n == name) {
+            Some((_, count)) => *count += 1,
+            None => pending.push((name.to_string(), 1)),
+        }
+    }
+}
+
+/// Emit and clear the accumulated tool breakdown, if any.
+fn flush_tool_breakdown(out: &mut String, pending: &mut Vec<(String, usize)>) {
+    if pending.is_empty() {
+        return;
+    }
+    let parts: Vec<String> = pending.iter().map(|(n, c)| format!("{n} ({c})")).collect();
+    writeln!(out, "*tools: {}*", parts.join(", ")).unwrap();
+    writeln!(out).unwrap();
+    pending.clear();
+}
+
+/// One full-detail transcript turn: speaker line, then reasoning, tool calls
+/// with inputs/results, delegations, file diffs, and the stop/tokens/cwd line.
+fn write_transcript_turn(
+    out: &mut String,
+    append: &ArtifactChange,
+    files: &[(&String, &ArtifactChange)],
+    options: &RenderOptions,
+) {
+    let Some(s) = append.structural.as_ref() else {
+        return;
+    };
+    let extra = &s.extra;
+    let str_field = |k: &str| extra.get(k).and_then(|v| v.as_str()).unwrap_or("");
+    let text = str_field("text").trim();
+    let thinking = str_field("thinking").trim();
+    let tool_uses = extra
+        .get("tool_uses")
+        .and_then(|v| v.as_array())
+        .filter(|t| !t.is_empty());
+    let delegations = extra
+        .get("delegations")
+        .and_then(|v| v.as_array())
+        .filter(|d| !d.is_empty());
+
+    // Skip carrier turns that have nothing to show.
+    if text.is_empty()
+        && thinking.is_empty()
+        && tool_uses.is_none()
+        && delegations.is_none()
+        && files.is_empty()
+    {
+        return;
+    }
+
+    let speaker = speaker_label(str_field("role"));
+    if text.is_empty() {
+        writeln!(out, "**{speaker}:**").unwrap();
+    } else {
+        writeln!(out, "**{speaker}:** {text}").unwrap();
+    }
+    writeln!(out).unwrap();
+
+    if !thinking.is_empty() {
+        writeln!(out, "**Reasoning:**").unwrap();
+        writeln!(out).unwrap();
+        for line in thinking.lines() {
+            writeln!(out, "> {line}").unwrap();
+        }
+        writeln!(out).unwrap();
+    }
+    if let Some(tools) = tool_uses {
+        writeln!(out, "**Tools:**").unwrap();
+        for tool in tools {
+            write_tool_use(out, tool);
+        }
+        writeln!(out).unwrap();
+    }
+    if let Some(delegs) = delegations {
+        writeln!(out, "**Delegations:**").unwrap();
+        for d in delegs {
+            let agent = d.get("agent_id").and_then(|v| v.as_str()).unwrap_or("?");
+            let prompt = truncate_str(
+                &d.get("prompt")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .replace('\n', " "),
+                80,
+            );
+            writeln!(out, "- `{agent}` \u{2014} {prompt}").unwrap();
+        }
+        writeln!(out).unwrap();
+    }
+    for (artifact, change) in files {
+        write_conversation_file_write(out, artifact, change, options);
+    }
+    let meta_line = conversation_meta_line(extra);
+    if !meta_line.is_empty() {
+        writeln!(out, "*{meta_line}*").unwrap();
+        writeln!(out).unwrap();
+    }
+}
+
+/// Capitalized speaker label for a turn `role`.
+fn speaker_label(role: &str) -> String {
+    match role {
+        "user" => "User".into(),
+        "assistant" => "Assistant".into(),
+        "system" => "System".into(),
+        "" => "?".into(),
+        other => {
+            let mut chars = other.chars();
+            let first = chars.next().unwrap();
+            first.to_uppercase().collect::<String>() + chars.as_str()
+        }
+    }
+}
+
+/// One `tool_uses[]` entry as a list item: name, compact input, and result.
+fn write_tool_use(out: &mut String, tool: &serde_json::Value) {
+    let name = tool.get("name").and_then(|v| v.as_str()).unwrap_or("?");
+    let input = tool
+        .get("input")
+        .map(compact_json)
+        .filter(|s| !s.is_empty() && s != "{}" && s != "null")
+        .map(|s| format!(" `{}`", truncate_str(&s, 80)))
+        .unwrap_or_default();
+    write!(out, "- `{name}`{input}").unwrap();
+    if let Some(result) = tool.get("result") {
+        let is_error = result
+            .get("is_error")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let content = result.get("content").and_then(|v| v.as_str()).unwrap_or("");
+        let marker = if is_error { "error: " } else { "" };
+        let content = truncate_str(&content.replace('\n', " "), 80);
+        if !content.is_empty() {
+            write!(out, " \u{2192} {marker}{content}").unwrap();
+        } else if is_error {
+            write!(out, " \u{2192} error").unwrap();
+        }
+    }
+    writeln!(out).unwrap();
+}
+
+/// Compact one-line metadata: stop reason, token usage, environment.
+fn conversation_meta_line(extra: &HashMap<String, serde_json::Value>) -> String {
+    let mut parts: Vec<String> = Vec::new();
+
+    if let Some(stop) = extra.get("stop_reason").and_then(|v| v.as_str()) {
+        parts.push(format!("stop: {stop}"));
+    }
+
+    if let Some(usage) = extra.get("token_usage") {
+        let n = |k: &str| usage.get(k).and_then(|v| v.as_u64());
+        if let (Some(input), Some(output)) = (n("input_tokens"), n("output_tokens")) {
+            let mut t = format!("tokens: {input} in, {output} out");
+            if let Some(cached) = n("cache_read_tokens") {
+                t.push_str(&format!(", {cached} cached"));
+            }
+            parts.push(t);
+        }
+    }
+
+    if let Some(env) = extra.get("environment")
+        && let Some(wd) = env.get("working_dir").and_then(|v| v.as_str())
+    {
+        let branch = env
+            .get("vcs_branch")
+            .and_then(|v| v.as_str())
+            .map(|b| format!(" ({b})"))
+            .unwrap_or_default();
+        parts.push(format!("cwd: {wd}{branch}"));
+    }
+
+    parts.join(" \u{00b7} ")
+}
+
+/// Render a `file.write` sibling change: the path, operation, and diff.
+fn write_conversation_file_write(
+    out: &mut String,
+    artifact: &str,
+    change: &ArtifactChange,
+    options: &RenderOptions,
+) {
+    let display = friendly_artifact_name(artifact);
+    let op = change
+        .structural
+        .as_ref()
+        .and_then(|s| s.extra.get("operation"))
+        .and_then(|v| v.as_str())
+        .map(|o| format!(" ({o})"))
+        .unwrap_or_default();
+
+    if options.detail == Detail::Summary {
+        writeln!(out, "- wrote `{display}`{op}").unwrap();
+        return;
+    }
+
+    writeln!(out, "**wrote `{display}`**{op}").unwrap();
+    if let Some(raw) = &change.raw {
+        writeln!(out).unwrap();
+        writeln!(out, "```diff").unwrap();
+        writeln!(out, "{raw}").unwrap();
+        writeln!(out, "```").unwrap();
+    }
+    writeln!(out).unwrap();
+}
+
+/// Serialize a JSON value to a compact single-line string.
+fn compact_json(v: &serde_json::Value) -> String {
+    match v {
+        serde_json::Value::String(s) => s.clone(),
+        other => serde_json::to_string(other).unwrap_or_default(),
     }
 }
 
@@ -949,10 +1326,11 @@ fn friendly_artifact_name(artifact: &str) -> String {
 /// Truncate a string to a maximum number of characters, adding "..." if truncated.
 fn truncate_str(s: &str, max: usize) -> String {
     let s = s.lines().collect::<Vec<_>>().join(" ").trim().to_string();
-    if s.len() <= max {
+    if s.chars().count() <= max {
         s
     } else {
-        format!("{}...", &s[..max])
+        let truncated: String = s.chars().take(max).collect();
+        format!("{truncated}...")
     }
 }
 
@@ -2225,5 +2603,275 @@ mod tests {
         // Should use friendly name (some/path:5), not raw review:// URI
         assert!(md.contains("some/path:5"));
         assert!(!md.contains("review://"));
+    }
+
+    // ── Kind: agent-coding-session rendering ──────────────────────────
+
+    fn conv_append(role: &str, extras: &[(&str, serde_json::Value)]) -> ArtifactChange {
+        let mut extra: std::collections::HashMap<String, serde_json::Value> =
+            std::collections::HashMap::new();
+        extra.insert("role".into(), serde_json::json!(role));
+        for (k, v) in extras {
+            extra.insert((*k).into(), v.clone());
+        }
+        ArtifactChange {
+            raw: None,
+            structural: Some(StructuralChange {
+                change_type: "conversation.append".into(),
+                extra,
+            }),
+        }
+    }
+
+    fn agent_coding_session_path() -> Path {
+        let key = "claude-code://sess-1";
+
+        let mut user = Step::new("u1", "human:user", "2026-01-01T00:00:00Z");
+        user.change
+            .insert(key.into(), conv_append("user", &[("text", serde_json::json!("add a greeting"))]));
+
+        let mut asst = Step::new("a1", "agent:gpt-5.5", "2026-01-01T00:00:01Z");
+        asst.step.parents = vec!["u1".into()];
+        asst.change.insert(
+            key.into(),
+            conv_append(
+                "assistant",
+                &[
+                    ("text", serde_json::json!("done")),
+                    ("thinking", serde_json::json!("I'll edit main.rs")),
+                    ("stop_reason", serde_json::json!("tool_use")),
+                    (
+                        "token_usage",
+                        serde_json::json!({"input_tokens": 100, "output_tokens": 20, "cache_read_tokens": 50}),
+                    ),
+                    (
+                        "tool_uses",
+                        serde_json::json!([{
+                            "id": "c1", "name": "write_file",
+                            "input": {"file_path": "main.rs"},
+                            "category": "file_write",
+                            "result": {"content": "ok", "is_error": false}
+                        }]),
+                    ),
+                ],
+            ),
+        );
+        asst.change.insert(
+            "main.rs".into(),
+            ArtifactChange {
+                raw: Some("@@ -0,0 +1 @@\n+fn main() {}".into()),
+                structural: Some(StructuralChange {
+                    change_type: "file.write".into(),
+                    extra: std::collections::HashMap::from([(
+                        "operation".to_string(),
+                        serde_json::json!("add"),
+                    )]),
+                }),
+            },
+        );
+
+        let mut ev = Step::new("e1", "tool:claude-code", "2026-01-01T00:00:02Z");
+        ev.step.parents = vec!["a1".into()];
+        ev.change.insert(
+            key.into(),
+            ArtifactChange {
+                raw: None,
+                structural: Some(StructuralChange {
+                    change_type: "conversation.event".into(),
+                    extra: std::collections::HashMap::from([(
+                        "entry_type".to_string(),
+                        serde_json::json!("attachment"),
+                    )]),
+                }),
+            },
+        );
+
+        Path {
+            path: PathIdentity {
+                id: "p1".into(),
+                base: None,
+                head: "e1".into(),
+                graph_ref: None,
+            },
+            steps: vec![user, asst, ev],
+            meta: Some(PathMeta {
+                kind: Some(toolpath::v1::PATH_KIND_AGENT_CODING_SESSION.into()),
+                ..Default::default()
+            }),
+        }
+    }
+
+    #[test]
+    fn truncate_str_is_char_boundary_safe() {
+        // Truncating at a byte index that lands inside a multibyte char (here
+        // the em-dash, bytes 198..201 at max=200) must not panic.
+        let s = format!("{}—tail", "a".repeat(198));
+        let out = truncate_str(&s, 200);
+        assert!(out.ends_with("..."));
+        assert!(out.starts_with(&"a".repeat(198)));
+    }
+
+    #[test]
+    fn agent_coding_session_renders_flat_transcript() {
+        let path = agent_coding_session_path();
+        let md = render_path(
+            &path,
+            &RenderOptions {
+                detail: Detail::Full,
+                front_matter: false,
+            },
+        );
+
+        // Speaker-labeled turns with content.
+        assert!(
+            md.contains("**User:** add a greeting"),
+            "user turn missing:\n{md}"
+        );
+        assert!(md.contains("**Assistant:** done"), "assistant turn missing");
+        assert!(
+            md.contains("**Reasoning:**") && md.contains("I'll edit main.rs"),
+            "reasoning missing:\n{md}"
+        );
+        assert!(
+            md.contains("**Tools:**")
+                && md.contains("`write_file`")
+                && md.contains("\u{2192} ok"),
+            "tool call missing:\n{md}"
+        );
+        assert!(
+            md.contains("tokens: 100 in, 20 out, 50 cached"),
+            "token usage missing:\n{md}"
+        );
+        assert!(md.contains("stop: tool_use"), "stop reason missing");
+        assert!(
+            md.contains("wrote `main.rs`") && md.contains("(add)"),
+            "file.write missing:\n{md}"
+        );
+
+        // The generic DAG scaffolding is dropped: no per-step UUID headers,
+        // no timestamp/parents lines, no dead-end markers, no event noise.
+        assert!(!md.contains("### a1"), "step header leaked:\n{md}");
+        assert!(!md.contains("**Timestamp:**"), "timestamp leaked:\n{md}");
+        assert!(!md.contains("[dead end]"), "dead-end marker leaked:\n{md}");
+        assert!(!md.contains("_attachment_"), "event noise leaked:\n{md}");
+        assert!(!md.contains("## Timeline"), "timeline heading leaked:\n{md}");
+    }
+
+    #[test]
+    fn agent_coding_session_summary_compacts_tool_calls() {
+        let path = agent_coding_session_path();
+        let md = render_path(&path, &RenderOptions::default()); // Summary
+        assert!(md.contains("**User:** add a greeting"), "user:\n{md}");
+        assert!(md.contains("**Assistant:** done"), "assistant:\n{md}");
+        // Tools collapse into a per-name breakdown; no diffs or reasoning.
+        assert!(
+            md.contains("*tools: write_file (1)*"),
+            "tool breakdown:\n{md}"
+        );
+        assert!(!md.contains("```diff"), "summary should not emit diffs:\n{md}");
+        assert!(!md.contains("**Reasoning:**"), "summary omits reasoning:\n{md}");
+    }
+
+    #[test]
+    fn agent_coding_session_summary_drops_empty_turns_and_breaks_down_tools() {
+        // user → assistant (no text, 2× Read + 1× Bash) → assistant ("ok", 1× Read)
+        let key = "claude-code://sess-1";
+        let mut user = Step::new("u1", "human:user", "2026-01-01T00:00:00Z");
+        user.change
+            .insert(key.into(), conv_append("user", &[("text", serde_json::json!("go"))]));
+
+        let mut work = Step::new("a1", "agent:gpt-5.5", "2026-01-01T00:00:01Z");
+        work.step.parents = vec!["u1".into()];
+        work.change.insert(
+            key.into(),
+            conv_append(
+                "assistant",
+                &[("tool_uses", serde_json::json!([
+                    {"id": "1", "name": "Read", "input": {}, "category": "file_read"},
+                    {"id": "2", "name": "Read", "input": {}, "category": "file_read"},
+                    {"id": "3", "name": "Bash", "input": {}, "category": "shell"}
+                ]))],
+            ),
+        );
+
+        let mut reply = Step::new("a2", "agent:gpt-5.5", "2026-01-01T00:00:02Z");
+        reply.step.parents = vec!["a1".into()];
+        reply.change.insert(
+            key.into(),
+            conv_append(
+                "assistant",
+                &[
+                    ("text", serde_json::json!("ok")),
+                    ("tool_uses", serde_json::json!([{"id": "4", "name": "Read", "input": {}, "category": "file_read"}])),
+                ],
+            ),
+        );
+
+        let path = Path {
+            path: PathIdentity {
+                id: "p1".into(),
+                base: None,
+                head: "a2".into(),
+                graph_ref: None,
+            },
+            steps: vec![user, work, reply],
+            meta: Some(PathMeta {
+                kind: Some(toolpath::v1::PATH_KIND_AGENT_CODING_SESSION.into()),
+                ..Default::default()
+            }),
+        };
+
+        let md = render_path(&path, &RenderOptions::default()); // Summary
+        // Text-less work turn produces no speaker line; only the two real
+        // messages get one.
+        assert_eq!(md.matches("**Assistant:**").count(), 1, "empty turn rendered:\n{md}");
+        assert!(md.contains("**User:** go"));
+        assert!(md.contains("**Assistant:** ok"));
+        // The work turn's tools collapse into a per-name breakdown before "ok".
+        assert!(md.contains("*tools: Read (2), Bash (1)*"), "breakdown:\n{md}");
+    }
+
+    #[test]
+    fn agent_coding_session_omits_abandoned_turns() {
+        // Add a dead-end assistant turn off the user turn that isn't on the
+        // head's ancestry; the transcript notes it as omitted, not inline.
+        let mut path = agent_coding_session_path();
+        let mut dead = Step::new("d1", "agent:gpt-5.5", "2026-01-01T00:00:03Z");
+        dead.step.parents = vec!["u1".into()];
+        dead.change.insert(
+            "claude-code://sess-1".into(),
+            conv_append("assistant", &[("text", serde_json::json!("abandoned attempt"))]),
+        );
+        path.steps.push(dead);
+
+        let md = render_path(
+            &path,
+            &RenderOptions {
+                detail: Detail::Full,
+                front_matter: false,
+            },
+        );
+        assert!(!md.contains("abandoned attempt"), "dead-end content shown:\n{md}");
+        assert!(md.contains("1 abandoned turn omitted"), "omission note:\n{md}");
+    }
+
+    #[test]
+    fn without_kind_conversation_renders_generically() {
+        // Same changes, but no meta.kind: the renderer must not apply the
+        // agent-coding-session transcript treatment.
+        let mut path = agent_coding_session_path();
+        path.meta = None;
+        let md = render_path(
+            &path,
+            &RenderOptions {
+                detail: Detail::Full,
+                front_matter: false,
+            },
+        );
+        assert!(!md.contains("**Reasoning:**"), "kind treatment leaked:\n{md}");
+        assert!(
+            md.contains("Structural: `conversation.append`"),
+            "expected the generic structural dump:\n{md}"
+        );
     }
 }
