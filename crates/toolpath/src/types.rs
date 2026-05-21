@@ -140,11 +140,18 @@ pub struct Base {
     pub branch: Option<String>,
 }
 
+/// [`PathMeta::kind`] URI for a path derived from an AI coding conversation.
+/// Spec at <https://toolpath.dev/kinds/agent-coding-session/v1.0.0>.
+pub const PATH_KIND_AGENT_CODING_SESSION: &str =
+    "https://toolpath.dev/kinds/agent-coding-session/v1.0.0";
+
 /// Path metadata
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PathMeta {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -808,6 +815,24 @@ mod tests {
         let json = serde_json::to_string(&step).unwrap();
         assert!(json.contains("\"issue\""));
         assert!(json.contains("issues/1"));
+    }
+
+    #[test]
+    fn test_path_meta_kind_serde() {
+        let meta = PathMeta {
+            kind: Some(PATH_KIND_AGENT_CODING_SESSION.to_string()),
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&meta).unwrap();
+        assert!(json.contains(r#""kind":"https://toolpath.dev/kinds/agent-coding-session/v1.0.0""#));
+        let parsed: PathMeta = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.kind.as_deref(), Some("https://toolpath.dev/kinds/agent-coding-session/v1.0.0"));
+    }
+
+    #[test]
+    fn test_path_meta_kind_omitted_when_none() {
+        let json = serde_json::to_string(&PathMeta::default()).unwrap();
+        assert!(!json.contains("kind"));
     }
 
     #[test]

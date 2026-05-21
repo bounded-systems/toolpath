@@ -106,6 +106,11 @@ mod tests {
             "got: {}",
             path.path.id
         );
+        // The shared derivation tags conversation paths with `meta.kind`.
+        assert_eq!(
+            path.meta.as_ref().unwrap().kind.as_deref(),
+            Some(toolpath::v1::PATH_KIND_AGENT_CODING_SESSION)
+        );
     }
 
     #[test]

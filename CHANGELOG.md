@@ -2,6 +2,39 @@
 
 All notable changes to the Toolpath workspace are documented here.
 
+## `meta.kind` — new path-kind field; hosted kind spec registry — unreleased
+
+New optional `meta.kind` field on `Path` (`toolpath::v1::PathMeta::kind`,
+plus the `toolpath::v1::PATH_KIND_AGENT_CODING_SESSION` constant). `kind` is a
+URI naming a *kind specification* — a hosted, immutable, semver-versioned
+contract describing the additional shape a path follows on top of the base
+format. Absent or unrecognized `kind` ⇒ generic path; existing documents
+parse and validate unchanged.
+
+The first defined kind is `https://toolpath.dev/kinds/agent-coding-session/v1.0.0`,
+which marks a path as an AI coding conversation (each step is a
+`conversation.append` change carrying that turn's `role`, `text`, and so
+on; `meta.source` names the producing harness). Every conversation → `Path`
+derivation now sets it — the shared `toolpath_convo::derive_path` and each
+conversation provider crate's own. The JSONL form carries `kind` through
+`PathOpen.meta` and `PathMeta` patch lines.
+
+Kind specs are sourced under `site/kinds/<name>/<version>/` (Markdown spec
+plus an additive JSON Schema fragment) and published under
+`https://toolpath.dev/kinds/`. A registry index lives at
+`https://toolpath.dev/kinds/`. The Toolpath RFC ("Document Kind") and the
+JSON Schema (`$defs/pathMeta`) reference the registry rather than carrying
+kind-specific contracts inline.
+
+`path validate` is now kind-aware: the kind schemas are bundled into the CLI
+and, for each path carrying a recognized `meta.kind`, the matching kind schema
+is applied on top of the base schema. An unrecognized `kind` validates against
+the base schema only.
+
+Touches `toolpath`, `toolpath-convo`, `toolpath-claude`, `toolpath-gemini`,
+`toolpath-codex`, `toolpath-opencode`, `toolpath-pi`, and `path-cli`; versions
+to be bumped at release.
+
 ## Plumbing/porcelain split — `path p …` — 2026-05-20
 
 `path-cli` 0.10.0. **Breaking** (pre-1.0). The lower-level operations

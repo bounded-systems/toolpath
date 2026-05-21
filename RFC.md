@@ -169,7 +169,7 @@ A **path** collects steps and provides root context:
 | -------- | --------------------------------------------------- |
 | `path`   | Identity, base context, and head reference          |
 | `steps`  | Array of step objects                               |
-| `meta`   | Path-level metadata (title, actors, signatures)     |
+| `meta`   | Path-level metadata (title, kind, actors, signatures) |
 
 The `path.base` anchors the entire tree to a specific state (repo + ref +
 commit). Steps within inherit this context.
@@ -281,10 +281,25 @@ paths.
 
 | Field        | Description                                        |
 | ------------ | -------------------------------------------------- |
+| `kind`       | Path kind — see [Document Kind](#document-kind) (paths only) |
 | `intent`     | Human-readable description of purpose              |
 | `refs`       | Links to issues, docs, reasoning                   |
 | `actors`     | Actor definitions with identities and keys         |
 | `signatures` | Cryptographic signatures for verification          |
+
+#### Document Kind
+
+`meta.kind` on a **path** is a URI naming a *kind specification* — a contract
+describing the additional shape the path follows on top of the base format.
+Consumers that recognize the URI may rely on the structure that spec describes;
+unrecognized URIs should be treated as a generic path. Kind URIs are
+immutable, semver-versioned, and revisions ship at a new version URI.
+
+Defined kinds are listed at <https://toolpath.dev/kinds/>. The only one defined
+so far is `https://toolpath.dev/kinds/agent-coding-session/v1.0.0` — a path
+recording an AI coding conversation, where each conversational-turn step
+carries a `"conversation.append"` structural change with the turn's role,
+text, and so on. See the linked spec for the full contract.
 
 #### Actor Definitions
 
@@ -570,7 +585,7 @@ The path provides:
 - **base**: Where this tree branches from (repo + ref + commit)
 - **head**: Current tip of the active path
 - **steps**: All steps including dead ends (step-001a has no descendants)
-- **meta**: Path-level metadata including actors and signatures
+- **meta**: Path-level metadata including `kind` (see [Document Kind](#document-kind)), actors, and signatures
 
 ### Base Context
 

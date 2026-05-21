@@ -50,6 +50,7 @@ pub mod v1 {
     //! Optional annotations for richer context:
     //!
     //! - [`StepMeta`], [`PathMeta`], [`GraphMeta`] — metadata containers
+    //! - [`PATH_KIND_AGENT_CODING_SESSION`] — value for [`PathMeta::kind`] on conversation-derived paths
     //! - [`ActorDefinition`] — full actor details (name, provider, keys)
     //! - [`Identity`] — external identity reference
     //! - [`Key`] — cryptographic key reference
@@ -146,7 +147,7 @@ pub mod v1 {
 
     pub use crate::types::{
         ActorDefinition, ArtifactChange, Base, Graph, GraphIdentity, GraphMeta, Identity, Key,
-        Path, PathIdentity, PathMeta, PathOrRef, PathRef, Ref, Signature, Step, StepIdentity,
-        StepMeta, StructuralChange, VcsSource,
+        PATH_KIND_AGENT_CODING_SESSION, Path, PathIdentity, PathMeta, PathOrRef, PathRef, Ref, Signature,
+        Step, StepIdentity, StepMeta, StructuralChange, VcsSource,
     };
 }
