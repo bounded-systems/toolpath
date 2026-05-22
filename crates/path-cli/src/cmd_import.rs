@@ -514,9 +514,9 @@ fn pick_claude_in_project(
     let opts = fzf::PickOptions {
         with_nth: "3..",
         prompt: "claude session> ",
-        preview: Some("path show claude --project {1} --session {2}"),
+        preview: Some("path show --ansi claude --project {1} --session {2}"),
         header: Some("pick a Claude session (TAB = multi-select, Enter = confirm)"),
-        preview_window: "right:60%:wrap",
+        preview_window: "right:60%:wrap-word",
         tiebreak: "index",
         multi: true,
     };
@@ -564,9 +564,9 @@ fn pick_claude_global(
     let opts = fzf::PickOptions {
         with_nth: "3..",
         prompt: "claude session> ",
-        preview: Some("path show claude --project {1} --session {2}"),
+        preview: Some("path show --ansi claude --project {1} --session {2}"),
         header: Some("pick a Claude session (TAB = multi-select, Enter = confirm)"),
-        preview_window: "right:60%:wrap",
+        preview_window: "right:60%:wrap-word",
         tiebreak: "index",
         multi: true,
     };
@@ -730,9 +730,9 @@ fn pick_gemini_in_project(
     let opts = fzf::PickOptions {
         with_nth: "3..",
         prompt: "gemini session> ",
-        preview: Some("path show gemini --project {1} --session {2}"),
+        preview: Some("path show --ansi gemini --project {1} --session {2}"),
         header: Some("pick a Gemini session (TAB = multi-select, Enter = confirm)"),
-        preview_window: "right:60%:wrap",
+        preview_window: "right:60%:wrap-word",
         tiebreak: "index",
         multi: true,
     };
@@ -780,9 +780,9 @@ fn pick_gemini_global(
     let opts = fzf::PickOptions {
         with_nth: "3..",
         prompt: "gemini session> ",
-        preview: Some("path show gemini --project {1} --session {2}"),
+        preview: Some("path show --ansi gemini --project {1} --session {2}"),
         header: Some("pick a Gemini session (TAB = multi-select, Enter = confirm)"),
-        preview_window: "right:60%:wrap",
+        preview_window: "right:60%:wrap-word",
         tiebreak: "index",
         multi: true,
     };
@@ -909,9 +909,9 @@ fn pick_codex(manager: &toolpath_codex::CodexConvo) -> Result<Option<Vec<String>
     let opts = fzf::PickOptions {
         with_nth: "2..",
         prompt: "codex session> ",
-        preview: Some("path show codex --session {1}"),
+        preview: Some("path show --ansi codex --session {1}"),
         header: Some("pick a Codex session (TAB = multi-select, Enter = confirm)"),
-        preview_window: "right:60%:wrap",
+        preview_window: "right:60%:wrap-word",
         tiebreak: "index",
         multi: true,
     };
@@ -1068,9 +1068,9 @@ fn pick_opencode(
     let opts = fzf::PickOptions {
         with_nth: "2..",
         prompt: "opencode session> ",
-        preview: Some("path show opencode --session {1}"),
+        preview: Some("path show --ansi opencode --session {1}"),
         header: Some("pick an opencode session (TAB = multi-select, Enter = confirm)"),
-        preview_window: "right:60%:wrap",
+        preview_window: "right:60%:wrap-word",
         tiebreak: "index",
         multi: true,
     };
@@ -1226,9 +1226,9 @@ fn pick_pi_in_project(
     let opts = fzf::PickOptions {
         with_nth: "3..",
         prompt: "pi session> ",
-        preview: Some("path show pi --project {1} --session {2}"),
+        preview: Some("path show --ansi pi --project {1} --session {2}"),
         header: Some("pick a Pi session (TAB = multi-select, Enter = confirm)"),
-        preview_window: "right:60%:wrap",
+        preview_window: "right:60%:wrap-word",
         tiebreak: "index",
         multi: true,
     };
@@ -1276,9 +1276,9 @@ fn pick_pi_global(manager: &toolpath_pi::PiConvo) -> Result<Option<Vec<(String, 
     let opts = fzf::PickOptions {
         with_nth: "3..",
         prompt: "pi session> ",
-        preview: Some("path show pi --project {1} --session {2}"),
+        preview: Some("path show --ansi pi --project {1} --session {2}"),
         header: Some("pick a Pi session (TAB = multi-select, Enter = confirm)"),
-        preview_window: "right:60%:wrap",
+        preview_window: "right:60%:wrap-word",
         tiebreak: "index",
         multi: true,
     };

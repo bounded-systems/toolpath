@@ -27,6 +27,7 @@ mod config;
 mod fzf;
 mod io;
 mod schema;
+mod term;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
@@ -50,6 +51,11 @@ enum Commands {
     Show {
         #[command(subcommand)]
         source: cmd_show::ShowSource,
+        /// Emit ANSI-styled terminal output instead of raw markdown
+        /// (bold speakers, dim metadata, colored diffs). Used by the
+        /// fzf preview panes.
+        #[arg(long)]
+        ansi: bool,
     },
     /// Share an agent session to Pathbase via an interactive picker
     #[cfg(not(target_os = "emscripten"))]
@@ -95,7 +101,7 @@ pub fn run() -> Result<()> {
             Ok(())
         }
         #[cfg(not(target_os = "emscripten"))]
-        Commands::Show { source } => cmd_show::run(source),
+        Commands::Show { source, ansi } => cmd_show::run(source, ansi),
         #[cfg(not(target_os = "emscripten"))]
         Commands::Share { args } => cmd_share::run(args),
         #[cfg(not(target_os = "emscripten"))]

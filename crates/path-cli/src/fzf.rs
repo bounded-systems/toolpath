@@ -70,6 +70,7 @@ pub fn pick(lines: &[String], opts: &PickOptions<'_>) -> Result<PickResult> {
     if let Some(preview) = opts.preview {
         args.push(format!("--preview={}", preview));
         args.push(format!("--preview-window={}", opts.preview_window));
+        args.push("--preview-wrap-sign=".into());
     }
 
     if let Some(header) = opts.header {
@@ -136,7 +137,7 @@ impl Default for PickOptions<'_> {
             with_nth: "2..",
             prompt: "> ",
             preview: None,
-            preview_window: "right:60%:wrap",
+            preview_window: "right:60%:wrap-word",
             header: None,
             tiebreak: "index",
             multi: false,
