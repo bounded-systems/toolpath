@@ -24,9 +24,11 @@ mod cmd_track;
 mod cmd_validate;
 mod config;
 #[cfg(not(target_os = "emscripten"))]
-mod fzf;
+mod fuzzy;
 mod io;
 mod schema;
+#[cfg(all(not(target_os = "emscripten"), feature = "embedded-picker"))]
+mod skim_picker;
 mod term;
 
 use anyhow::Result;
@@ -42,6 +44,15 @@ struct Cli {
     /// Pretty-print JSON output
     #[arg(long, global = true)]
     pretty: bool,
+
+    /// Backend for the interactive fuzzy picker used by `share`,
+    /// `resume`, and `p import <provider>`. `auto` (default) picks
+    /// external `fzf` when on PATH and falls back to the embedded skim
+    /// picker. `fzf`/`skim` force one backend and error if it isn't
+    /// available.
+    #[cfg(not(target_os = "emscripten"))]
+    #[arg(long, global = true, value_enum, default_value_t = fuzzy::Picker::Auto)]
+    picker: fuzzy::Picker,
 }
 
 #[derive(Subcommand, Debug)]
@@ -94,6 +105,9 @@ enum Commands {
 
 pub fn run() -> Result<()> {
     let cli = Cli::parse();
+
+    #[cfg(not(target_os = "emscripten"))]
+    fuzzy::set_picker_override(cli.picker);
 
     match cli.command {
         Commands::Haiku => {

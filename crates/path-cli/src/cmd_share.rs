@@ -531,7 +531,7 @@ pub fn run(args: ShareArgs) -> Result<()> {
         return bail_no_sessions(&bundle, project_filter);
     }
 
-    if !crate::fzf::available() {
+    if !crate::fuzzy::available() {
         eprintln!(
             "Interactive `path share` needs `fzf` on PATH and a TTY.\n\
              \n\
@@ -550,10 +550,10 @@ pub fn run(args: ShareArgs) -> Result<()> {
 
     let lines: Vec<String> = rows.iter().map(format_picker_row).collect();
     let header = format!("share an agent session (Enter = upload to {base_url})");
-    let opts = crate::fzf::PickOptions {
-        with_nth: "4..",
+    let opts = crate::fuzzy::PickOptions {
+        with_nth: "4",
         prompt: "share> ",
-        preview: Some("path show --ansi {1} --project {2} --session {3}"),
+        preview: Some("{exe} show --ansi {1} --project {2} --session {3}"),
         // Stacked layout: preview above the list, list below. Fits narrow
         // terminals better than the default side-by-side and gives the
         // session preview the full terminal width to render `path show`.
@@ -562,8 +562,8 @@ pub fn run(args: ShareArgs) -> Result<()> {
         tiebreak: "index",
         multi: false,
     };
-    let line = match crate::fzf::pick(&lines, &opts)? {
-        crate::fzf::PickResult::Selected(v) => match v.into_iter().next() {
+    let line = match crate::fuzzy::pick(&lines, &opts)? {
+        crate::fuzzy::PickResult::Selected(v) => match v.into_iter().next() {
             Some(l) => l,
             // Selected with an empty payload should not happen (fzf exits 0
             // only when at least one row was confirmed), but treat it like
@@ -571,10 +571,10 @@ pub fn run(args: ShareArgs) -> Result<()> {
             None => return Ok(()),
         },
         // No row matched the query — exit 0, same as today, no extra noise.
-        crate::fzf::PickResult::NoMatch => return Ok(()),
+        crate::fuzzy::PickResult::NoMatch => return Ok(()),
         // Esc / Ctrl-C: deliberate user cancel. Signal to the shell with
         // exit 130 so it's distinguishable from a successful share.
-        crate::fzf::PickResult::Cancelled => std::process::exit(130),
+        crate::fuzzy::PickResult::Cancelled => std::process::exit(130),
     };
     let (h, key, session, title) = parse_picker_row(&line)
         .ok_or_else(|| anyhow::anyhow!("internal: failed to parse picker row"))?;
@@ -822,39 +822,44 @@ fn share_explicit(
     crate::cmd_export::run_pathbase_inner(auth, base_url, upload, &body, &summary)
 }
 
-/// Build the TSV line fed to fzf. Cols 1–3 are hidden (harness/key/session,
-/// used as parser keys); cols 4..8 are visible to the user.
+/// Build the TSV line fed to the picker. Three hidden parser-only
+/// columns lead the row (harness key, project/cwd, session id); a
+/// fourth column carries the pre-formatted display string from
+/// `fuzzy::render_row`; a fifth carries the raw title so
+/// `parse_picker_row` can recover it without reparsing the display.
+///
+/// The display column is space-padded rather than tab-separated so the
+/// columns line up consistently across pickers — terminal tab stops
+/// produce ugly variable gaps in both fzf and skim.
 fn format_picker_row(row: &SessionRow) -> String {
     let key = row
         .project
         .clone()
         .or_else(|| row.cwd.clone())
         .unwrap_or_default();
-    let when = row
-        .last_activity
-        .map(|t| t.format("%Y-%m-%d %H:%M").to_string())
-        .unwrap_or_else(|| "          —     ".to_string());
     let scope = if row.matches_cwd { "·" } else { " " };
-    let project_short = project_short(&key);
-    let title = fzf_title(&row.title);
+    let leading = format!("{scope} {}", row.harness.symbol());
+    let display = render_row(
+        Some(&leading),
+        row.last_activity,
+        &count(row.message_count, "msgs"),
+        Some(&project_short(&key)),
+        &row.title,
+    );
+    let title = clean_for_picker_display(&row.title);
     format!(
-        "{}\t{}\t{}\t{}\t{}\t{} msgs\t{}\t{}\t{}",
+        "{}\t{}\t{}\t{}\t{}",
         row.harness.name(),
         tab_safe(&key),
         tab_safe(&row.session_id),
-        row.harness.symbol(),
-        when,
-        row.message_count,
-        scope,
-        tab_safe(&project_short),
-        title,
+        display,
+        tab_safe(&title),
     )
 }
 
-/// Inverse of [`format_picker_row`] — pulls (harness, key, session, title)
-/// back out of the line fzf returned. Returns `None` if the line is
-/// malformed. The title is column 9 of the TSV; it lives in the visible
-/// portion so it round-trips through fzf unchanged.
+/// Inverse of [`format_picker_row`] — pulls (harness, key, session,
+/// title) back out of the line the picker returned. Returns `None` if
+/// the line is malformed.
 fn parse_picker_row(line: &str) -> Option<(Harness, String, String, String)> {
     let mut parts = line.split('\t');
     let h = Harness::parse(parts.next()?)?;
@@ -863,37 +868,13 @@ fn parse_picker_row(line: &str) -> Option<(Harness, String, String, String)> {
     if session.is_empty() {
         return None;
     }
-    // Skip cols 4..8 (symbol, when, msgs, scope, project_short) to reach
-    // the title at col 9.
-    let title = parts.nth(5).unwrap_or("").to_string();
+    // Skip the pre-formatted display column (col 4) to reach the raw
+    // title at col 5.
+    let title = parts.nth(1).unwrap_or("").to_string();
     Some((h, key, session, title))
 }
 
-fn tab_safe(s: &str) -> String {
-    s.replace(['\t', '\n', '\r'], " ")
-}
-
-fn fzf_title(s: &str) -> String {
-    const MAX: usize = 120;
-    let safe = tab_safe(s);
-    if safe.chars().count() > MAX {
-        let head: String = safe.chars().take(MAX - 1).collect();
-        format!("{head}…")
-    } else {
-        safe
-    }
-}
-
-fn project_short(p: &str) -> String {
-    let trimmed = p.trim_end_matches('/');
-    let parts: Vec<&str> = trimmed.rsplit('/').take(2).collect();
-    if parts.is_empty() {
-        return p.to_string();
-    }
-    let mut out: Vec<&str> = parts.into_iter().collect();
-    out.reverse();
-    out.join("/")
-}
+use crate::fuzzy::{clean_for_picker_display, count, project_short, render_row, tab_safe};
 
 fn derive_session(
     harness: Harness,

@@ -6,7 +6,7 @@
 //! composition with `render | query | validate`.
 
 #[cfg(not(target_os = "emscripten"))]
-use crate::fzf;
+use crate::fuzzy;
 #[cfg(not(target_os = "emscripten"))]
 use anyhow::Context;
 use anyhow::Result;
@@ -424,7 +424,7 @@ fn derive_claude_with_manager(
                 match pick_claude_global(manager)? {
                     Some(picks) => picks,
                     None => {
-                        fzf::print_recipe("claude", true);
+                        fuzzy::print_recipe("claude", true);
                         anyhow::bail!("--project required when not running interactively");
                     }
                 }
@@ -485,7 +485,7 @@ fn pick_claude_in_project(
     manager: &toolpath_claude::ClaudeConvo,
     project: &str,
 ) -> Result<Option<Vec<(String, String)>>> {
-    if !fzf::available() {
+    if !fuzzy::available() {
         return Ok(None);
     }
     let metas = manager
@@ -497,32 +497,34 @@ fn pick_claude_in_project(
     let lines: Vec<String> = metas
         .iter()
         .map(|m| {
-            // Cols 1+2 are hidden ID columns the parser uses; cols 3+ are
-            // visible to fzf for display + fuzzy-match. Lead the visible
-            // section with the title so the user is searching what the
-            // conversation was *about*, not on UUIDs.
+            // Cols 1+2 are hidden ID columns the parser keys on; col 3
+            // is the visible display string.
             format!(
-                "{}\t{}\t{}\t{}\t{} msgs",
+                "{}\t{}\t{}",
                 tab_safe(&m.project_path),
                 tab_safe(&m.session_id),
-                fzf_title(m.first_user_message.as_deref().unwrap_or("(no prompt)")),
-                short_timestamp(m.last_activity),
-                m.message_count,
+                render_row(
+                    None,
+                    m.last_activity,
+                    &count(m.message_count, "msgs"),
+                    None,
+                    m.first_user_message.as_deref().unwrap_or("(no prompt)"),
+                ),
             )
         })
         .collect();
-    let opts = fzf::PickOptions {
-        with_nth: "3..",
+    let opts = fuzzy::PickOptions {
+        with_nth: "3",
         prompt: "claude session> ",
-        preview: Some("path show --ansi claude --project {1} --session {2}"),
+        preview: Some("{exe} show --ansi claude --project {1} --session {2}"),
         header: Some("pick a Claude session (TAB = multi-select, Enter = confirm)"),
         preview_window: "right:60%:wrap-word",
         tiebreak: "index",
         multi: true,
     };
-    let selected = match fzf::pick(&lines, &opts)? {
-        fzf::PickResult::Selected(v) => v,
-        fzf::PickResult::NoMatch | fzf::PickResult::Cancelled => Vec::new(),
+    let selected = match fuzzy::pick(&lines, &opts)? {
+        fuzzy::PickResult::Selected(v) => v,
+        fuzzy::PickResult::NoMatch | fuzzy::PickResult::Cancelled => Vec::new(),
     };
     Ok(Some(parse_project_session(&selected)))
 }
@@ -531,7 +533,7 @@ fn pick_claude_in_project(
 fn pick_claude_global(
     manager: &toolpath_claude::ClaudeConvo,
 ) -> Result<Option<Vec<(String, String)>>> {
-    if !fzf::available() {
+    if !fuzzy::available() {
         return Ok(None);
     }
     let projects = manager
@@ -551,28 +553,31 @@ fn pick_claude_global(
         .iter()
         .map(|m| {
             format!(
-                "{}\t{}\t{}\t{}\t{} msgs\t{}",
+                "{}\t{}\t{}",
                 tab_safe(&m.project_path),
                 tab_safe(&m.session_id),
-                fzf_title(m.first_user_message.as_deref().unwrap_or("(no prompt)")),
-                short_timestamp(m.last_activity),
-                m.message_count,
-                tab_safe(&project_short(&m.project_path)),
+                render_row(
+                    None,
+                    m.last_activity,
+                    &count(m.message_count, "msgs"),
+                    Some(&project_short(&m.project_path)),
+                    m.first_user_message.as_deref().unwrap_or("(no prompt)"),
+                ),
             )
         })
         .collect();
-    let opts = fzf::PickOptions {
-        with_nth: "3..",
+    let opts = fuzzy::PickOptions {
+        with_nth: "3",
         prompt: "claude session> ",
-        preview: Some("path show --ansi claude --project {1} --session {2}"),
+        preview: Some("{exe} show --ansi claude --project {1} --session {2}"),
         header: Some("pick a Claude session (TAB = multi-select, Enter = confirm)"),
         preview_window: "right:60%:wrap-word",
         tiebreak: "index",
         multi: true,
     };
-    let selected = match fzf::pick(&lines, &opts)? {
-        fzf::PickResult::Selected(v) => v,
-        fzf::PickResult::NoMatch | fzf::PickResult::Cancelled => Vec::new(),
+    let selected = match fuzzy::pick(&lines, &opts)? {
+        fuzzy::PickResult::Selected(v) => v,
+        fuzzy::PickResult::NoMatch | fuzzy::PickResult::Cancelled => Vec::new(),
     };
     Ok(Some(parse_project_session(&selected)))
 }
@@ -642,7 +647,7 @@ fn derive_gemini_with_manager(
                 match pick_gemini_global(manager)? {
                     Some(picks) => picks,
                     None => {
-                        fzf::print_recipe("gemini", true);
+                        fuzzy::print_recipe("gemini", true);
                         anyhow::bail!("--project required when not running interactively");
                     }
                 }
@@ -705,7 +710,7 @@ fn pick_gemini_in_project(
     manager: &toolpath_gemini::GeminiConvo,
     project: &str,
 ) -> Result<Option<Vec<(String, String)>>> {
-    if !fzf::available() {
+    if !fuzzy::available() {
         return Ok(None);
     }
     let metas = manager
@@ -718,27 +723,31 @@ fn pick_gemini_in_project(
         .iter()
         .map(|m| {
             format!(
-                "{}\t{}\t{}\t{}\t{} msgs",
+                "{}\t{}\t{}",
                 tab_safe(&m.project_path),
                 tab_safe(&m.session_uuid),
-                fzf_title(m.first_user_message.as_deref().unwrap_or("(no prompt)")),
-                short_timestamp(m.last_activity),
-                m.message_count,
+                render_row(
+                    None,
+                    m.last_activity,
+                    &count(m.message_count, "msgs"),
+                    None,
+                    m.first_user_message.as_deref().unwrap_or("(no prompt)"),
+                ),
             )
         })
         .collect();
-    let opts = fzf::PickOptions {
-        with_nth: "3..",
+    let opts = fuzzy::PickOptions {
+        with_nth: "3",
         prompt: "gemini session> ",
-        preview: Some("path show --ansi gemini --project {1} --session {2}"),
+        preview: Some("{exe} show --ansi gemini --project {1} --session {2}"),
         header: Some("pick a Gemini session (TAB = multi-select, Enter = confirm)"),
         preview_window: "right:60%:wrap-word",
         tiebreak: "index",
         multi: true,
     };
-    let selected = match fzf::pick(&lines, &opts)? {
-        fzf::PickResult::Selected(v) => v,
-        fzf::PickResult::NoMatch | fzf::PickResult::Cancelled => Vec::new(),
+    let selected = match fuzzy::pick(&lines, &opts)? {
+        fuzzy::PickResult::Selected(v) => v,
+        fuzzy::PickResult::NoMatch | fuzzy::PickResult::Cancelled => Vec::new(),
     };
     Ok(Some(parse_project_session(&selected)))
 }
@@ -747,7 +756,7 @@ fn pick_gemini_in_project(
 fn pick_gemini_global(
     manager: &toolpath_gemini::GeminiConvo,
 ) -> Result<Option<Vec<(String, String)>>> {
-    if !fzf::available() {
+    if !fuzzy::available() {
         return Ok(None);
     }
     let projects = manager
@@ -767,28 +776,31 @@ fn pick_gemini_global(
         .iter()
         .map(|m| {
             format!(
-                "{}\t{}\t{}\t{}\t{} msgs\t{}",
+                "{}\t{}\t{}",
                 tab_safe(&m.project_path),
                 tab_safe(&m.session_uuid),
-                fzf_title(m.first_user_message.as_deref().unwrap_or("(no prompt)")),
-                short_timestamp(m.last_activity),
-                m.message_count,
-                tab_safe(&project_short(&m.project_path)),
+                render_row(
+                    None,
+                    m.last_activity,
+                    &count(m.message_count, "msgs"),
+                    Some(&project_short(&m.project_path)),
+                    m.first_user_message.as_deref().unwrap_or("(no prompt)"),
+                ),
             )
         })
         .collect();
-    let opts = fzf::PickOptions {
-        with_nth: "3..",
+    let opts = fuzzy::PickOptions {
+        with_nth: "3",
         prompt: "gemini session> ",
-        preview: Some("path show --ansi gemini --project {1} --session {2}"),
+        preview: Some("{exe} show --ansi gemini --project {1} --session {2}"),
         header: Some("pick a Gemini session (TAB = multi-select, Enter = confirm)"),
         preview_window: "right:60%:wrap-word",
         tiebreak: "index",
         multi: true,
     };
-    let selected = match fzf::pick(&lines, &opts)? {
-        fzf::PickResult::Selected(v) => v,
-        fzf::PickResult::NoMatch | fzf::PickResult::Cancelled => Vec::new(),
+    let selected = match fuzzy::pick(&lines, &opts)? {
+        fuzzy::PickResult::Selected(v) => v,
+        fuzzy::PickResult::NoMatch | fuzzy::PickResult::Cancelled => Vec::new(),
     };
     Ok(Some(parse_project_session(&selected)))
 }
@@ -879,7 +891,7 @@ fn wrap_paths_codex(paths: Vec<toolpath::v1::Path>) -> Result<Vec<DerivedDoc>> {
 
 #[cfg(not(target_os = "emscripten"))]
 fn pick_codex(manager: &toolpath_codex::CodexConvo) -> Result<Option<Vec<String>>> {
-    if !fzf::available() {
+    if !fuzzy::available() {
         return Ok(None);
     }
     let metas = manager
@@ -891,33 +903,32 @@ fn pick_codex(manager: &toolpath_codex::CodexConvo) -> Result<Option<Vec<String>
     let lines: Vec<String> = metas
         .iter()
         .map(|m| {
+            let cwd_short = m.cwd.as_ref().map(|p| project_short(&p.to_string_lossy()));
             format!(
-                "{}\t{}\t{}\t{} lines\t{}",
+                "{}\t{}",
                 tab_safe(&m.id),
-                fzf_title(m.first_user_message.as_deref().unwrap_or("(no prompt)")),
-                short_timestamp(m.last_activity),
-                m.line_count,
-                tab_safe(
-                    &m.cwd
-                        .as_ref()
-                        .map(|p| project_short(&p.to_string_lossy()))
-                        .unwrap_or_default(),
+                render_row(
+                    None,
+                    m.last_activity,
+                    &count(m.line_count, "lines"),
+                    cwd_short.as_deref(),
+                    m.first_user_message.as_deref().unwrap_or("(no prompt)"),
                 ),
             )
         })
         .collect();
-    let opts = fzf::PickOptions {
-        with_nth: "2..",
+    let opts = fuzzy::PickOptions {
+        with_nth: "2",
         prompt: "codex session> ",
-        preview: Some("path show --ansi codex --session {1}"),
+        preview: Some("{exe} show --ansi codex --session {1}"),
         header: Some("pick a Codex session (TAB = multi-select, Enter = confirm)"),
         preview_window: "right:60%:wrap-word",
         tiebreak: "index",
         multi: true,
     };
-    let selected = match fzf::pick(&lines, &opts)? {
-        fzf::PickResult::Selected(v) => v,
-        fzf::PickResult::NoMatch | fzf::PickResult::Cancelled => Vec::new(),
+    let selected = match fuzzy::pick(&lines, &opts)? {
+        fuzzy::PickResult::Selected(v) => v,
+        fuzzy::PickResult::NoMatch | fuzzy::PickResult::Cancelled => Vec::new(),
     };
     Ok(Some(parse_single_id(&selected)))
 }
@@ -1037,7 +1048,7 @@ fn pick_opencode(
     manager: &toolpath_opencode::OpencodeConvo,
     project: Option<&str>,
 ) -> Result<Option<Vec<String>>> {
-    if !fzf::available() {
+    if !fuzzy::available() {
         return Ok(None);
     }
     let metas = manager
@@ -1050,33 +1061,37 @@ fn pick_opencode(
     let lines: Vec<String> = metas
         .iter()
         .map(|m| {
+            let dir_short = project_short(&m.directory.to_string_lossy());
+            let title = m
+                .first_user_message
+                .as_deref()
+                .filter(|s| !s.is_empty())
+                .unwrap_or(m.title.as_str());
             format!(
-                "{}\t{}\t{}\t{} msgs\t{}",
+                "{}\t{}",
                 tab_safe(&m.id),
-                fzf_title(
-                    m.first_user_message
-                        .as_deref()
-                        .filter(|s| !s.is_empty())
-                        .unwrap_or(m.title.as_str()),
+                render_row(
+                    None,
+                    m.last_activity,
+                    &count(m.message_count, "msgs"),
+                    Some(&dir_short),
+                    title,
                 ),
-                short_timestamp(m.last_activity),
-                m.message_count,
-                tab_safe(&project_short(&m.directory.to_string_lossy())),
             )
         })
         .collect();
-    let opts = fzf::PickOptions {
-        with_nth: "2..",
+    let opts = fuzzy::PickOptions {
+        with_nth: "2",
         prompt: "opencode session> ",
-        preview: Some("path show --ansi opencode --session {1}"),
+        preview: Some("{exe} show --ansi opencode --session {1}"),
         header: Some("pick an opencode session (TAB = multi-select, Enter = confirm)"),
         preview_window: "right:60%:wrap-word",
         tiebreak: "index",
         multi: true,
     };
-    let selected = match fzf::pick(&lines, &opts)? {
-        fzf::PickResult::Selected(v) => v,
-        fzf::PickResult::NoMatch | fzf::PickResult::Cancelled => Vec::new(),
+    let selected = match fuzzy::pick(&lines, &opts)? {
+        fuzzy::PickResult::Selected(v) => v,
+        fuzzy::PickResult::NoMatch | fuzzy::PickResult::Cancelled => Vec::new(),
     };
     Ok(Some(parse_single_id(&selected)))
 }
@@ -1151,7 +1166,7 @@ fn derive_pi_with_manager(
                 match pick_pi_global(manager)? {
                     Some(picks) => picks,
                     None => {
-                        fzf::print_recipe("pi", true);
+                        fuzzy::print_recipe("pi", true);
                         anyhow::bail!("--project required when not running interactively");
                     }
                 }
@@ -1201,7 +1216,7 @@ fn pick_pi_in_project(
     manager: &toolpath_pi::PiConvo,
     project: &str,
 ) -> Result<Option<Vec<(String, String)>>> {
-    if !fzf::available() {
+    if !fuzzy::available() {
         return Ok(None);
     }
     let metas = manager
@@ -1214,34 +1229,38 @@ fn pick_pi_in_project(
         .iter()
         .map(|m| {
             format!(
-                "{}\t{}\t{}\t{}\t{} entries",
+                "{}\t{}\t{}",
                 tab_safe(project),
                 tab_safe(&m.id),
-                fzf_title(m.first_user_message.as_deref().unwrap_or("(no prompt)")),
-                tab_safe(&m.timestamp),
-                m.entry_count,
+                render_row(
+                    None,
+                    parse_rfc3339(&m.timestamp),
+                    &count(m.entry_count, "entries"),
+                    None,
+                    m.first_user_message.as_deref().unwrap_or("(no prompt)"),
+                ),
             )
         })
         .collect();
-    let opts = fzf::PickOptions {
-        with_nth: "3..",
+    let opts = fuzzy::PickOptions {
+        with_nth: "3",
         prompt: "pi session> ",
-        preview: Some("path show --ansi pi --project {1} --session {2}"),
+        preview: Some("{exe} show --ansi pi --project {1} --session {2}"),
         header: Some("pick a Pi session (TAB = multi-select, Enter = confirm)"),
         preview_window: "right:60%:wrap-word",
         tiebreak: "index",
         multi: true,
     };
-    let selected = match fzf::pick(&lines, &opts)? {
-        fzf::PickResult::Selected(v) => v,
-        fzf::PickResult::NoMatch | fzf::PickResult::Cancelled => Vec::new(),
+    let selected = match fuzzy::pick(&lines, &opts)? {
+        fuzzy::PickResult::Selected(v) => v,
+        fuzzy::PickResult::NoMatch | fuzzy::PickResult::Cancelled => Vec::new(),
     };
     Ok(Some(parse_project_session(&selected)))
 }
 
 #[cfg(not(target_os = "emscripten"))]
 fn pick_pi_global(manager: &toolpath_pi::PiConvo) -> Result<Option<Vec<(String, String)>>> {
-    if !fzf::available() {
+    if !fuzzy::available() {
         return Ok(None);
     }
     let projects = manager
@@ -1263,28 +1282,31 @@ fn pick_pi_global(manager: &toolpath_pi::PiConvo) -> Result<Option<Vec<(String, 
         .iter()
         .map(|(project, m)| {
             format!(
-                "{}\t{}\t{}\t{}\t{} entries\t{}",
+                "{}\t{}\t{}",
                 tab_safe(project),
                 tab_safe(&m.id),
-                fzf_title(m.first_user_message.as_deref().unwrap_or("(no prompt)")),
-                tab_safe(&m.timestamp),
-                m.entry_count,
-                tab_safe(&project_short(project)),
+                render_row(
+                    None,
+                    parse_rfc3339(&m.timestamp),
+                    &count(m.entry_count, "entries"),
+                    Some(&project_short(project)),
+                    m.first_user_message.as_deref().unwrap_or("(no prompt)"),
+                ),
             )
         })
         .collect();
-    let opts = fzf::PickOptions {
-        with_nth: "3..",
+    let opts = fuzzy::PickOptions {
+        with_nth: "3",
         prompt: "pi session> ",
-        preview: Some("path show --ansi pi --project {1} --session {2}"),
+        preview: Some("{exe} show --ansi pi --project {1} --session {2}"),
         header: Some("pick a Pi session (TAB = multi-select, Enter = confirm)"),
         preview_window: "right:60%:wrap-word",
         tiebreak: "index",
         multi: true,
     };
-    let selected = match fzf::pick(&lines, &opts)? {
-        fzf::PickResult::Selected(v) => v,
-        fzf::PickResult::NoMatch | fzf::PickResult::Cancelled => Vec::new(),
+    let selected = match fuzzy::pick(&lines, &opts)? {
+        fuzzy::PickResult::Selected(v) => v,
+        fuzzy::PickResult::NoMatch | fuzzy::PickResult::Cancelled => Vec::new(),
     };
     Ok(Some(parse_project_session(&selected)))
 }
@@ -1317,49 +1339,19 @@ fn parse_single_id(lines: &[String]) -> Vec<String> {
         .collect()
 }
 
-/// Replace tabs/newlines so a TSV row stays one line with stable columns.
-fn tab_safe(s: &str) -> String {
-    s.replace(['\t', '\n', '\r'], " ")
-}
-
-/// Display-friendly title cell for an fzf row: tab-safe, single-line, capped
-/// in length so a long pasted prompt doesn't push later columns off screen.
-/// fzf still fuzzy-matches on the truncated form — full prompt text lives in
-/// the preview pane via `path show`.
 #[cfg(not(target_os = "emscripten"))]
-fn fzf_title(s: &str) -> String {
-    const MAX: usize = 120;
-    let safe = tab_safe(s);
-    if safe.chars().count() > MAX {
-        let head: String = safe.chars().take(MAX - 1).collect();
-        format!("{head}…")
-    } else {
-        safe
-    }
-}
+use crate::fuzzy::{count, project_short, render_row, tab_safe};
 
-/// Compact timestamp for fzf rows — `YYYY-MM-DD HH:MM` is enough resolution
-/// to disambiguate sessions in a picker without eating a full RFC 3339 line.
+/// Parse an RFC 3339 timestamp string into `DateTime<Utc>` for picker
+/// row rendering. Returns `None` when the string isn't parseable so
+/// `fuzzy::render_row` falls back to its placeholder column rather
+/// than blowing up the row. Used by the Pi provider, whose session
+/// metadata stores timestamps as raw strings.
 #[cfg(not(target_os = "emscripten"))]
-fn short_timestamp(t: Option<chrono::DateTime<chrono::Utc>>) -> String {
-    match t {
-        Some(t) => t.format("%Y-%m-%d %H:%M").to_string(),
-        None => "          —     ".to_string(), // pad so the column stays aligned
-    }
-}
-
-/// Last two path segments — enough to disambiguate `…/repo/.claude/worktrees/foo`
-/// from `…/other-repo/main` without showing the full absolute path.
-#[cfg(not(target_os = "emscripten"))]
-fn project_short(p: &str) -> String {
-    let trimmed = p.trim_end_matches('/');
-    let parts: Vec<&str> = trimmed.rsplit('/').take(2).collect();
-    if parts.is_empty() {
-        return p.to_string();
-    }
-    let mut out: Vec<&str> = parts.into_iter().collect();
-    out.reverse();
-    out.join("/")
+fn parse_rfc3339(s: &str) -> Option<chrono::DateTime<chrono::Utc>> {
+    chrono::DateTime::parse_from_rfc3339(s)
+        .ok()
+        .map(|t| t.with_timezone(&chrono::Utc))
 }
 
 /// Compute the local cache id a Pathbase ref would land at, without
@@ -1452,9 +1444,7 @@ fn parse_pathbase_ref(target: &str, url_flag: Option<&str>) -> Result<(Option<St
         let path = path.split(['?', '#']).next().unwrap_or("");
         let segs: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
         let triple = extract_triple(&segs).ok_or_else(|| {
-            anyhow::anyhow!(
-                "expected URL ending in /<owner>/<repo>/graphs/<uuid> (got {target})"
-            )
+            anyhow::anyhow!("expected URL ending in /<owner>/<repo>/graphs/<uuid> (got {target})")
         })?;
         Ok((Some(format!("{scheme}{host}")), triple))
     } else {
@@ -1486,13 +1476,14 @@ fn extract_triple(segs: &[&str]) -> Option<PathRef> {
     }
 
     // Look back through the canonical layouts in order of specificity.
-    let (owner, repo) = if n >= 6 && segs[n - 6] == "u" && segs[n - 4] == "repos" && segs[n - 2] == "graphs" {
-        (segs[n - 5], segs[n - 3])
-    } else if n >= 4 && (segs[n - 2] == "paths" || segs[n - 2] == "graphs") {
-        (segs[n - 4], segs[n - 3])
-    } else {
-        (segs[n - 3], segs[n - 2])
-    };
+    let (owner, repo) =
+        if n >= 6 && segs[n - 6] == "u" && segs[n - 4] == "repos" && segs[n - 2] == "graphs" {
+            (segs[n - 5], segs[n - 3])
+        } else if n >= 4 && (segs[n - 2] == "paths" || segs[n - 2] == "graphs") {
+            (segs[n - 4], segs[n - 3])
+        } else {
+            (segs[n - 3], segs[n - 2])
+        };
 
     if owner.is_empty() || repo.is_empty() {
         return None;
@@ -1528,8 +1519,7 @@ mod tests {
     #[test]
     fn parse_pathbase_ref_bare_triple_with_url_flag() {
         let target = format!("alex/pathstash/{UUID}");
-        let (base, ref_) =
-            parse_pathbase_ref(&target, Some("https://other.example/")).unwrap();
+        let (base, ref_) = parse_pathbase_ref(&target, Some("https://other.example/")).unwrap();
         assert_eq!(base.as_deref(), Some("https://other.example"));
         assert_eq!(
             ref_,
@@ -1601,9 +1591,7 @@ mod tests {
         // Pathbase 1.1+ addresses graphs by UUID; a slug-style ref
         // can no longer be resolved, so fail at the parse step.
         assert!(parse_pathbase_ref("alex/pathstash/my-path", None).is_err());
-        assert!(
-            parse_pathbase_ref("https://pathbase.dev/alex/pathstash/my-path", None).is_err()
-        );
+        assert!(parse_pathbase_ref("https://pathbase.dev/alex/pathstash/my-path", None).is_err());
     }
 
     #[test]
@@ -1698,10 +1686,7 @@ mod tests {
 
         let derived = pathbase_fetch_to_doc(&url, None).unwrap();
 
-        assert_eq!(
-            derived.cache_id,
-            format!("pathbase-alex-pathstash-{UUID}")
-        );
+        assert_eq!(derived.cache_id, format!("pathbase-alex-pathstash-{UUID}"));
         assert!(derived.doc.into_single_path().is_some());
     }
 }
