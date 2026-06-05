@@ -4,8 +4,8 @@ A single harness-agnostic prompt that walks any agent through every common
 tool category in roughly five minutes. The resulting session file (claude
 JSONL / codex rollout / gemini chat-file / pi JSONL / opencode SQLite
 rows) is a real-world fixture for the cross-harness matrix corpus —
-denser and more representative than the inline-built `ConversationView`
-the matrix tests today.
+denser and more representative than the inline-built
+`ConversationView` the matrix tests today.
 
 ## Why this exists
 
@@ -49,6 +49,12 @@ version uses different flags):
 | Pi | `pi -p "<prompt>"` (varies; manual fallback documented below) | `~/.pi/agent/sessions/--<encoded-cwd>--/*.jsonl` |
 | Opencode | `opencode run "<prompt>"` then `path p export opencode` | rows in `opencode.db`, exported to JSON |
 
+Cursor is **not** in the automated list. The IDE has no scriptable
+chat-panel entry point, and the `cursor-agent` CLI writes its real
+session to a separate protobuf blob store (`~/.cursor/chats/...`)
+that `toolpath-cursor` doesn't parse. Capture Cursor fixtures
+manually — see below.
+
 ### Manual
 
 If a harness's batch mode doesn't work (Pi varies; opencode without
@@ -63,6 +69,30 @@ rm -rf ./*
 
 When the run completes, copy the session file out of its harness-native
 location (table above) into `test-fixtures/<harness>/`.
+
+### Cursor
+
+1. Open Cursor.app on a scratch workspace, open a new agent-mode chat,
+   paste the prompt, wait for the run to finish.
+2. Find the new composer UUID:
+
+   ```bash
+   sqlite3 "file:$HOME/Library/Application Support/Cursor/User/globalStorage/state.vscdb?mode=ro" \
+     "SELECT substr(key, length('composerData:')+1) FROM cursorDiskKV WHERE key LIKE 'composerData:%' ORDER BY rowid DESC LIMIT 5"
+   ```
+3. Dump it into the fixture file:
+
+   ```bash
+   cargo run -p toolpath-cursor --example dump_fixture -- \
+     --composer <uuid> --no-trim --output test-fixtures/cursor/convo.json
+   ```
+
+`dump_fixture` also has a `--from-jsonl <path>` mode that synthesizes
+a `CursorSession` from a `~/.cursor/projects/.../<chat>.jsonl`
+transcript — useful as a fallback when you only have the message log
+and not the real `state.vscdb` row, but the JSONL is lossy (no tool
+results, `[REDACTED]` text) so the fixture is best-effort, not
+state.vscdb-equivalent.
 
 ## What the prompt covers
 
@@ -106,6 +136,12 @@ each harness's existing reader API (`ConversationReader::read_conversation`,
 directly. Plug into the `Harness::load_fixture()` slot in
 `crates/path-cli/tests/cross_harness_matrix.rs` and the matrix runs
 against real-world input instead of the synthetic IR.
+
+Cursor is the exception: there's no per-session file on disk, so its
+fixture format is the serialized `toolpath_cursor::CursorSession`
+struct (composerData + ordered bubbles + referenced content blobs).
+The `CursorHarness::load_fixture` slot deserializes the JSON straight
+back into `CursorSession` and runs `session_to_view` on it.
 
 ## Maintenance
 
