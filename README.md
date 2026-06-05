@@ -179,7 +179,7 @@ path
     validate    --input FILE
     derive      # stdout-JSON sibling of import (same sources, --no-cache implied)
     project     # narrower file-shaped sibling of export
-    incept      # file/stdin-shaped sibling of `export claude --project`
+    incept      # file/stdin-shaped sibling of `export <provider> --project` (claude, cursor)
     track
       init      --file PATH --actor ACTOR [--title TEXT] [--base-uri URI] [--base-ref REF]
       step      --session FILE --seq N [--actor ACTOR] [--intent TEXT]

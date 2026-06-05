@@ -75,12 +75,11 @@ pub enum PCommand {
         #[command(subcommand)]
         target: crate::cmd_project::ProjectTarget,
     },
-    /// Project a Toolpath document into a Claude session layout under
-    /// `--project` (file/stdin-shaped sibling of `export claude
-    /// --project`).
+    /// Incept a Toolpath document into a harness's on-disk session
+    /// layout (file/stdin-shaped sibling of `export <provider>`).
     Incept {
-        #[command(flatten)]
-        args: crate::cmd_incept::InceptArgs,
+        #[command(subcommand)]
+        target: crate::cmd_incept::InceptTarget,
     },
     /// Incrementally build a Toolpath Path document
     Track {
@@ -104,7 +103,7 @@ pub fn run(command: PCommand, pretty: bool) -> Result<()> {
         PCommand::Validate { input } => crate::cmd_validate::run(input),
         PCommand::Derive { source } => crate::cmd_derive::run(source, pretty),
         PCommand::Project { target } => crate::cmd_project::run(target),
-        PCommand::Incept { args } => crate::cmd_incept::run(args),
+        PCommand::Incept { target } => crate::cmd_incept::run(target),
         PCommand::Track { op } => crate::cmd_track::run(op, pretty),
     }
 }
