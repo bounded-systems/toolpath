@@ -17,6 +17,7 @@ pub enum HarnessArg {
     Gemini,
     Codex,
     Opencode,
+    Cursor,
     Pi,
 }
 
@@ -71,6 +72,7 @@ pub(crate) enum Harness {
     Gemini,
     Codex,
     Opencode,
+    Cursor,
     Pi,
 }
 
@@ -81,24 +83,28 @@ impl Harness {
             Harness::Gemini => "gemini",
             Harness::Codex => "codex",
             Harness::Opencode => "opencode",
+            Harness::Cursor => "cursor",
             Harness::Pi => "pi",
         }
     }
 
-    /// Padded so all five symbols line up in the fzf column.
+    /// Padded so all symbols line up in the fzf column. Longest is
+    /// "opencode" (8); pad shorter names to match.
     pub(crate) fn symbol(&self) -> &'static str {
         match self {
             Harness::Claude => "claude  ",
             Harness::Gemini => "gemini  ",
             Harness::Codex => "codex   ",
             Harness::Opencode => "opencode",
+            Harness::Cursor => "cursor  ",
             Harness::Pi => "pi      ",
         }
     }
 
     /// True when the underlying provider keys sessions by project path.
-    /// claude/gemini/pi: true. codex/opencode: false (sessions store cwd
-    /// per-row, not as a directory key).
+    /// claude/gemini/pi: true. codex/opencode/cursor: false (sessions
+    /// store cwd per-row, not as a directory key — cursor stores it as
+    /// `workspaceIdentifier.uri.fsPath` on each composer).
     pub(crate) fn project_keyed(&self) -> bool {
         matches!(self, Harness::Claude | Harness::Gemini | Harness::Pi)
     }
@@ -109,6 +115,7 @@ impl Harness {
             HarnessArg::Gemini => Harness::Gemini,
             HarnessArg::Codex => Harness::Codex,
             HarnessArg::Opencode => Harness::Opencode,
+            HarnessArg::Cursor => Harness::Cursor,
             HarnessArg::Pi => Harness::Pi,
         }
     }
@@ -119,6 +126,7 @@ impl Harness {
             "gemini" => Some(Harness::Gemini),
             "codex" => Some(Harness::Codex),
             "opencode" => Some(Harness::Opencode),
+            "cursor" => Some(Harness::Cursor),
             "pi" => Some(Harness::Pi),
             _ => None,
         }
@@ -149,6 +157,7 @@ pub(crate) struct HarnessBundle {
     pub(crate) gemini: Option<toolpath_gemini::GeminiConvo>,
     pub(crate) codex: Option<toolpath_codex::CodexConvo>,
     pub(crate) opencode: Option<toolpath_opencode::OpencodeConvo>,
+    pub(crate) cursor: Option<toolpath_cursor::CursorConvo>,
     pub(crate) pi: Option<toolpath_pi::PiConvo>,
 }
 
@@ -162,6 +171,7 @@ impl HarnessBundle {
             gemini: Some(toolpath_gemini::GeminiConvo::new()),
             codex: Some(toolpath_codex::CodexConvo::new()),
             opencode: Some(toolpath_opencode::OpencodeConvo::new()),
+            cursor: Some(toolpath_cursor::CursorConvo::new()),
             pi: Some(toolpath_pi::PiConvo::new()),
         }
     }
@@ -210,6 +220,11 @@ pub(crate) fn gather_sessions(
         && let Some(mgr) = &bundle.opencode
     {
         collect_opencode(mgr, &canonical_cwd, canonical_project.as_deref(), &mut rows);
+    }
+    if want(Harness::Cursor)
+        && let Some(mgr) = &bundle.cursor
+    {
+        collect_cursor(mgr, &canonical_cwd, canonical_project.as_deref(), &mut rows);
     }
 
     rows.sort_by(|a, b| {
@@ -460,6 +475,55 @@ fn collect_opencode(
     }
 }
 
+fn collect_cursor(
+    mgr: &toolpath_cursor::CursorConvo,
+    canonical_cwd: &std::path::Path,
+    project_filter: Option<&std::path::Path>,
+    out: &mut Vec<SessionRow>,
+) {
+    let metas = match mgr.io().list_session_metadata() {
+        Ok(m) if !m.is_empty() => m,
+        Ok(_) => return,
+        Err(e) if is_not_found_cursor(&e) => return,
+        Err(e) => {
+            eprintln!("warning: cursor aggregation failed: {e}");
+            return;
+        }
+    };
+    for m in metas {
+        // Cursor stores each composer's workspace as the absolute
+        // path of the folder Cursor.app was open on. Sessions
+        // without a workspace (numeric/remote workspace ids) are
+        // dropped from the picker — we can't tell what they're
+        // tied to.
+        let Some(workspace) = m.workspace_path.as_ref() else {
+            continue;
+        };
+        if let Some(filter) = project_filter
+            && !paths_match(workspace, filter)
+        {
+            continue;
+        }
+        let matches_cwd = paths_match(workspace, canonical_cwd);
+        let cwd_str = workspace.to_string_lossy().into_owned();
+        let title = match (&m.first_user_message, &m.name) {
+            (Some(s), _) if !s.is_empty() => s.clone(),
+            (_, Some(n)) if !n.is_empty() => n.clone(),
+            _ => "(no prompt)".to_string(),
+        };
+        out.push(SessionRow {
+            harness: Harness::Cursor,
+            project: None,
+            cwd: Some(cwd_str),
+            session_id: m.id,
+            title,
+            last_activity: m.last_activity,
+            message_count: m.message_count,
+            matches_cwd,
+        });
+    }
+}
+
 fn is_not_found_claude(err: &toolpath_claude::ConvoError) -> bool {
     use toolpath_claude::ConvoError;
     matches!(err, ConvoError::Io(e) if e.kind() == std::io::ErrorKind::NotFound)
@@ -493,6 +557,14 @@ fn is_not_found_opencode(err: &toolpath_opencode::ConvoError) -> bool {
         || matches!(err, ConvoError::NoHomeDirectory)
         || matches!(err, ConvoError::OpencodeDirectoryNotFound(_))
         || matches!(err, ConvoError::DatabaseNotFound(_))
+}
+
+fn is_not_found_cursor(err: &toolpath_cursor::CursorError) -> bool {
+    use toolpath_cursor::CursorError;
+    matches!(err, CursorError::Io(e) if e.kind() == std::io::ErrorKind::NotFound)
+        || matches!(err, CursorError::NoHomeDirectory)
+        || matches!(err, CursorError::CursorDataDirectoryNotFound(_))
+        || matches!(err, CursorError::DatabaseNotFound(_))
 }
 
 pub fn run(args: ShareArgs) -> Result<()> {
@@ -607,6 +679,7 @@ fn harness_to_arg(h: Harness) -> HarnessArg {
         Harness::Gemini => HarnessArg::Gemini,
         Harness::Codex => HarnessArg::Codex,
         Harness::Opencode => HarnessArg::Opencode,
+        Harness::Cursor => HarnessArg::Cursor,
         Harness::Pi => HarnessArg::Pi,
     }
 }
@@ -641,6 +714,10 @@ fn bail_no_sessions(
     summary.push_str(&format_status_line(
         "opencode",
         &harness_status_opencode(bundle, home.as_deref()),
+    ));
+    summary.push_str(&format_status_line(
+        "cursor",
+        &harness_status_cursor(bundle, home.as_deref()),
     ));
     summary.push_str(&format_status_line(
         "pi",
@@ -756,6 +833,22 @@ fn harness_status_pi(bundle: &HarnessBundle, home: Option<&std::path::Path>) -> 
     HarnessStatus {
         path: home_relative(&p, home),
         exists: p.exists(),
+    }
+}
+
+fn harness_status_cursor(
+    bundle: &HarnessBundle,
+    home: Option<&std::path::Path>,
+) -> HarnessStatus {
+    let Some(mgr) = &bundle.cursor else {
+        return HarnessStatus::unresolved();
+    };
+    match mgr.resolver().db_path() {
+        Ok(p) => HarnessStatus {
+            path: home_relative(&p, home),
+            exists: p.exists(),
+        },
+        Err(_) => HarnessStatus::unresolved(),
     }
 }
 
@@ -895,6 +988,7 @@ fn derive_session(
         }
         Harness::Codex => crate::cmd_import::derive_codex_session(session),
         Harness::Opencode => crate::cmd_import::derive_opencode_session(session, false),
+        Harness::Cursor => crate::cmd_import::derive_cursor_session(session),
     }
 }
 
@@ -909,14 +1003,15 @@ mod tests {
             Harness::Gemini,
             Harness::Codex,
             Harness::Opencode,
+            Harness::Cursor,
             Harness::Pi,
         ];
         let names: Vec<&str> = all.iter().map(|h| h.name()).collect();
         let symbols: Vec<&str> = all.iter().map(|h| h.symbol()).collect();
-        assert_eq!(names.len(), 5);
+        assert_eq!(names.len(), 6);
         assert_eq!(
             names.iter().collect::<std::collections::HashSet<_>>().len(),
-            5,
+            6,
             "names must be unique"
         );
         assert_eq!(
@@ -924,7 +1019,7 @@ mod tests {
                 .iter()
                 .collect::<std::collections::HashSet<_>>()
                 .len(),
-            5,
+            6,
             "symbols must be unique"
         );
     }
@@ -936,6 +1031,7 @@ mod tests {
         assert!(Harness::Pi.project_keyed());
         assert!(!Harness::Codex.project_keyed());
         assert!(!Harness::Opencode.project_keyed());
+        assert!(!Harness::Cursor.project_keyed());
     }
 
     #[test]
@@ -945,6 +1041,7 @@ mod tests {
             (HarnessArg::Gemini, Harness::Gemini),
             (HarnessArg::Codex, Harness::Codex),
             (HarnessArg::Opencode, Harness::Opencode),
+            (HarnessArg::Cursor, Harness::Cursor),
             (HarnessArg::Pi, Harness::Pi),
         ] {
             assert_eq!(Harness::from_arg(arg), harness);

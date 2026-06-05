@@ -114,8 +114,8 @@ pub fn run_with_strategy(args: ResumeArgs, exec: &dyn ExecStrategy) -> Result<()
     );
 
     let session_id = project_into_harness(path, target, &cwd)?;
-    let argv = argv_for(target, &session_id);
-    exec_harness(target.name(), &argv, &cwd, exec)
+    let (binary, argv) = invocation_for(target, &session_id, &cwd);
+    exec_harness(&binary, &argv, &cwd, exec)
 }
 
 use toolpath::v1::{Graph, Path as TPath, PathOrRef};
@@ -132,6 +132,7 @@ pub(crate) fn infer_source_harness(path: &TPath) -> Option<crate::cmd_share::Har
             "gemini-cli" => return Some(Harness::Gemini),
             "codex" => return Some(Harness::Codex),
             "opencode" => return Some(Harness::Opencode),
+            "cursor" => return Some(Harness::Cursor),
             "pi" => return Some(Harness::Pi),
             _ => {} // fall through to actor sniffing
         }
@@ -149,6 +150,9 @@ pub(crate) fn infer_source_harness(path: &TPath) -> Option<crate::cmd_share::Har
         }
         if actor.starts_with("agent:opencode") {
             return Some(Harness::Opencode);
+        }
+        if actor.starts_with("agent:cursor") {
+            return Some(Harness::Cursor);
         }
         if actor.starts_with("agent:pi") {
             return Some(Harness::Pi);
@@ -293,11 +297,37 @@ pub(crate) fn binary_on_path(name: &str, path_override: Option<&std::path::Path>
     false
 }
 
+/// Cursor is special: the `cursor` CLI shim must be installed
+/// explicitly from the IDE's command palette, but `open -a Cursor`
+/// (macOS) / `xdg-open` (Linux) always work. Treat cursor as available
+/// when either path is open.
+pub(crate) fn harness_available(
+    harness: crate::cmd_share::Harness,
+    path_override: Option<&std::path::Path>,
+) -> bool {
+    use crate::cmd_share::Harness;
+    if binary_on_path(harness.name(), path_override) {
+        return true;
+    }
+    if harness == Harness::Cursor {
+        #[cfg(target_os = "macos")]
+        {
+            return binary_on_path("open", path_override);
+        }
+        #[cfg(all(unix, not(target_os = "macos")))]
+        {
+            return binary_on_path("xdg-open", path_override);
+        }
+    }
+    false
+}
+
 const ALL_HARNESSES: &[crate::cmd_share::Harness] = &[
     crate::cmd_share::Harness::Claude,
     crate::cmd_share::Harness::Gemini,
     crate::cmd_share::Harness::Codex,
     crate::cmd_share::Harness::Opencode,
+    crate::cmd_share::Harness::Cursor,
     crate::cmd_share::Harness::Pi,
 ];
 
@@ -317,7 +347,7 @@ pub(crate) fn pick_harness(
 
     if let Some(a) = arg {
         let h = Harness::from_arg(a);
-        if !binary_on_path(h.name(), path_override) {
+        if !harness_available(h, path_override) {
             anyhow::bail!(
                 "harness `{}` isn't on PATH; install it or pick another with `--harness`",
                 h.name()
@@ -329,12 +359,12 @@ pub(crate) fn pick_harness(
     let installed: Vec<Harness> = ALL_HARNESSES
         .iter()
         .copied()
-        .filter(|h| binary_on_path(h.name(), path_override))
+        .filter(|h| harness_available(*h, path_override))
         .collect();
 
     if installed.is_empty() {
         anyhow::bail!(
-            "no installed harnesses found on PATH; install one of: claude, gemini, codex, opencode, pi"
+            "no installed harnesses found on PATH; install one of: claude, gemini, codex, opencode, cursor, pi"
         );
     }
 
@@ -396,7 +426,49 @@ pub(crate) fn argv_for(harness: crate::cmd_share::Harness, session_id: &str) -> 
         Harness::Gemini => vec!["--resume".into(), session_id.into()],
         Harness::Codex => vec!["resume".into(), session_id.into()],
         Harness::Opencode => vec!["--session".into(), session_id.into()],
+        // Cursor.app has no "open composer by id" flag — we exec the
+        // workspace path so Cursor opens on that folder; the projected
+        // composer appears at the top of the chat list.
+        Harness::Cursor => {
+            let _ = session_id;
+            vec![".".into()]
+        }
         Harness::Pi => vec!["--session".into(), session_id.into()],
+    }
+}
+
+pub(crate) fn invocation_for(
+    harness: crate::cmd_share::Harness,
+    session_id: &str,
+    cwd: &std::path::Path,
+) -> (String, Vec<String>) {
+    use crate::cmd_share::Harness;
+    if harness == Harness::Cursor {
+        return cursor_invocation(cwd);
+    }
+    (harness.name().to_string(), argv_for(harness, session_id))
+}
+
+fn cursor_invocation(cwd: &std::path::Path) -> (String, Vec<String>) {
+    let workspace = cwd.to_string_lossy().into_owned();
+    if binary_on_path("cursor", None) {
+        ("cursor".to_string(), vec![workspace])
+    } else {
+        #[cfg(target_os = "macos")]
+        {
+            (
+                "open".to_string(),
+                vec!["-a".into(), "Cursor".into(), workspace],
+            )
+        }
+        #[cfg(all(unix, not(target_os = "macos")))]
+        {
+            ("xdg-open".to_string(), vec![workspace])
+        }
+        #[cfg(not(unix))]
+        {
+            ("cursor".to_string(), vec![workspace])
+        }
     }
 }
 
@@ -413,6 +485,7 @@ pub(crate) fn project_into_harness(
         Harness::Gemini => crate::cmd_export::project_gemini(path, cwd),
         Harness::Codex => crate::cmd_export::project_codex(path, cwd),
         Harness::Opencode => crate::cmd_export::project_opencode(path, cwd),
+        Harness::Cursor => crate::cmd_export::project_cursor(path, cwd),
         Harness::Pi => crate::cmd_export::project_pi(path, cwd),
     }
 }
@@ -851,6 +924,35 @@ mod tests {
 
         let err = pick_harness(Some(HarnessArg::Gemini), None, Some(td.path())).unwrap_err();
         assert!(err.to_string().contains("`gemini` isn't on PATH"));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn cursor_available_via_open_fallback_on_macos() {
+        let td = fake_path_with(&["open"]);
+        assert!(harness_available(Harness::Cursor, Some(td.path())));
+        let picked = pick_harness(Some(HarnessArg::Cursor), None, Some(td.path()));
+        assert_eq!(picked.unwrap(), Harness::Cursor);
+    }
+
+    #[test]
+    fn cursor_unavailable_when_no_launcher_at_all() {
+        let td = fake_path_with(&["claude"]);
+        assert!(!harness_available(Harness::Cursor, Some(td.path())));
+    }
+
+    #[test]
+    fn cursor_invocation_includes_workspace_path() {
+        let cwd = std::path::PathBuf::from("/tmp/some-workspace");
+        let (binary, argv) = invocation_for(Harness::Cursor, "ignored-session-id", &cwd);
+        assert!(
+            argv.iter().any(|a| a == "/tmp/some-workspace"),
+            "workspace path must appear in argv; got {argv:?}",
+        );
+        assert!(
+            matches!(binary.as_str(), "cursor" | "open" | "xdg-open"),
+            "expected cursor/open/xdg-open, got {binary:?}",
+        );
     }
 
     #[test]

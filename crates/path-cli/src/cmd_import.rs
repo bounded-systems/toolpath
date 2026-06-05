@@ -122,6 +122,23 @@ pub enum ImportSource {
         #[arg(long)]
         no_snapshot_diffs: bool,
     },
+    /// Import from Cursor (IDE) composers in `state.vscdb`
+    Cursor {
+        /// Composer UUID (default: interactive pick, or most recent
+        /// when no picker is available)
+        #[arg(short, long)]
+        session: Option<String>,
+
+        /// Process all composers (emits one Path per composer)
+        #[arg(long)]
+        all: bool,
+
+        /// Filter by workspace folder path (absolute). Matches by
+        /// canonical equality against each composer's
+        /// `workspaceIdentifier.uri.fsPath`.
+        #[arg(long)]
+        project: Option<String>,
+    },
     /// Import from Pi (pi.dev) coding-agent session logs
     Pi {
         /// Project path (omit to interactively pick across all projects)
@@ -240,6 +257,11 @@ fn derive(source: ImportSource) -> Result<Vec<DerivedDoc>> {
             project,
             no_snapshot_diffs,
         } => derive_opencode(session, all, project, no_snapshot_diffs),
+        ImportSource::Cursor {
+            session,
+            all,
+            project,
+        } => derive_cursor(session, all, project),
         ImportSource::Pi {
             project,
             session,
@@ -1085,6 +1107,192 @@ fn pick_opencode(
         prompt: "opencode session> ",
         preview: Some("{exe} show --ansi opencode --session {1}"),
         header: Some("pick an opencode session (TAB = multi-select, Enter = confirm)"),
+        preview_window: "right:60%:wrap-word",
+        tiebreak: "index",
+        multi: true,
+    };
+    let selected = match fuzzy::pick(&lines, &opts)? {
+        fuzzy::PickResult::Selected(v) => v,
+        fuzzy::PickResult::NoMatch | fuzzy::PickResult::Cancelled => Vec::new(),
+    };
+    Ok(Some(parse_single_id(&selected)))
+}
+
+// ── Cursor ──────────────────────────────────────────────────────────────
+
+fn derive_cursor(
+    session: Option<String>,
+    all: bool,
+    project: Option<String>,
+) -> Result<Vec<DerivedDoc>> {
+    #[cfg(target_os = "emscripten")]
+    {
+        let _ = (session, all, project);
+        anyhow::bail!(
+            "'path import cursor' requires a native environment (SQLite not available under wasm)"
+        );
+    }
+
+    #[cfg(not(target_os = "emscripten"))]
+    {
+        let manager = toolpath_cursor::CursorConvo::new();
+        let derive_one = |sid: &str| -> Result<toolpath::v1::Path> {
+            let s = manager
+                .read_session(sid)
+                .map_err(|e| anyhow::anyhow!("{}", e))?;
+            let cfg = toolpath_cursor::DeriveConfig::default();
+            Ok(toolpath_cursor::derive_path(&s, &cfg))
+        };
+
+        let workspace_filter = project.as_deref().map(|p| {
+            std::fs::canonicalize(p).unwrap_or_else(|_| PathBuf::from(p))
+        });
+        let workspace_match = |m: &toolpath_cursor::CursorSessionMetadata| -> bool {
+            match (&workspace_filter, &m.workspace_path) {
+                (None, _) => true,
+                (Some(_), None) => false,
+                (Some(want), Some(have)) => {
+                    let canonical =
+                        std::fs::canonicalize(have).unwrap_or_else(|_| have.clone());
+                    &canonical == want
+                }
+            }
+        };
+
+        let session_ids: Vec<String> = match (session, all) {
+            (Some(s), _) => vec![s],
+            (None, true) => {
+                let metas = manager
+                    .io()
+                    .list_session_metadata()
+                    .map_err(|e| anyhow::anyhow!("{}", e))?;
+                let filtered: Vec<_> = metas.into_iter().filter(workspace_match).collect();
+                if filtered.is_empty() {
+                    anyhow::bail!("No Cursor composers found");
+                }
+                let mut out = Vec::with_capacity(filtered.len());
+                for m in &filtered {
+                    out.push(derive_one(&m.id)?);
+                }
+                return wrap_paths_cursor(out);
+            }
+            (None, false) => match pick_cursor(&manager, workspace_filter.as_deref())? {
+                Some(picks) => picks,
+                None => {
+                    // Fall back to the newest composer (matching the
+                    // workspace filter, when given).
+                    let metas = manager
+                        .io()
+                        .list_session_metadata()
+                        .map_err(|e| anyhow::anyhow!("{}", e))?;
+                    let pick = metas
+                        .into_iter()
+                        .filter(workspace_match)
+                        .max_by_key(|m| {
+                            m.last_activity
+                                .unwrap_or_else(chrono::DateTime::<chrono::Utc>::default)
+                        })
+                        .ok_or_else(|| anyhow::anyhow!("No Cursor composers found"))?;
+                    return wrap_paths_cursor(vec![derive_one(&pick.id)?]);
+                }
+            },
+        };
+
+        let mut paths: Vec<toolpath::v1::Path> = Vec::with_capacity(session_ids.len());
+        for sid in &session_ids {
+            paths.push(derive_one(sid)?);
+        }
+        wrap_paths_cursor(paths)
+    }
+}
+
+/// Derive a single cursor composer given an explicit composer id.
+#[cfg(not(target_os = "emscripten"))]
+pub(crate) fn derive_cursor_session(session: &str) -> Result<DerivedDoc> {
+    let manager = toolpath_cursor::CursorConvo::new();
+    let s = manager
+        .read_session(session)
+        .map_err(|e| anyhow::anyhow!("{}", e))?;
+    let cfg = toolpath_cursor::DeriveConfig::default();
+    let path = toolpath_cursor::derive_path(&s, &cfg);
+    let cache_id = make_id("cursor", &path.path.id);
+    Ok(DerivedDoc {
+        cache_id,
+        doc: Graph::from_path(path),
+    })
+}
+
+fn wrap_paths_cursor(paths: Vec<toolpath::v1::Path>) -> Result<Vec<DerivedDoc>> {
+    Ok(paths
+        .into_iter()
+        .map(|p| {
+            let cache_id = make_id("cursor", &p.path.id);
+            DerivedDoc {
+                cache_id,
+                doc: Graph::from_path(p),
+            }
+        })
+        .collect())
+}
+
+#[cfg(not(target_os = "emscripten"))]
+fn pick_cursor(
+    manager: &toolpath_cursor::CursorConvo,
+    workspace_filter: Option<&std::path::Path>,
+) -> Result<Option<Vec<String>>> {
+    if !fuzzy::available() {
+        return Ok(None);
+    }
+    let metas = manager
+        .io()
+        .list_session_metadata()
+        .map_err(|e| anyhow::anyhow!("{}", e))?;
+    let metas: Vec<_> = metas
+        .into_iter()
+        .filter(|m| match (workspace_filter, &m.workspace_path) {
+            (None, _) => true,
+            (Some(_), None) => false,
+            (Some(want), Some(have)) => {
+                let canonical = std::fs::canonicalize(have).unwrap_or_else(|_| have.clone());
+                canonical == want
+            }
+        })
+        .collect();
+    if metas.is_empty() {
+        return Ok(None);
+    }
+    let lines: Vec<String> = metas
+        .iter()
+        .map(|m| {
+            let dir_short = m
+                .workspace_path
+                .as_ref()
+                .map(|p| project_short(&p.to_string_lossy()))
+                .unwrap_or_else(|| "<no workspace>".to_string());
+            let title = m
+                .first_user_message
+                .as_deref()
+                .filter(|s| !s.is_empty())
+                .or(m.name.as_deref())
+                .unwrap_or("");
+            format!(
+                "{}\t{}",
+                tab_safe(&m.id),
+                render_row(
+                    None,
+                    m.last_activity,
+                    &count(m.message_count, "msgs"),
+                    Some(&dir_short),
+                    title,
+                ),
+            )
+        })
+        .collect();
+    let opts = fuzzy::PickOptions {
+        with_nth: "2",
+        prompt: "cursor composer> ",
+        preview: Some("{exe} show --ansi cursor --session {1}"),
+        header: Some("pick a Cursor composer (TAB = multi-select, Enter = confirm)"),
         preview_window: "right:60%:wrap-word",
         tiebreak: "index",
         multi: true,

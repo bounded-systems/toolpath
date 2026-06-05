@@ -45,6 +45,15 @@ pub enum ListSource {
         #[arg(short, long)]
         project: Option<String>,
     },
+    /// List Cursor (IDE) composers (global, newest first). Reads
+    /// `<user-data>/User/globalStorage/state.vscdb`.
+    Cursor {
+        /// Filter by workspace folder path (absolute). Matches by
+        /// canonical equality against each composer's
+        /// `workspaceIdentifier.uri.fsPath`.
+        #[arg(short, long)]
+        project: Option<String>,
+    },
     /// List Pi (pi.dev) projects or sessions
     Pi {
         /// Project path — if omitted, lists all projects (pretty) or all
@@ -96,6 +105,7 @@ pub fn run(source: ListSource, format: Option<ListFormat>, json_flag: bool) -> R
         ListSource::Gemini { project } => run_gemini(project, fmt),
         ListSource::Codex {} => run_codex(fmt),
         ListSource::Opencode { project } => run_opencode(project, fmt),
+        ListSource::Cursor { project } => run_cursor(project, fmt),
         ListSource::Pi { project, base } => run_pi(project, base, fmt),
     }
 }
@@ -760,6 +770,121 @@ fn run_opencode(project: Option<String>, fmt: ListFormat) -> Result<()> {
                         println!(
                             "  {} {:>4} msgs  {}  {}  {}",
                             id_short, m.message_count, date, dir, prompt
+                        );
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+// ── Cursor ──────────────────────────────────────────────────────────────────
+
+fn run_cursor(project: Option<String>, fmt: ListFormat) -> Result<()> {
+    #[cfg(target_os = "emscripten")]
+    {
+        let _ = (project, fmt);
+        anyhow::bail!(
+            "'path list cursor' requires a native environment (SQLite not available under wasm)"
+        );
+    }
+
+    #[cfg(not(target_os = "emscripten"))]
+    {
+        let manager = toolpath_cursor::CursorConvo::new();
+        let mut metas = manager
+            .io()
+            .list_session_metadata()
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
+
+        // Workspace filter — match against `workspace_path` by
+        // canonical equality. Drop composers whose workspace doesn't
+        // match (or that have no workspace, since those are remote/
+        // untitled).
+        if let Some(filter) = &project {
+            let want = std::fs::canonicalize(filter).unwrap_or_else(|_| PathBuf::from(filter));
+            metas.retain(|m| {
+                m.workspace_path
+                    .as_ref()
+                    .map(|w| std::fs::canonicalize(w).unwrap_or_else(|_| w.clone()) == want)
+                    .unwrap_or(false)
+            });
+        }
+
+        match fmt {
+            ListFormat::Json => {
+                let items: Vec<serde_json::Value> = metas
+                    .iter()
+                    .map(|m| {
+                        serde_json::json!({
+                            "id": m.id,
+                            "name": m.name,
+                            "subtitle": m.subtitle,
+                            "started_at": m.started_at.map(|t| t.to_rfc3339()),
+                            "last_activity": m.last_activity.map(|t| t.to_rfc3339()),
+                            "unified_mode": m.unified_mode,
+                            "workspace_path": m.workspace_path,
+                            "message_count": m.message_count,
+                            "first_user_message": m.first_user_message,
+                        })
+                    })
+                    .collect();
+                let output = serde_json::json!({
+                    "source": "cursor",
+                    "project": project,
+                    "sessions": items,
+                });
+                println!("{}", serde_json::to_string_pretty(&output)?);
+            }
+            ListFormat::Tsv => {
+                for m in &metas {
+                    let ws = m
+                        .workspace_path
+                        .as_ref()
+                        .map(|p| p.to_string_lossy().into_owned())
+                        .unwrap_or_default();
+                    let title = m
+                        .first_user_message
+                        .as_deref()
+                        .or(m.name.as_deref())
+                        .unwrap_or("");
+                    println!(
+                        "{}\t{}\t{}\t{}\t{}",
+                        sanitize_tsv(&m.id),
+                        m.last_activity.map(|t| t.to_rfc3339()).unwrap_or_default(),
+                        m.message_count,
+                        sanitize_tsv(&ws),
+                        sanitize_tsv(title),
+                    );
+                }
+            }
+            ListFormat::Pretty => {
+                if metas.is_empty() {
+                    println!("No Cursor composers found in state.vscdb.");
+                } else {
+                    println!("Cursor composers:");
+                    println!();
+                    for m in &metas {
+                        let date = m
+                            .last_activity
+                            .map(|t| t.format("%Y-%m-%d %H:%M").to_string())
+                            .unwrap_or_else(|| "unknown".to_string());
+                        let id_short: String = m.id.chars().take(8).collect();
+                        let title = m
+                            .first_user_message
+                            .as_deref()
+                            .or(m.name.as_deref())
+                            .map(|s| truncate(s, 60))
+                            .unwrap_or_default();
+                        let ws = m
+                            .workspace_path
+                            .as_ref()
+                            .map(|p| p.to_string_lossy().into_owned())
+                            .unwrap_or_else(|| "<no workspace>".to_string());
+                        println!(
+                            "  {} {:>4} msgs  {}  {}  {}",
+                            id_short, m.message_count, date, ws, title
                         );
                     }
                 }
