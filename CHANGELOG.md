@@ -29,6 +29,45 @@ transitively): `toolpath` 0.6.0, `toolpath-convo` 0.10.0, `toolpath-git`
 `path-cli` 0.13.0, `toolpath-cli` 0.13.0. `pathbase-client` is
 unaffected.
 
+## Cursor (IDE) provider — 2026-06-04
+
+`toolpath-cursor` 0.1.0 (new crate). Reads Cursor.app's bubble store
+(`state.vscdb` SQLite at `~/Library/Application Support/Cursor/User/globalStorage/`)
+— composer rows, bubble rows, content-addressed `composer.content.<hash>`
+blobs, and the `composer.composerHeaders` index. Implements
+`ConversationProvider` and derives via `toolpath-convo`'s shared
+`derive_path`. Round-trips back to a Cursor-loadable composer via
+`CursorProjector` with full `TOOL_TABLE` coverage (53 entries, ids 0–63)
+extracted from the workbench bundle for round-trip-correct numeric tool
+ids. The cursor-agent CLI uses a different protobuf store at
+`~/.cursor/chats/<wsHash>/<chatId>/store.db` and is deferred to a future
+`toolpath-cursor-cli` companion.
+
+`path-cli` 0.12.0. Wires cursor into every plumbing surface: `p import
+cursor`, `p export cursor`, `p list cursor`, `show cursor`, `share`,
+`resume`, and the cross-harness matrix test. `p incept` is now a
+provider subcommand surface (`p incept claude` / `p incept cursor`),
+replacing the implicit-claude form. `p export cursor --project <ws>`
+writes the composer into Cursor.app's SQLite so the chat sidebar can
+load it on next workspace open.
+
+For projected sessions to load + render correctly in Cursor.app's
+chat, the projector emits the full native field set on each bubble
+(48 empty arrays, 6 booleans, capabilities array, `context` skeleton,
+`conversationMap`/`codeBlockData`/`originalFileStates`/`usageData: {}`,
+and `selectedModels[0].parameters: []`). The full enumeration —
+including the dev-console errors that surface when each is missing —
+lives in `docs/agents/formats/cursor.md` under "Projecting bubbles
+Cursor will render". Diffs render via reconstructed before/after
+content blobs (hunks-only when only a `raw_diff` is available, full
+content when provider snapshots it).
+
+Cross-provider derive: a Cursor composer's `edit_file_v2` tool calls
+land on `Turn.tool_uses` with `tu.input.{file_path, content,
+old_string, new_string}` populated from the resolved content blobs,
+so projecting to Claude, Codex, opencode, etc. produces an `Edit` /
+`Write` tool_use whose UI renders the diff.
+
 ## Embedded fuzzy picker — fzf is now optional — 2026-05-27
 
 `path-cli` 0.12.0. The CLI no longer requires the external `fzf` binary

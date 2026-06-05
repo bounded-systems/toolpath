@@ -26,6 +26,12 @@ culting.
   `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl`. Single-file reference
   covering the date-bucketed session format and the `patch_apply_end`
   events that drive file-change fidelity.
+- **[`cursor.md`](cursor.md)** — Cursor's split storage: the JSONL
+  agent transcript at `~/.cursor/projects/<slug>/agent-transcripts/`
+  and the rich SQLite bubble store at
+  `~/Library/Application Support/Cursor/User/globalStorage/state.vscdb`,
+  with content-addressed file blobs and the `cursor-commits`
+  checkpoint directory.
 - **[`gemini.md`](gemini.md)** — Gemini CLI chats under
   `~/.gemini/tmp/<project>/chats/`, including the main-file + sibling
   sub-agent UUID directory layout.
