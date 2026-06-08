@@ -19,6 +19,7 @@ crates/
   toolpath-gemini/              # derive from Gemini CLI conversation logs
   toolpath-codex/               # derive from Codex CLI rollout files
   toolpath-opencode/            # derive from opencode SQLite databases
+  toolpath-cursor/              # derive from Cursor (IDE) state.vscdb bubble store
   toolpath-pi/                  # derive from Pi (pi.dev) agent session logs
   toolpath-dot/                 # Graphviz DOT rendering
   toolpath-md/                  # Markdown rendering for LLM consumption
@@ -44,6 +45,7 @@ path-cli (binary: path)
  ├── toolpath-gemini  → toolpath, toolpath-convo
  ├── toolpath-codex   → toolpath, toolpath-convo
  ├── toolpath-opencode → toolpath, toolpath-convo
+ ├── toolpath-cursor  → toolpath, toolpath-convo
  ├── toolpath-pi      → toolpath, toolpath-convo
  ├── toolpath-dot     → toolpath
  └── toolpath-md      → toolpath
@@ -54,7 +56,7 @@ toolpath-cli (deprecated shim, binary: path)
  └── path-cli
 ```
 
-Cross-dependencies between satellite crates: `toolpath-claude → toolpath-convo`, `toolpath-gemini → toolpath-convo`, `toolpath-codex → toolpath-convo`, `toolpath-opencode → toolpath-convo`, `toolpath-pi → toolpath-convo`.
+Cross-dependencies between satellite crates: `toolpath-claude → toolpath-convo`, `toolpath-gemini → toolpath-convo`, `toolpath-codex → toolpath-convo`, `toolpath-opencode → toolpath-convo`, `toolpath-cursor → toolpath-convo`, `toolpath-pi → toolpath-convo`.
 
 The desktop GUI lives in the private [pathbase](https://github.com/empathic/pathbase) repo as `pathbase-app` — it consumes the toolpath crates via git or crates.io.
 
@@ -87,6 +89,7 @@ cargo run -p path-cli -- p import claude --project /path/to/project
 cargo run -p path-cli -- p import gemini --project /path/to/project
 cargo run -p path-cli -- p import codex --session <uuid>
 cargo run -p path-cli -- p import opencode --session ses_<id>
+cargo run -p path-cli -- p import cursor --session <composer-uuid>   # IDE composer from state.vscdb
 cargo run -p path-cli -- p import pi --project /path/to/project
 cargo run -p path-cli -- p import pathbase <pathbase-url-or-owner/repo/slug>
 cargo run -p path-cli -- p import claude --project . --no-cache | path p render md --input -
@@ -104,6 +107,8 @@ cargo run -p path-cli -- resume <input> --harness claude -C /path/to/project
 # cache id or a file path.
 cargo run -p path-cli -- p export claude --input <ref> --project /tmp/sandbox
 cargo run -p path-cli -- p export claude --input <ref> --output conv.jsonl
+cargo run -p path-cli -- p export cursor --input <ref> --project /tmp/workspace   # writes composer rows into state.vscdb
+cargo run -p path-cli -- p export cursor --input <ref> --output composer.json
 cargo run -p path-cli -- p export pathbase --input <ref>
 
 # Plumbing: manage the cache
@@ -120,6 +125,8 @@ cargo run -p path-cli -- p merge doc1.json doc2.json --title "Combined"
 cargo run -p path-cli -- p list git --repo .
 cargo run -p path-cli -- p list github --repo owner/repo
 cargo run -p path-cli -- p list opencode
+cargo run -p path-cli -- p list cursor                       # Cursor (IDE) composers
+cargo run -p path-cli -- p list cursor --project /path/to/workspace   # filter by workspace
 cargo run -p path-cli -- p list pi
 cargo run -p path-cli -- p list pi --project /path/to/project
 cargo run -p path-cli -- p list claude --format tsv  # one session per line, fzf-friendly
@@ -176,6 +183,7 @@ Tests live alongside the code (`#[cfg(test)] mod tests`), plus `path-cli` has in
 - `toolpath-gemini`: 163 unit + 12 integration + 4 doc tests (path resolution, chat-file parsing, query, watcher, derive, provider, round-trip fidelity)
 - `toolpath-codex`: 69 unit + 33 integration + 1 doc test (rollout parsing, provider assembly, patch-fidelity derive, real-session fixture, source→path fidelity invariants, JSON wire-level round-trip)
 - `toolpath-opencode`: 43 unit + 1 doc test (SQLite reader, JSON payload serde, provider assembly, snapshot-based derive, tool-input fallback for gitignored paths)
+- `toolpath-cursor`: 70 unit + 8 integration round-trip + 1 real-DB sanity + 1 doc test (state.vscdb SQLite reader, bubble store + composer header parsing, content-addressed blob lookup, projector with full TOOL_TABLE coverage, JSONL transcript ingest in `examples/dump_fixture.rs`)
 - `toolpath-pi`: 123 unit + 4 doc tests (types, paths, error, reader, io, provider)
 - `toolpath-dot`: 30 unit + 2 doc tests (render, visual conventions, escaping)
 - `path-cli`: 260 unit + 63 integration tests (import/export/cache, track sessions, merge, validate, roundtrip, render-md snapshots, deprecation aliases, pathbase HTTP mock-server tests, fzf-friendly TSV output, `path resume` orchestration with injectable `ExecStrategy`). For an end-to-end check against a real Pathbase deployment, run `scripts/test-pathbase-live.sh <url>` — it does an anon round-trip in a sandboxed config dir and, if you're logged into that URL, an authed pathstash round-trip too.
@@ -238,6 +246,7 @@ Build the site after changes: `cd site && pnpm run build` (should produce 7 page
 - Pi provider: `toolpath-pi` reads Pi session JSONL from `~/.pi/agent/sessions/`. Sessions use a tree (id/parentId) in a single file, and may link to a parent file via `parentSession` in the header. The tree is preserved as a DAG in the derived `Path`.
 - Codex provider: `toolpath-codex` reads Codex CLI rollout files from `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl`. Sessions are date-bucketed (not project-keyed). File-change fidelity is excellent — Codex's `patch_apply_end` events carry either the unified diff (for updates) or the full file content (for adds), so the derived `Path` gets a real `raw` perspective on every file artifact. See `docs/agents/formats/codex.md` for the full format reference.
 - opencode provider: `toolpath-opencode` reads a SQLite database at `~/.local/share/opencode/opencode.db` (opened read-only). Each session's messages and 12 typed part variants (text, reasoning, tool, step-start/-finish, snapshot, patch, file, agent, subtask, retry, compaction) land as one step per message with tool invocations attached. File diffs come from a sibling bare git repo at `snapshot/<project-id>/[<sha1(worktree)>]/` via `git2` tree↔tree diffs — opencode respects the user's `.gitignore`, so changes under gitignored paths fall back to tool-input-derived structural changes with no `raw` perspective. Project id is the SHA of the repo's first root commit. See `docs/agents/formats/opencode.md` for the full format reference.
+- Cursor (IDE) provider: `toolpath-cursor` reads Cursor.app's global `state.vscdb` SQLite (opened read-only) at `~/Library/Application Support/Cursor/User/globalStorage/state.vscdb` (macOS; `~/.config/Cursor/...` on Linux). Composers, bubbles, and content-addressed file blobs are stored as key-prefixed rows in the `cursorDiskKV` table (`composerData:<uuid>`, `bubbleId:<comp>:<bubble>`, `composer.content.<hash>`) plus a `composer.composerHeaders` index blob in `ItemTable`. The full tool-dispatch enum (53 entries, ids 0–63) is extracted from the workbench bundle into `TOOL_TABLE` for round-trip-correct numeric ids — projector-written composers load back into Cursor.app's UI with the right tool rendering. The cursor-agent CLI uses a different per-chat protobuf store at `~/.cursor/chats/<wsHash>/<chatId>/store.db` that this crate does not yet parse — that's deferred to a future `toolpath-cursor-cli` companion. See `docs/agents/formats/cursor.md` for the full format reference.
 - Format references for the agent on-disk formats we derive from live at `docs/agents/formats/`. The Claude Code format (`~/.claude/projects/…` JSONL) gets the deepest treatment — twelve focused docs at `docs/agents/formats/claude-code/` covering envelope, entry types, tools, session chains, compaction, writing-compatible JSONL, a linear walkthrough, and a version-keyed changelog. Sibling single-file references: `codex.md`, `gemini.md`, `opencode.md`. Keep them in sync with their derive crates when fields or behaviors change.
 - Interactive session selection: `path p import <provider>` (claude / gemini / pi / codex / opencode) auto-launches a fuzzy picker when stdin and stderr are TTYs and no `--session` was given. Backend: external `fzf` if on `$PATH`, otherwise the embedded skim picker (default-feature `embedded-picker`, defined in `crates/path-cli/src/skim_picker.rs`). Multi-select (TAB) produces a `Graph` document; single-select produces a `Path`. The picker uses `path show <provider> --…` as its `--preview` command. When neither backend can run (no TTY, or `--no-default-features` AND no `fzf`), it falls back to most-recent (with `--project`) or prints the manual recipe (without). `path p list <provider> --format tsv` is the documented machine-readable surface — column 1 is the project (for claude/gemini/pi) or session id (for codex/opencode), and the trailing column carries `first_user_message` so consumers can fuzzy-match by topic.
 - Conversation metadata title field: `toolpath-claude::ConversationMetadata`, `toolpath-gemini::ConversationMetadata`, and `toolpath-pi::SessionMeta` all expose `first_user_message: Option<String>` — the first non-empty user-prompt text. Populated cheaply during the metadata pass (single-pass for Claude/Gemini; one extra short read for Pi). Used by the picker UI but useful for any "list sessions by topic" surface.

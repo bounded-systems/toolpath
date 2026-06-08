@@ -262,6 +262,48 @@ impl Harness for OpencodeHarness {
     }
 }
 
+struct CursorHarness;
+impl Harness for CursorHarness {
+    fn name(&self) -> &'static str {
+        "cursor"
+    }
+    fn roundtrip(&self, view: &ConversationView) -> ConversationView {
+        let projector = toolpath_cursor::project::CursorProjector::new();
+        let session = projector.project(view).expect("cursor project");
+        toolpath_cursor::session_to_view(&session)
+    }
+    fn load_fixture(&self) -> Option<ConversationView> {
+        let path = fixtures_dir().join("cursor/convo.json");
+        if !path.exists() {
+            return None;
+        }
+        let json = std::fs::read_to_string(&path).expect("cursor fixture read");
+        let session: toolpath_cursor::CursorSession =
+            serde_json::from_str(&json).expect("cursor fixture parse");
+        Some(toolpath_cursor::session_to_view(&session))
+    }
+    fn schema_validates(&self, view: &ConversationView) -> Result<(), String> {
+        // Cursor's wire format is SQLite (`state.vscdb` cursorDiskKV
+        // rows + composer.composerHeaders) — a full wire round-trip
+        // would mean spinning up a temporary DB with the schema and
+        // running per-row writes through it. The toolpath-cursor
+        // crate's `tests/projection_roundtrip.rs` already exercises
+        // exactly that against a `BASIC_FIXTURE`. Here we cover the
+        // narrower contract: the projected `CursorSession` is
+        // symmetrically (de)serializable as JSON, which is the
+        // format the test fixture uses and what `path export cursor`
+        // would emit.
+        let projector = toolpath_cursor::project::CursorProjector::new();
+        let session = projector
+            .project(view)
+            .map_err(|e| format!("project: {}", e))?;
+        let json = serde_json::to_string(&session).map_err(|e| format!("serialize: {}", e))?;
+        let _back: toolpath_cursor::CursorSession =
+            serde_json::from_str(&json).map_err(|e| format!("re-parse: {}", e))?;
+        Ok(())
+    }
+}
+
 /// Convert opencode's `export` JSON wrapper format into the
 /// `Session` struct shape that `to_view` expects. The wrapper uses
 /// camelCase + nested `info` blocks; the Session uses snake_case +
@@ -935,6 +977,7 @@ fn run_matrix(label: &str, sources: &[(String, ConversationView)]) {
         Box::new(PiHarness),
         Box::new(GeminiHarness),
         Box::new(OpencodeHarness),
+        Box::new(CursorHarness),
     ];
     let by_name: BTreeMap<&str, &dyn Harness> =
         harnesses.iter().map(|h| (h.name(), h.as_ref())).collect();
@@ -984,6 +1027,7 @@ fn all_harnesses() -> Vec<Box<dyn Harness>> {
         Box::new(PiHarness),
         Box::new(GeminiHarness),
         Box::new(OpencodeHarness),
+        Box::new(CursorHarness),
     ]
 }
 

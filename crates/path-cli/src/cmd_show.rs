@@ -53,6 +53,16 @@ pub enum ShowSource {
         #[arg(long, hide = true)]
         project: Option<std::path::PathBuf>,
     },
+    /// Show a Cursor composer as a markdown summary
+    Cursor {
+        /// Composer UUID
+        #[arg(short, long)]
+        session: String,
+
+        /// Compatibility shim for the unified `path share` preview template; ignored.
+        #[arg(long, hide = true)]
+        project: Option<std::path::PathBuf>,
+    },
     /// Show a Pi (pi.dev) session as a markdown summary
     Pi {
         /// Project path
@@ -134,6 +144,17 @@ fn derive_one(source: ShowSource) -> Result<toolpath::v1::Path> {
                 &cfg,
                 manager.resolver(),
             ))
+        }
+        ShowSource::Cursor {
+            session,
+            project: _,
+        } => {
+            let manager = toolpath_cursor::CursorConvo::new();
+            let s = manager
+                .read_session(&session)
+                .map_err(|e| anyhow::anyhow!("{}", e))?;
+            let cfg = toolpath_cursor::DeriveConfig::default();
+            Ok(toolpath_cursor::derive_path(&s, &cfg))
         }
         ShowSource::Pi {
             project,

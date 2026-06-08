@@ -72,6 +72,14 @@
     "role": "Reads Pi (pi.dev) coding-agent session JSONL from `~/.pi/agent/sessions/`, implements `ConversationProvider`, and derives Toolpath `Path` documents via `toolpath-convo`'s shared `derive_path`. Preserves Pi's in-file conversation tree (id/parentId) as a DAG and follows `parentSession` links across files."
   },
   {
+    "name": "toolpath-cursor",
+    "version": "0.1.0",
+    "description": "Derive Toolpath provenance documents from Cursor (IDE) composers",
+    "docs": "https://docs.rs/toolpath-cursor",
+    "crate": "https://crates.io/crates/toolpath-cursor",
+    "role": "Reads Cursor.app's bubble store (`state.vscdb` SQLite, `cursorDiskKV` table) — composers, bubbles, content-addressed blobs — and derives Toolpath `Path` documents via `toolpath-convo`'s shared `derive_path`. Round-trips back to a loadable composer via `CursorProjector` with full TOOL_TABLE coverage."
+  },
+  {
     "name": "toolpath-dot",
     "version": "0.4.0",
     "description": "Graphviz DOT visualization",

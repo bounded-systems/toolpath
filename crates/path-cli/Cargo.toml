@@ -36,12 +36,14 @@ tempfile = { workspace = true }
 rand = "0.9"
 jsonschema = { version = "0.46", default-features = false }
 sha2 = "0.10"
+hex = "0.4"
 
 [target.'cfg(not(target_os = "emscripten"))'.dependencies]
 toolpath-claude = { workspace = true, features = ["watcher"] }
 toolpath-gemini = { workspace = true, features = ["watcher"] }
 toolpath-codex = { workspace = true }
 toolpath-opencode = { workspace = true }
+toolpath-cursor = { workspace = true }
 toolpath-pi = { workspace = true }
 toolpath-convo = { workspace = true }
 toolpath-github = { workspace = true }

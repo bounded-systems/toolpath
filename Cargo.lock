@@ -2315,6 +2315,7 @@ dependencies = [
  "chrono",
  "clap",
  "git2",
+ "hex",
  "insta",
  "jsonschema",
  "pathbase-client",
@@ -2334,6 +2335,7 @@ dependencies = [
  "toolpath-claude",
  "toolpath-codex",
  "toolpath-convo",
+ "toolpath-cursor",
  "toolpath-dot",
  "toolpath-gemini",
  "toolpath-git",
@@ -3931,6 +3933,22 @@ dependencies = [
  "similar",
  "thiserror 1.0.69",
  "toolpath",
+]
+
+[[package]]
+name = "toolpath-cursor"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror 1.0.69",
+ "toolpath",
+ "toolpath-convo",
 ]
 
 [[package]]
