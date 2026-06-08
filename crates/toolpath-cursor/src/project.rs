@@ -666,9 +666,13 @@ fn register_blob(blobs: &mut HashMap<String, String>, body: Option<&str>) -> Opt
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {
+    use std::fmt::Write;
     let mut h = Sha256::new();
     h.update(bytes);
-    hex::encode(h.finalize())
+    h.finalize().iter().fold(String::with_capacity(64), |mut s, b| {
+        let _ = write!(s, "{b:02x}");
+        s
+    })
 }
 
 fn workspace_hash(path: &str) -> String {

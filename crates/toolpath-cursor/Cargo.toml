@@ -18,7 +18,6 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 rusqlite = { workspace = true }
 sha2 = "0.10"
-hex = "0.4"
 
 [dev-dependencies]
 tempfile = { workspace = true }
