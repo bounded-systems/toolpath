@@ -144,6 +144,34 @@ mod tests {
         assert_eq!(meta.message_count, 2);
     }
 
+    /// A session JSONL whose internal `cwd` disagrees with its on-disk
+    /// directory (e.g. projected in from another machine) must still
+    /// report the on-disk directory as `project_path`, so that
+    /// `read_conversation(meta.project_path, meta.session_id)`
+    /// round-trips to the same file.
+    #[test]
+    fn metadata_project_path_follows_on_disk_dir_not_jsonl_cwd() {
+        let temp = TempDir::new().unwrap();
+        let claude_dir = temp.path().join(".claude");
+        let on_disk = "/Users/alex/Devel/empathic/toolpath";
+        let dir = claude_dir.join("projects/-Users-alex-Devel-empathic-toolpath");
+        fs::create_dir_all(&dir).unwrap();
+        let foreign_cwd = "/Users/ben/empathic/oss/toolpath";
+        let entry = format!(
+            r#"{{"type":"user","uuid":"u1","timestamp":"2024-01-01T00:00:00Z","cwd":"{foreign_cwd}","message":{{"role":"user","content":"hi"}}}}"#,
+        );
+        fs::write(dir.join("imported-session.jsonl"), format!("{entry}\n")).unwrap();
+
+        let resolver = PathResolver::new().with_claude_dir(&claude_dir);
+        let io = ConvoIO::with_resolver(resolver);
+        let meta = io
+            .read_conversation_metadata(on_disk, "imported-session")
+            .unwrap();
+
+        assert_eq!(meta.project_path, on_disk);
+        assert_ne!(meta.project_path, foreign_cwd);
+    }
+
     #[test]
     fn test_list_conversations() {
         let (_temp, io) = setup_io();

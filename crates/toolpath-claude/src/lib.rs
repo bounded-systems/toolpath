@@ -182,7 +182,6 @@ impl ClaudeConvo {
         let mut total_messages = 0usize;
         let mut started_at = None;
         let mut last_activity = None;
-        let mut project_path_val = String::new();
         let mut file_path = std::path::PathBuf::new();
         let mut first_user_message: Option<String> = None;
 
@@ -198,9 +197,6 @@ impl ClaudeConvo {
             if last_activity.is_none() || meta.last_activity > last_activity {
                 last_activity = meta.last_activity;
             }
-            if project_path_val.is_empty() {
-                project_path_val = meta.project_path;
-            }
             if i == 0 {
                 file_path = meta.file_path;
             }
@@ -212,7 +208,7 @@ impl ClaudeConvo {
 
         Ok(ConversationMetadata {
             session_id: head.clone(),
-            project_path: project_path_val,
+            project_path: project_path.to_string(),
             file_path,
             message_count: total_messages,
             started_at,

@@ -2,6 +2,29 @@
 
 All notable changes to the Toolpath workspace are documented here.
 
+## toolpath-claude 0.11.1 + path-cli 0.13.1 + toolpath-cli 0.13.1: derive `project_path` from the file's parent directory — 2026-06-09
+
+`ConversationReader::read_conversation_metadata` used to set
+`ConversationMetadata.project_path` from the JSONL's first `cwd`
+entry. That broke for sessions projected onto this machine from
+elsewhere (e.g. `path resume` of a Pathbase upload): the recorded
+`cwd` reflected the original author's machine, and downstream
+`read_conversation(meta.project_path, meta.session_id)` calls routed
+at a directory that didn't exist locally, crashing with
+`Conversation not found`.
+
+Fix: derive `project_path` from the file's parent directory instead
+(unsanitized). The parent directory is the on-disk locator by
+construction — it's where the file actually lives — so it always
+round-trips correctly. JSONL `cwd` is no longer read for any metadata
+purpose. The chained variant in
+`ClaudeConvo::read_conversation_metadata` drops its now-dead
+`project_path` accumulator.
+
+Public API unchanged. `path-cli` and the `toolpath-cli` shim bump to
+0.13.1 so a release ships the fix to users on `cargo install path-cli`
+/ `cargo install toolpath-cli`.
+
 ## Domain rename: toolpath.dev → toolpath.net + hosted install.sh — 2026-06-04
 
 The canonical domain for the site, kind URIs, and schema `$id`s moves from
