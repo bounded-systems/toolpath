@@ -105,6 +105,7 @@ fn message_to_turn(entry: &ConversationEntry, msg: &Message) -> Turn {
         output_tokens: u.output_tokens,
         cache_read_tokens: u.cache_read_input_tokens,
         cache_write_tokens: u.cache_creation_input_tokens,
+        ..Default::default()
     });
 
     let environment = if entry.cwd.is_some() || entry.git_branch.is_some() {
@@ -122,6 +123,11 @@ fn message_to_turn(entry: &ConversationEntry, msg: &Message) -> Turn {
     Turn {
         id: entry.uuid.clone(),
         parent_id: entry.parent_uuid.clone(),
+        // The API message ID (`msg_…`). Claude Code writes one JSONL line
+        // per content block, so several turns can share one group_id —
+        // and each repeats the message-level `usage`. Downstream accounting
+        // (sum_usage, derive_path) counts a message group once.
+        group_id: msg.id.clone(),
         role: claude_role_to_role(&msg.role),
         timestamp: entry.timestamp.clone(),
         text,
@@ -130,6 +136,7 @@ fn message_to_turn(entry: &ConversationEntry, msg: &Message) -> Turn {
         model: msg.model.clone(),
         stop_reason: msg.stop_reason.clone(),
         token_usage,
+        attributed_token_usage: None,
         environment,
         delegations,
         file_mutations,
@@ -372,6 +379,8 @@ fn conversation_to_view(convo: &Conversation) -> ConversationView {
         turns.push(turn);
     }
 
+    canonicalize_message_usage(&mut turns);
+
     // Re-derive delegation results now that tool results are merged
     for turn in &mut turns {
         for delegation in &mut turn.delegations {
@@ -517,11 +526,93 @@ fn entry_to_event(entry: &ConversationEntry) -> toolpath_convo::ConversationEven
     }
 }
 
+/// Field-wise maximum of two usage tuples. `None` is "absent", not 0, so a
+/// field present in only one operand survives.
+pub(crate) fn max_usage(a: &TokenUsage, b: &TokenUsage) -> TokenUsage {
+    fn m(x: Option<u32>, y: Option<u32>) -> Option<u32> {
+        match (x, y) {
+            (Some(a), Some(b)) => Some(a.max(b)),
+            (Some(v), None) | (None, Some(v)) => Some(v),
+            (None, None) => None,
+        }
+    }
+    TokenUsage {
+        input_tokens: m(a.input_tokens, b.input_tokens),
+        output_tokens: m(a.output_tokens, b.output_tokens),
+        cache_read_tokens: m(a.cache_read_tokens, b.cache_read_tokens),
+        cache_write_tokens: m(a.cache_write_tokens, b.cache_write_tokens),
+        ..Default::default()
+    }
+}
+
+/// Canonicalize message-level accounting for split messages.
+///
+/// Claude Code writes one JSONL line per content block of an assistant API
+/// message, each stamped with `message.usage`. That `usage` is a **streaming
+/// snapshot**, not a per-line bill: per the Anthropic streaming API,
+/// `message_start` seeds `output_tokens` near zero and each `message_delta`
+/// reports the running **cumulative** total, with the final value being the
+/// message total. So across a split message's lines, `input`/`cache` are
+/// constant and `output_tokens` climbs to the total on the final line —
+/// confirmed across every session sampled (~27% of multi-line messages vary;
+/// the rest repeat one value stamped after generation). The intermediate
+/// values are flush-time snapshots, **not** per-content-block costs (a real
+/// prose block routinely shows `output_tokens: 1`), so we do not derive
+/// per-step attribution from them, and — the format being undocumented — we
+/// do not trust line order.
+///
+/// For each consecutive `group_id` run this sets `token_usage` on the run's
+/// **final** turn to the field-wise **maximum** across the run (the message
+/// total — never under-counts whatever the stream order) and clears it from
+/// the others, so summing `token_usage` over turns yields session totals.
+fn canonicalize_message_usage(turns: &mut [Turn]) {
+    let mut i = 0;
+    while i < turns.len() {
+        let Some(mid) = turns[i].group_id.clone() else {
+            i += 1;
+            continue;
+        };
+        let mut j = i;
+        while j < turns.len() && turns[j].group_id.as_deref() == Some(mid.as_str()) {
+            j += 1;
+        }
+
+        // Message total = field-wise max across the run (the final streaming
+        // snapshot, found without trusting line order).
+        let mut total: Option<TokenUsage> = None;
+        for t in &turns[i..j] {
+            if let Some(u) = &t.token_usage {
+                total = Some(match total {
+                    Some(acc) => max_usage(&acc, u),
+                    None => u.clone(),
+                });
+            }
+        }
+
+        for t in &mut turns[i..j] {
+            t.token_usage = None;
+        }
+        if let Some(total) = total {
+            turns[j - 1].token_usage = Some(total);
+        }
+        i = j;
+    }
+}
+
 /// Sum token usage across all turns.
 fn sum_usage(turns: &[Turn]) -> Option<TokenUsage> {
     let mut total = TokenUsage::default();
     let mut any = false;
-    for turn in turns {
+    for (idx, turn) in turns.iter().enumerate() {
+        // Turns split from one provider message all repeat that message's
+        // usage; count it once, on the run's last turn.
+        if let Some(mid) = &turn.group_id
+            && turns
+                .get(idx + 1)
+                .is_some_and(|next| next.group_id.as_ref() == Some(mid))
+        {
+            continue;
+        }
         if let Some(u) = &turn.token_usage {
             any = true;
             total.input_tokens =
@@ -744,6 +835,96 @@ mod tests {
     use std::fs;
     use tempfile::TempDir;
 
+    /// One assistant turn carrying a cumulative usage snapshot (only
+    /// output varies across a split, so input/cache are fixed here).
+    fn grp_turn(id: &str, mid: &str, output: u32) -> Turn {
+        let mut t = message_turn_stub(id);
+        t.group_id = Some(mid.into());
+        t.token_usage = Some(TokenUsage {
+            input_tokens: Some(6),
+            output_tokens: Some(output),
+            cache_read_tokens: Some(14_842),
+            cache_write_tokens: Some(429_831),
+            ..Default::default()
+        });
+        t
+    }
+
+    fn message_turn_stub(id: &str) -> Turn {
+        Turn {
+            id: id.into(),
+            parent_id: None,
+            group_id: None,
+            role: Role::Assistant,
+            timestamp: "2024-01-01T00:00:00Z".into(),
+            text: String::new(),
+            thinking: None,
+            tool_uses: vec![],
+            model: None,
+            stop_reason: None,
+            token_usage: None,
+            attributed_token_usage: None,
+            environment: None,
+            delegations: vec![],
+            file_mutations: vec![],
+        }
+    }
+
+    #[test]
+    fn canonicalize_streamed_group_keeps_total_only_on_final_turn() {
+        // Streaming snapshots climb 55 -> 164 across two lines of one
+        // message. The final turn carries the message total (the final
+        // snapshot); earlier turns carry nothing. The intermediate snapshot
+        // (55) is NOT per-block attribution — it's where generation happened
+        // to be when the line was flushed — so we never record it.
+        let mut turns = vec![grp_turn("t1", "msg_A", 55), grp_turn("t2", "msg_A", 164)];
+        canonicalize_message_usage(&mut turns);
+
+        assert!(turns[0].token_usage.is_none(), "total only on final turn");
+        assert_eq!(turns[1].token_usage.as_ref().unwrap().output_tokens, Some(164));
+        assert_eq!(turns[1].token_usage.as_ref().unwrap().input_tokens, Some(6));
+        for t in &turns {
+            assert!(
+                t.attributed_token_usage.is_none(),
+                "Claude per-line snapshots are not per-step attribution"
+            );
+        }
+    }
+
+    #[test]
+    fn canonicalize_does_not_trust_line_order() {
+        // Defensive: the complete total arrives FIRST (out of order). We
+        // must still report 164 as the message total — the field-wise max,
+        // not the last line's snapshot.
+        let mut turns = vec![grp_turn("t1", "msg_A", 164), grp_turn("t2", "msg_A", 55)];
+        canonicalize_message_usage(&mut turns);
+
+        assert_eq!(
+            turns[1].token_usage.as_ref().unwrap().output_tokens,
+            Some(164),
+            "field-wise max, not the last line"
+        );
+    }
+
+    #[test]
+    fn canonicalize_collapses_repeated_total_to_one_turn() {
+        // Byte-identical lines (the ~73% case): the total lands once, on the
+        // final turn; no attribution either way.
+        let mut turns = vec![
+            grp_turn("t1", "msg_A", 997),
+            grp_turn("t2", "msg_A", 997),
+            grp_turn("t3", "msg_A", 997),
+        ];
+        canonicalize_message_usage(&mut turns);
+
+        assert!(turns[0].token_usage.is_none());
+        assert!(turns[1].token_usage.is_none());
+        assert_eq!(turns[2].token_usage.as_ref().unwrap().output_tokens, Some(997));
+        for t in &turns {
+            assert!(t.attributed_token_usage.is_none());
+        }
+    }
+
     fn setup_provider() -> (TempDir, ClaudeConvo) {
         let temp = TempDir::new().unwrap();
         let claude_dir = temp.path().join(".claude");
@@ -763,6 +944,86 @@ mod tests {
 
         let resolver = PathResolver::new().with_claude_dir(&claude_dir);
         (temp, ClaudeConvo::with_resolver(resolver))
+    }
+
+    /// A session whose first assistant API message is split across three
+    /// JSONL lines (text, then one per tool_use) — the on-disk shape Claude
+    /// Code writes. Each line repeats the same `message.id` and the full
+    /// message-level `usage`, followed by a singleton assistant message.
+    fn setup_split_message_provider() -> (TempDir, ClaudeConvo) {
+        let temp = TempDir::new().unwrap();
+        let claude_dir = temp.path().join(".claude");
+        let project_dir = claude_dir.join("projects/-test-project");
+        fs::create_dir_all(&project_dir).unwrap();
+
+        let usage_a = r#"{"input_tokens":6,"output_tokens":997,"cache_read_input_tokens":14842,"cache_creation_input_tokens":429831}"#;
+        let entries = [
+            r#"{"uuid":"uuid-1","type":"user","timestamp":"2024-01-01T00:00:00Z","message":{"role":"user","content":"Fix the bug"}}"#.to_string(),
+            format!(
+                r#"{{"uuid":"uuid-2","type":"assistant","parentUuid":"uuid-1","timestamp":"2024-01-01T00:00:01Z","message":{{"id":"msg_A","role":"assistant","content":[{{"type":"text","text":"Working on it."}}],"model":"claude-opus-4-7","stop_reason":null,"usage":{usage_a}}}}}"#
+            ),
+            format!(
+                r#"{{"uuid":"uuid-3","type":"assistant","parentUuid":"uuid-2","timestamp":"2024-01-01T00:00:02Z","message":{{"id":"msg_A","role":"assistant","content":[{{"type":"tool_use","id":"t1","name":"Read","input":{{"file_path":"a.rs"}}}}],"model":"claude-opus-4-7","stop_reason":null,"usage":{usage_a}}}}}"#
+            ),
+            format!(
+                r#"{{"uuid":"uuid-4","type":"assistant","parentUuid":"uuid-3","timestamp":"2024-01-01T00:00:03Z","message":{{"id":"msg_A","role":"assistant","content":[{{"type":"tool_use","id":"t2","name":"Read","input":{{"file_path":"b.rs"}}}}],"model":"claude-opus-4-7","stop_reason":"tool_use","usage":{usage_a}}}}}"#
+            ),
+            r#"{"uuid":"uuid-5","type":"assistant","parentUuid":"uuid-4","timestamp":"2024-01-01T00:00:04Z","message":{"id":"msg_B","role":"assistant","content":[{"type":"text","text":"Done."}],"model":"claude-opus-4-7","stop_reason":"end_turn","usage":{"input_tokens":5,"output_tokens":11}}}"#.to_string(),
+        ];
+        fs::write(project_dir.join("session-2.jsonl"), entries.join("\n")).unwrap();
+
+        let resolver = PathResolver::new().with_claude_dir(&claude_dir);
+        (temp, ClaudeConvo::with_resolver(resolver))
+    }
+
+    #[test]
+    fn test_split_message_turns_share_group_id() {
+        let (_temp, provider) = setup_split_message_provider();
+        let view = ConversationProvider::load_conversation(&provider, "/test/project", "session-2")
+            .unwrap();
+
+        assert_eq!(view.turns.len(), 5);
+        assert!(view.turns[0].group_id.is_none(), "user lines carry no ID");
+        for turn in &view.turns[1..=3] {
+            assert_eq!(turn.group_id.as_deref(), Some("msg_A"));
+        }
+        assert_eq!(view.turns[4].group_id.as_deref(), Some("msg_B"));
+    }
+
+    #[test]
+    fn test_view_usage_is_canonical_total_on_group_final_turn() {
+        // IR contract: `Turn.token_usage` always means "the message's
+        // total" and appears only on the message's final turn. The wire
+        // repeats the total on every line of a split; the view must not.
+        let (_temp, provider) = setup_split_message_provider();
+        let view = ConversationProvider::load_conversation(&provider, "/test/project", "session-2")
+            .unwrap();
+
+        assert!(view.turns[1].token_usage.is_none());
+        assert!(view.turns[2].token_usage.is_none());
+        assert_eq!(
+            view.turns[3].token_usage.as_ref().unwrap().output_tokens,
+            Some(997)
+        );
+        assert_eq!(
+            view.turns[4].token_usage.as_ref().unwrap().output_tokens,
+            Some(11)
+        );
+    }
+
+    #[test]
+    fn test_total_usage_counts_each_message_once() {
+        let (_temp, provider) = setup_split_message_provider();
+        let view = ConversationProvider::load_conversation(&provider, "/test/project", "session-2")
+            .unwrap();
+
+        // msg_A's usage appears on three lines but is one API message;
+        // totals must be msg_A + msg_B, not 3×msg_A + msg_B.
+        let total = view.total_usage.as_ref().unwrap();
+        assert_eq!(total.output_tokens, Some(997 + 11));
+        assert_eq!(total.input_tokens, Some(6 + 5));
+        assert_eq!(total.cache_read_tokens, Some(14_842));
+        assert_eq!(total.cache_write_tokens, Some(429_831));
     }
 
     #[test]
@@ -1166,6 +1427,7 @@ mod tests {
         let mut turns = vec![Turn {
             id: "t1".into(),
             parent_id: None,
+            group_id: None,
             role: Role::Assistant,
             timestamp: "2024-01-01T00:00:00Z".into(),
             text: "test".into(),
@@ -1189,6 +1451,7 @@ mod tests {
             model: None,
             stop_reason: None,
             token_usage: None,
+            attributed_token_usage: None,
             environment: None,
             delegations: vec![],
             file_mutations: Vec::new(),

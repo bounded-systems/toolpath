@@ -157,6 +157,7 @@ mod tests {
         Turn {
             id: id.into(),
             parent_id: None,
+            group_id: None,
             role,
             timestamp: "2026-01-01T00:00:00Z".into(),
             text: text.into(),
@@ -165,6 +166,7 @@ mod tests {
             model: None,
             stop_reason: None,
             token_usage: None,
+            attributed_token_usage: None,
             environment: None,
             delegations: vec![],
             file_mutations: Vec::new(),
@@ -337,6 +339,7 @@ mod tests {
             turns: vec![Turn {
                 id: "t1".into(),
                 parent_id: None,
+                group_id: None,
                 role: Role::Assistant,
                 timestamp: "2026-01-01T00:00:00Z".into(),
                 text: "reading file".into(),
@@ -363,6 +366,7 @@ mod tests {
                 model: None,
                 stop_reason: None,
                 token_usage: None,
+                attributed_token_usage: None,
                 environment: None,
                 delegations: vec![],
                 file_mutations: Vec::new(),
@@ -411,6 +415,7 @@ mod tests {
                 Turn {
                     id: "t1".into(),
                     parent_id: None,
+                    group_id: None,
                     role: Role::Assistant,
                     timestamp: "2026-01-01T00:00:00Z".into(),
                     text: "turn 1".into(),
@@ -423,7 +428,9 @@ mod tests {
                         output_tokens: Some(50),
                         cache_read_tokens: None,
                         cache_write_tokens: None,
+                        ..Default::default()
                     }),
+                    attributed_token_usage: None,
                     environment: None,
                     delegations: vec![],
                     file_mutations: Vec::new(),
@@ -431,6 +438,7 @@ mod tests {
                 Turn {
                     id: "t2".into(),
                     parent_id: Some("t1".into()),
+                    group_id: None,
                     role: Role::Assistant,
                     timestamp: "2026-01-01T00:00:01Z".into(),
                     text: "turn 2".into(),
@@ -443,7 +451,9 @@ mod tests {
                         output_tokens: Some(75),
                         cache_read_tokens: None,
                         cache_write_tokens: None,
+                        ..Default::default()
                     }),
+                    attributed_token_usage: None,
                     environment: None,
                     delegations: vec![],
                     file_mutations: Vec::new(),

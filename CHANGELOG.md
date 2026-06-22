@@ -2,6 +2,114 @@
 
 All notable changes to the Toolpath workspace are documented here.
 
+## Token usage: once per message, with per-step attribution + kind v1.1.0 — 2026-06-17
+
+Fixes token over-counting in derived documents (~3× output-token
+inflation on real Claude sessions, unbounded on Codex) and adds per-step
+token attribution where the source genuinely reports it (Codex). Two
+over-counting bugs, one spec gap, plus a capability the corrected reads
+make possible. Verified against every Claude session and all Codex
+sessions on disk, and cross-checked against the Anthropic streaming API
+reference and OpenAI's codex issue tracker.
+
+- **Claude**: Claude Code writes one JSONL line per content block of an
+  assistant API message, repeating the message-level `usage` on every
+  line. `toolpath-claude` emitted one step per line, each carrying the
+  full usage — so summing `token_usage` per step over-counted by the
+  block count, and the disambiguating `message.id` was dropped.
+- **Codex**: `toolpath-codex` stamped the *cumulative* session counter
+  (`total_token_usage`) onto each assistant turn instead of per-step
+  spend, so per-step sums grew quadratically.
+
+Core model (kind `agent-coding-session` **v1.1.0**, both fields optional
+so any producer can populate per-step attribution later with no further
+kind version):
+
+- `token_usage` always means **the total for a message**, on the
+  group's final step (`Σ token_usage` over a path = session total).
+- `attributed_token_usage` (new) is **this step's own attributed
+  spend**, on its own key so the sum above is unaffected. Whether a
+  number is a total or a share is structural (the key), never
+  positional. The unattributed remainder
+  (`group token_usage − Σ attributed`) is computed by consumers, never
+  recorded — stored values stay verbatim source observations.
+- `breakdowns` (new, optional) is a **decomposition of a top-level
+  class into named sub-classes** — keyed by the class being broken down (e.g.
+  `"output"`), inner map sub-class → tokens (e.g. `{"output":
+  {"reasoning": 243}}`). It is **informational and never summed into
+  any total** — the parent class already counts those tokens — so the
+  session-total guarantee is untouched. Invariant: `Σ(inner) ≤` the
+  parent class's value; the field is omitted when empty. It rides both
+  `token_usage` and `attributed_token_usage`.
+
+Changes:
+
+- `toolpath_convo::TokenUsage` gains `breakdowns`
+  (`BTreeMap<class, BTreeMap<sub-class, tokens>>`); the kind
+  `tokenUsage` `$def` gains a matching optional `breakdowns` property.
+- **Gemini under-count FIX**: Gemini reports `thoughts` (reasoning) as
+  an additive sibling of `output_tokens` that the derivation was
+  **dropping** — so Gemini output totals were under-counted by the
+  reasoning spend. `thoughts` is now **folded into `output_tokens`**
+  (correcting the total) *and* recorded under
+  `breakdowns["output"]["reasoning"]`; the projector **un-folds** it on
+  the reverse path for a lossless round-trip (`Some(0)` is preserved as
+  a real Gemini-3 zero-reasoning signal, not collapsed to absent).
+- **OpenCode**: continues folding `reasoning` into `output_tokens`, and
+  now also records it under `breakdowns["output"]["reasoning"]`.
+- **Codex**: `reasoning_output_tokens` (a subset of `output_tokens`,
+  cumulative → differenced like the other counters) is surfaced under
+  `breakdowns["output"]["reasoning"]` on both the per-step
+  `attributed_token_usage` and the per-round `token_usage`.
+- **Claude**: records no breakdown — its JSONL `usage` does not itemize
+  thinking tokens.
+- `toolpath_convo::Turn` gains `group_id` (grouping key) and
+  `attributed_token_usage`. `derive_path` writes `token_usage` once per
+  `group_id` group and `attributed_token_usage` on each step that has
+  it; `extract_conversation` reads both back.
+- `toolpath-claude`: a split message's lines carry `message.usage` as a
+  **cumulative streaming snapshot**, not a per-line bill — per the
+  Anthropic streaming API, `message_start` seeds `output_tokens` near
+  zero and each `message_delta` reports the running cumulative total
+  (confirmed across every session sampled: input/cache constant, output
+  climbing to the final-line total; ~27% of multi-line messages vary).
+  Each `group_id` run is reduced to the **field-wise maximum** total
+  (never under-counts whatever the line order) on its final turn. The
+  intermediate snapshots are flush-time artifacts, *not* per-block costs
+  (a real prose block routinely shows `output_tokens: 1`), so Claude
+  emits **no** `attributed_token_usage`. `total_usage` is deduped by
+  group; the projector re-expands the total onto every line of a split.
+- `toolpath-codex`: per-step spend is the increase in the cumulative
+  `total_token_usage` since the previous count — **differencing the
+  cumulative is dedup-safe**, where summing `last_token_usage` would
+  double-count because Codex re-emits a stale `last_token_usage` on
+  repeated `token_count` events (a documented trap: openai/codex #14489,
+  #17539). Each per-call delta is attributed to the step it follows as
+  `attributed_token_usage`; a round's `token_usage` total is the sum of
+  its steps' attributions (one source of truth — total and shares cannot
+  drift). The projector emits a `turn_context` per group and a cumulative
+  `token_count` after each step, so grouping and attribution survive the
+  round-trip.
+- `toolpath-pi` and `toolpath-opencode` decode absent/all-zero wire
+  usage counters as `token_usage: None` ("spend unknown") instead of
+  `Some(zeros)` — their wires require usage fields, which
+  foreign-source projections zero-fill.
+- `PATH_KIND_AGENT_CODING_SESSION` now points at v1.1.0;
+  `PATH_KIND_AGENT_CODING_SESSION_V1_0_0` names the old URI. `path p
+  validate` bundles both schemas. The v1.0.0 spec page gains an erratum
+  documenting the historical duplication (consumers of v1.0.0 documents
+  still need dedup heuristics; the byte-identical-tuple heuristic does
+  not repair Codex documents).
+
+Crates bumped (every crate that depends on `toolpath`, matching the
+domain-rename precedent since the emitted kind URI changes): `toolpath`
+0.7.0, `toolpath-convo` 0.11.0, `toolpath-git` 0.6.0, `toolpath-github`
+0.6.0, `toolpath-claude` 0.12.0, `toolpath-gemini` 0.6.0,
+`toolpath-codex` 0.6.0, `toolpath-opencode` 0.5.0, `toolpath-cursor`
+0.2.0, `toolpath-pi` 0.6.0, `toolpath-dot` 0.5.0, `toolpath-md` 0.7.0,
+`path-cli` 0.14.0, `toolpath-cli` 0.14.0. `pathbase-client` is
+unaffected.
+
 ## toolpath-claude 0.11.1 + path-cli 0.13.1 + toolpath-cli 0.13.1: derive `project_path` from the file's parent directory — 2026-06-09
 
 `ConversationReader::read_conversation_metadata` used to set

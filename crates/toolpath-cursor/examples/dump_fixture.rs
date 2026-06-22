@@ -267,6 +267,7 @@ fn view_from_jsonl(
         turns.push(Turn {
             id: turn_id.clone(),
             parent_id: prev_id.clone(),
+            group_id: None,
             role,
             // Synthesize plausible monotonic timestamps; the
             // transcript carries no real ones.
@@ -281,6 +282,7 @@ fn view_from_jsonl(
             model: None,
             stop_reason: None,
             token_usage: None,
+            attributed_token_usage: None,
             environment: env_for(),
             delegations: Vec::new(),
             file_mutations: Vec::new(),

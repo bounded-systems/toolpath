@@ -306,9 +306,19 @@ fn build_turn(step: &Step, extra: &HashMap<String, serde_json::Value>) -> Turn {
 
     let parent_id = step.step.parents.first().cloned();
 
+    let group_id = extra
+        .get("group_id")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+
+    let attributed_token_usage = extra
+        .get("attributed_token_usage")
+        .and_then(|v| serde_json::from_value::<TokenUsage>(v.clone()).ok());
+
     Turn {
         id: step.step.id.clone(),
         parent_id,
+        group_id,
         role,
         timestamp: step.step.timestamp.clone(),
         text,
@@ -317,6 +327,7 @@ fn build_turn(step: &Step, extra: &HashMap<String, serde_json::Value>) -> Turn {
         model,
         stop_reason,
         token_usage,
+        attributed_token_usage,
         environment,
         delegations,
         file_mutations: Vec::new(),
@@ -419,6 +430,7 @@ fn build_token_usage(extra: &HashMap<String, serde_json::Value>) -> Option<Token
             output_tokens: output,
             cache_read_tokens: cache_read,
             cache_write_tokens: cache_write,
+            ..Default::default()
         })
     } else {
         None
@@ -695,6 +707,28 @@ mod tests {
         assert_eq!(view.turns[1].role, Role::Assistant);
         assert_eq!(view.turns[1].text, "I'll fix that.");
         assert_eq!(view.turns[1].model.as_deref(), Some("claude-opus-4-6"));
+    }
+
+    #[test]
+    fn test_group_id_round_trips_through_extraction() {
+        let path = make_path(vec![make_step(
+            "step-001",
+            "agent:claude-opus-4-6",
+            "2026-01-01T00:00:00Z",
+            vec![],
+            vec![(
+                "claude-code://sess-1",
+                "conversation.append",
+                extras(&[
+                    ("role", serde_json::json!("assistant")),
+                    ("text", serde_json::json!("")),
+                    ("group_id", serde_json::json!("msg_01abc")),
+                ]),
+            )],
+        )]);
+
+        let view = extract_conversation(&path);
+        assert_eq!(view.turns[0].group_id.as_deref(), Some("msg_01abc"));
     }
 
     #[test]

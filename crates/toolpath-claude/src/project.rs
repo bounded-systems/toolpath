@@ -105,6 +105,24 @@ fn project_view(view: &ConversationView) -> std::result::Result<Conversation, St
     // ran in between. Track those rewrites so we can patch the chain.
     let mut parent_rewrites: HashMap<String, String> = HashMap::new();
 
+    // Message-group accounting. The IR carries a message's total
+    // `token_usage` only on the group's final turn; real Claude JSONL stamps
+    // usage on every line of a split (streaming snapshots that climb to the
+    // total — see `provider::canonicalize_message_usage`). We re-expand the
+    // group total onto every line, matching the common after-generation
+    // pattern where the lines repeat one value. (We don't reconstruct the
+    // intermediate streaming snapshots: they carry no per-step meaning, the
+    // IR doesn't retain them, and the final total is what consumers sum.)
+    let mut group_total: HashMap<&str, toolpath_convo::TokenUsage> = HashMap::new();
+    for turn in &view.turns {
+        if let (Some(mid), Some(usage)) = (turn.group_id.as_deref(), &turn.token_usage) {
+            group_total
+                .entry(mid)
+                .and_modify(|acc| *acc = crate::provider::max_usage(acc, usage))
+                .or_insert_with(|| usage.clone());
+        }
+    }
+
     for turn in &view.turns {
         // Pre-rewrite this turn's parent_id if a synthesized tool_result
         // was emitted between it and its IR-recorded parent.
@@ -122,7 +140,15 @@ fn project_view(view: &ConversationView) -> std::result::Result<Conversation, St
                 convo.add_entry(entry);
             }
             Role::Assistant => {
-                let mut assistant_entry = assistant_turn_to_entry(turn, &view.id);
+                // Grouped: the message total on every line of the split.
+                // Ungrouped: the turn's own usage.
+                let wire_usage: Option<toolpath_convo::TokenUsage> = match turn.group_id.as_deref()
+                {
+                    Some(mid) => group_total.get(mid).cloned(),
+                    None => turn.token_usage.clone(),
+                };
+                let mut assistant_entry =
+                    assistant_turn_to_entry_with_usage(turn, &view.id, wire_usage.as_ref());
                 apply_turn_metadata(&mut assistant_entry, turn);
                 assistant_entry.parent_uuid = effective_parent;
                 convo.add_entry(assistant_entry);
@@ -341,11 +367,19 @@ fn user_turn_to_entry(turn: &Turn, session_id: &str) -> ConversationEntry {
     }
 }
 
-/// Build a `ConversationEntry` for an assistant turn.
-fn assistant_turn_to_entry(turn: &Turn, session_id: &str) -> ConversationEntry {
+/// Build a `ConversationEntry` for an assistant turn. `wire_usage` is the
+/// usage to write on the JSONL line: the IR carries a message's total only
+/// on the group's final turn, but real Claude Code repeats `message.usage`
+/// on every line of a split message, so `project_view` passes the group
+/// total for every member turn.
+fn assistant_turn_to_entry_with_usage(
+    turn: &Turn,
+    session_id: &str,
+    wire_usage: Option<&toolpath_convo::TokenUsage>,
+) -> ConversationEntry {
     let content = build_assistant_content(turn);
 
-    let usage = turn.token_usage.as_ref().map(|u| Usage {
+    let usage = wire_usage.map(|u| Usage {
         input_tokens: u.input_tokens,
         output_tokens: u.output_tokens,
         // TokenUsage uses cache_write_tokens; Usage uses cache_creation_input_tokens
@@ -368,7 +402,7 @@ fn assistant_turn_to_entry(turn: &Turn, session_id: &str) -> ConversationEntry {
             role: MessageRole::Assistant,
             content: Some(content),
             model: turn.model.clone(),
-            id: None,
+            id: turn.group_id.clone(),
             message_type: None,
             stop_reason: turn.stop_reason.clone(),
             stop_sequence: None,
@@ -1001,6 +1035,7 @@ mod tests {
         Turn {
             id: id.to_string(),
             parent_id: None,
+            group_id: None,
             role: Role::User,
             timestamp: "2024-01-01T00:00:00Z".to_string(),
             text: text.to_string(),
@@ -1009,6 +1044,7 @@ mod tests {
             model: None,
             stop_reason: None,
             token_usage: None,
+            attributed_token_usage: None,
             environment: None,
             delegations: vec![],
             file_mutations: Vec::new(),
@@ -1019,6 +1055,7 @@ mod tests {
         Turn {
             id: id.to_string(),
             parent_id: None,
+            group_id: None,
             role: Role::Assistant,
             timestamp: "2024-01-01T00:00:01Z".to_string(),
             text: text.to_string(),
@@ -1027,6 +1064,7 @@ mod tests {
             model: None,
             stop_reason: None,
             token_usage: None,
+            attributed_token_usage: None,
             environment: None,
             delegations: vec![],
             file_mutations: Vec::new(),
@@ -1036,6 +1074,81 @@ mod tests {
     /// Helper: return all conversation entries (preamble is separate).
     fn content_entries(convo: &Conversation) -> &[ConversationEntry] {
         &convo.entries
+    }
+
+    // ── Message-group usage re-expansion ─────────────────────────────
+
+    #[test]
+    fn test_projector_reexpands_group_usage_onto_every_line() {
+        // The IR carries a message's total only on the group's final turn;
+        // real Claude Code JSONL repeats `message.usage` (and `message.id`)
+        // on every line of the split. The projector must restore that.
+        let usage = toolpath_convo::TokenUsage {
+            input_tokens: Some(6),
+            output_tokens: Some(997),
+            cache_read_tokens: Some(14_842),
+            cache_write_tokens: Some(429_831),
+            ..Default::default()
+        };
+        let mut a1 = assistant_turn("a1", "Working on it.");
+        a1.group_id = Some("msg_A".into());
+        let mut a2 = assistant_turn("a2", "");
+        a2.group_id = Some("msg_A".into());
+        a2.token_usage = Some(usage);
+
+        let view = make_view("sess-1", vec![user_turn("u1", "Go"), a1, a2]);
+        let convo = ClaudeProjector.project(&view).unwrap();
+
+        let assistants: Vec<&ConversationEntry> = content_entries(&convo)
+            .iter()
+            .filter(|e| e.entry_type == "assistant")
+            .collect();
+        assert_eq!(assistants.len(), 2);
+        for entry in &assistants {
+            let msg = entry.message.as_ref().unwrap();
+            assert_eq!(msg.id.as_deref(), Some("msg_A"));
+            let u = msg.usage.as_ref().expect("every line carries usage");
+            assert_eq!(u.output_tokens, Some(997));
+            assert_eq!(u.cache_creation_input_tokens, Some(429_831));
+        }
+    }
+
+    #[test]
+    fn test_group_total_survives_projector_roundtrip() {
+        // The IR carries a message's total on the group's final turn only.
+        // The projector re-expands it onto every line of the split (with the
+        // shared message.id); re-reading collapses it back to the same total
+        // on the final turn. Summing per step yields the session total
+        // either way.
+        let mut a1 = assistant_turn("a1", "first");
+        a1.group_id = Some("msg_A".into());
+        let mut a2 = assistant_turn("a2", "second");
+        a2.group_id = Some("msg_A".into());
+        a2.token_usage = Some(toolpath_convo::TokenUsage {
+            input_tokens: Some(6),
+            output_tokens: Some(164),
+            cache_read_tokens: Some(100),
+            cache_write_tokens: Some(200),
+            ..Default::default()
+        });
+
+        let view = make_view("sess-1", vec![user_turn("u1", "Go"), a1, a2]);
+        let convo = ClaudeProjector.project(&view).unwrap();
+
+        // Wire: the total is stamped on every line of the split, each tagged
+        // with the shared message.id.
+        for entry in content_entries(&convo).iter().filter(|e| e.entry_type == "assistant") {
+            let msg = entry.message.as_ref().unwrap();
+            assert_eq!(msg.id.as_deref(), Some("msg_A"));
+            assert_eq!(msg.usage.as_ref().unwrap().output_tokens, Some(164));
+        }
+
+        // Re-read: total back on the final turn only; no fabricated attribution.
+        let back = crate::provider::to_view(&convo);
+        let a: Vec<&Turn> = back.turns.iter().filter(|t| t.role == Role::Assistant).collect();
+        assert!(a[0].token_usage.is_none());
+        assert_eq!(a[1].token_usage.as_ref().unwrap().output_tokens, Some(164));
+        assert!(a.iter().all(|t| t.attributed_token_usage.is_none()));
     }
 
     // ── Permission-mode preamble ─────────────────────────────────────
@@ -1258,6 +1371,7 @@ mod tests {
             output_tokens: Some(50),
             cache_read_tokens: Some(500),  // → cache_read_input_tokens
             cache_write_tokens: Some(200), // → cache_creation_input_tokens
+            ..Default::default()
         });
 
         let view = make_view("sess-1", vec![turn]);

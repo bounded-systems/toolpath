@@ -229,6 +229,7 @@ fn projector_accepts_foreign_view_shape() {
             Turn {
                 id: "uA".into(),
                 parent_id: None,
+                group_id: None,
                 role: Role::User,
                 timestamp: "2026-06-01T00:00:00Z".into(),
                 text: "rename main".into(),
@@ -237,6 +238,7 @@ fn projector_accepts_foreign_view_shape() {
                 model: None,
                 stop_reason: None,
                 token_usage: None,
+                attributed_token_usage: None,
                 environment: Some(EnvironmentSnapshot {
                     working_dir: Some("/foreign".into()),
                     ..Default::default()
@@ -247,6 +249,7 @@ fn projector_accepts_foreign_view_shape() {
             Turn {
                 id: "aA".into(),
                 parent_id: Some("uA".into()),
+                group_id: None,
                 role: Role::Assistant,
                 timestamp: "2026-06-01T00:00:01Z".into(),
                 text: "done".into(),
@@ -268,7 +271,9 @@ fn projector_accepts_foreign_view_shape() {
                     output_tokens: Some(5),
                     cache_read_tokens: None,
                     cache_write_tokens: None,
+                    ..Default::default()
                 }),
+                attributed_token_usage: None,
                 environment: Some(EnvironmentSnapshot {
                     working_dir: Some("/foreign".into()),
                     ..Default::default()

@@ -5,6 +5,54 @@ records the token counts Anthropic billed for that turn, including
 prompt-cache statistics. The shape has grown over time and now mixes
 flat fields with nested breakdowns that duplicate the flat totals.
 
+## One message, many lines: don't sum per entry
+
+Claude Code writes one JSONL line **per content block** of an assistant
+API message (see [entry-types](entry-types.md)), each stamped with a
+`usage` object. A message with thinking + text + two `tool_use` blocks
+lands as four entries. Summing `message.usage` across entries
+over-counts (~3× on typical sessions) — the values are **cumulative
+snapshots of one message, not per-line bills.**
+
+The grouping key is **`message.id`** (`msg_…`), identical on every line
+of the split. Empirically, across every session sampled:
+
+- `input_tokens` and the cache counters are **constant** across a
+  message's lines (prompt-side cost, paid once for the message).
+- `output_tokens` is **cumulative and non-decreasing**: it streams
+  upward as the model generates, and the **last line carries the
+  message total**. ~73% of split messages repeat one value on every
+  line (stamped after generation); ~27% genuinely stream (distinct
+  values). Either way the max — which is the last line — is the total.
+
+Correct accounting: take the **maximum** `usage` per distinct
+`message.id` (don't trust line order; the format is undocumented). This
+is what `toolpath-claude` does — derived paths put the message total on
+the last step of each `message.id` group, per the
+[`agent-coding-session` v1.1.0 kind](https://toolpath.net/kinds/agent-coding-session/v1.1.0/).
+
+**Why this is a snapshot, not a per-block bill.** The Anthropic
+[streaming API](https://platform.claude.com/docs/en/build-with-claude/streaming.md)
+reports usage incrementally: the `message_start` event seeds
+`output_tokens` near zero, and each `message_delta` carries the running
+**cumulative** total, the final delta being the message total. Claude
+Code stamps each content-block line with whatever snapshot was current
+when it flushed the line — so the early lines hold near-`message_start`
+values and the full total lands on the last line. A real prose `text`
+block routinely shows `output_tokens: 1`. The per-line values therefore
+track *flush timing*, not the tokens a given block cost.
+
+**No per-block attribution.** Because of the above, differencing
+consecutive lines does **not** yield per-block token costs — the
+intermediate values are streaming snapshots, not block bills. We take
+the max as the message total and do not derive `attributed_token_usage`
+for Claude. (Codex, by contrast, reports a genuine per-call delta — see
+[`codex.md`](../codex.md).)
+
+One caution: the `iterations` array (below) is a breakdown *inside* one
+message's `usage` — subordinate detail, not an accounting unit; never sum
+it alongside the enclosing totals.
+
 ## Full observed shape
 
 ```jsonc

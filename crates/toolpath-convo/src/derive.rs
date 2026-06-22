@@ -178,10 +178,40 @@ pub fn derive_path(view: &ConversationView, config: &DeriveConfig) -> Path {
             extra.insert("tool_uses".to_string(), serde_json::Value::Array(arr));
         }
 
-        if let Some(usage) = &turn.token_usage
+        // Message-level accounting lands exactly once per message: when a
+        // provider splits one message across several turns (group_id
+        // set on each), only the run's last turn carries token_usage, so
+        // summing over steps yields session totals. A turn without a
+        // group_id is its own accounting unit.
+        let last_of_message = match &turn.group_id {
+            None => true,
+            Some(mid) => view
+                .turns
+                .get(idx + 1)
+                .is_none_or(|next| next.group_id.as_ref() != Some(mid)),
+        };
+        if last_of_message
+            && let Some(usage) = &turn.token_usage
             && let Ok(v) = serde_json::to_value(usage)
         {
             extra.insert("token_usage".to_string(), v);
+        }
+
+        // Per-step attributed spend rides its own key on every step that
+        // has it (independent of the once-per-message `token_usage`), so
+        // summing `token_usage` is unaffected while per-step cost stays
+        // readable structurally.
+        if let Some(attr) = &turn.attributed_token_usage
+            && let Ok(v) = serde_json::to_value(attr)
+        {
+            extra.insert("attributed_token_usage".to_string(), v);
+        }
+
+        if let Some(mid) = &turn.group_id {
+            extra.insert(
+                "group_id".to_string(),
+                serde_json::Value::String(mid.clone()),
+            );
         }
 
         if !turn.delegations.is_empty()
@@ -648,6 +678,7 @@ mod tests {
         Turn {
             id: id.to_string(),
             parent_id: None,
+            group_id: None,
             role,
             timestamp: "2026-01-01T00:00:00Z".to_string(),
             text: String::new(),
@@ -656,6 +687,7 @@ mod tests {
             model: None,
             stop_reason: None,
             token_usage: None,
+            attributed_token_usage: None,
             environment: None,
             delegations: vec![],
             file_mutations: Vec::new(),
@@ -699,8 +731,66 @@ mod tests {
         // ...and survives a JSON round-trip.
         let json = serde_json::to_string(&path).unwrap();
         assert!(
-            json.contains(r#""kind":"https://toolpath.net/kinds/agent-coding-session/v1.0.0""#)
+            json.contains(r#""kind":"https://toolpath.net/kinds/agent-coding-session/v1.1.0""#)
         );
+    }
+
+    #[test]
+    fn test_token_usage_breakdowns_round_trip() {
+        use std::collections::BTreeMap;
+        // A Turn whose token_usage carries breakdowns should derive into a
+        // Path and extract back out with the breakdowns intact.
+        let mut breakdowns = BTreeMap::new();
+        breakdowns.insert(
+            "output".to_string(),
+            BTreeMap::from([("reasoning".to_string(), 450u32)]),
+        );
+        let mut turn = base_turn("t1", Role::Assistant);
+        turn.model = Some("claude-opus-4-7".into());
+        turn.token_usage = Some(TokenUsage {
+            input_tokens: Some(100),
+            output_tokens: Some(900),
+            breakdowns: breakdowns.clone(),
+            ..Default::default()
+        });
+        let view = view_with(vec![turn]);
+
+        let path = derive_path(&view, &DeriveConfig::default());
+        let extracted = crate::extract::extract_conversation(&path);
+
+        let usage = extracted.turns[0]
+            .token_usage
+            .as_ref()
+            .expect("token_usage survives round-trip");
+        assert_eq!(usage.input_tokens, Some(100));
+        assert_eq!(usage.output_tokens, Some(900));
+        assert_eq!(usage.breakdowns, breakdowns);
+        assert_eq!(usage.breakdowns["output"]["reasoning"], 450);
+    }
+
+    #[test]
+    fn test_token_usage_empty_breakdowns_omitted_in_json() {
+        // skip_serializing_if guarantees no "breakdowns" key for the empty map,
+        // keeping the wire format byte-compatible with pre-breakdowns producers.
+        let usage = TokenUsage {
+            input_tokens: Some(10),
+            output_tokens: Some(20),
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&usage).unwrap();
+        assert!(
+            !json.contains("breakdowns"),
+            "empty breakdowns must be omitted, got: {json}"
+        );
+    }
+
+    #[test]
+    fn test_token_usage_absent_breakdowns_defaults_empty() {
+        // Deserializing an old-style token_usage object with no breakdowns key
+        // yields an empty map (serde default).
+        let usage: TokenUsage =
+            serde_json::from_str(r#"{"input_tokens":10,"output_tokens":20}"#).unwrap();
+        assert!(usage.breakdowns.is_empty());
     }
 
     #[test]
@@ -806,6 +896,7 @@ mod tests {
 
         let mut assistant = base_turn("t2", Role::Assistant);
         assistant.parent_id = Some("t1".into());
+        assistant.group_id = Some("msg_t2".into());
         assistant.model = Some("gpt-5.5".into());
         assistant.text = "on it".into();
         assistant.thinking = Some("plan the edit".into());
@@ -815,6 +906,11 @@ mod tests {
             output_tokens: Some(20),
             cache_read_tokens: Some(50),
             cache_write_tokens: None,
+            ..Default::default()
+        });
+        assistant.attributed_token_usage = Some(TokenUsage {
+            output_tokens: Some(20),
+            ..Default::default()
         });
         assistant.environment = Some(EnvironmentSnapshot {
             working_dir: Some("/repo".into()),
@@ -873,7 +969,7 @@ mod tests {
 
         let schema_src = std::fs::read_to_string(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../path-cli/kinds/agent-coding-session/v1.0.0/schema.json"
+            "/../path-cli/kinds/agent-coding-session/v1.1.0/schema.json"
         ))
         .expect("read kind schema");
         let schema: serde_json::Value = serde_json::from_str(&schema_src).unwrap();
@@ -1294,6 +1390,7 @@ mod tests {
             output_tokens: Some(50),
             cache_read_tokens: None,
             cache_write_tokens: None,
+            ..Default::default()
         });
         let view = view_with(vec![turn]);
         let path = derive_path(&view, &DeriveConfig::default());
@@ -1302,6 +1399,109 @@ mod tests {
         assert_eq!(
             sc.extra["token_usage"]["input_tokens"],
             serde_json::json!(100)
+        );
+    }
+
+    fn usage(output: u32) -> TokenUsage {
+        TokenUsage {
+            input_tokens: Some(6),
+            output_tokens: Some(output),
+            cache_read_tokens: Some(14_842),
+            cache_write_tokens: Some(429_831),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn test_message_group_carries_usage_once_on_last_step() {
+        // Three turns split from one provider message (Claude Code repeats
+        // message.usage on every content-block line), then one singleton
+        // message. Usage must land exactly once per group_id group — on
+        // the group's last step — and group_id on every grouped step.
+        let mut turns: Vec<Turn> = (1..=3)
+            .map(|i| {
+                let mut t = base_turn(&format!("t{i}"), Role::Assistant);
+                t.group_id = Some("msg_01".into());
+                t.token_usage = Some(usage(997));
+                t
+            })
+            .collect();
+        let mut t4 = base_turn("t4", Role::Assistant);
+        t4.group_id = Some("msg_02".into());
+        t4.token_usage = Some(usage(11));
+        turns.push(t4);
+
+        let view = view_with(turns);
+        let path = derive_path(&view, &DeriveConfig::default());
+        let changes: Vec<&StructuralChange> = path.steps.iter().map(conv_change).collect();
+
+        assert!(!changes[0].extra.contains_key("token_usage"));
+        assert!(!changes[1].extra.contains_key("token_usage"));
+        assert_eq!(
+            changes[2].extra["token_usage"]["output_tokens"],
+            serde_json::json!(997)
+        );
+        assert_eq!(
+            changes[3].extra["token_usage"]["output_tokens"],
+            serde_json::json!(11)
+        );
+        for c in &changes[..3] {
+            assert_eq!(c.extra["group_id"], serde_json::json!("msg_01"));
+        }
+        assert_eq!(changes[3].extra["group_id"], serde_json::json!("msg_02"));
+    }
+
+    #[test]
+    fn test_turn_without_group_id_is_its_own_accounting_unit() {
+        // Providers that never split a message (gemini, pi, opencode)
+        // leave group_id unset; every turn keeps its own usage.
+        let mut turns = Vec::new();
+        for i in 1..=2 {
+            let mut t = base_turn(&format!("t{i}"), Role::Assistant);
+            t.token_usage = Some(usage(50 + i));
+            turns.push(t);
+        }
+        let view = view_with(turns);
+        let path = derive_path(&view, &DeriveConfig::default());
+        for (i, step) in path.steps.iter().enumerate() {
+            let sc = conv_change(step);
+            assert_eq!(
+                sc.extra["token_usage"]["output_tokens"],
+                serde_json::json!(51 + i as u64)
+            );
+            assert!(!sc.extra.contains_key("group_id"));
+        }
+    }
+
+    #[test]
+    fn test_message_grouping_is_consecutive_only() {
+        // A group_id reappearing after an intervening message starts a
+        // new group (defensive: source formats never interleave, but the
+        // rule is defined over consecutive runs in document order).
+        let mk = |id: &str, msg: &str, out: u32| {
+            let mut t = base_turn(id, Role::Assistant);
+            t.group_id = Some(msg.into());
+            t.token_usage = Some(usage(out));
+            t
+        };
+        let view = view_with(vec![
+            mk("t1", "msg_01", 100),
+            mk("t2", "msg_02", 200),
+            mk("t3", "msg_01", 300),
+        ]);
+        let path = derive_path(&view, &DeriveConfig::default());
+        let changes: Vec<&StructuralChange> = path.steps.iter().map(conv_change).collect();
+        assert_eq!(
+            changes[0].extra["token_usage"]["output_tokens"],
+            serde_json::json!(100)
+        );
+        assert_eq!(
+            changes[1].extra["token_usage"]["output_tokens"],
+            serde_json::json!(200)
+        );
+        assert_eq!(
+            changes[2].extra["token_usage"]["output_tokens"],
+            serde_json::json!(300)
         );
     }
 

@@ -754,6 +754,7 @@ mod tests {
         Turn {
             id: "u1".into(),
             parent_id: None,
+            group_id: None,
             role: Role::User,
             timestamp: "2026-04-21T12:00:00.000Z".into(),
             text: text.into(),
@@ -762,6 +763,7 @@ mod tests {
             model: None,
             stop_reason: None,
             token_usage: None,
+            attributed_token_usage: None,
             environment: None,
             delegations: vec![],
             file_mutations: Vec::new(),
@@ -772,6 +774,7 @@ mod tests {
         Turn {
             id: "a1".into(),
             parent_id: None,
+            group_id: None,
             role: Role::Assistant,
             timestamp: "2026-04-21T12:00:01.000Z".into(),
             text: text.into(),
@@ -780,6 +783,7 @@ mod tests {
             model: Some("claude-sonnet-4-6".into()),
             stop_reason: Some("stop".into()),
             token_usage: None,
+            attributed_token_usage: None,
             environment: None,
             delegations: vec![],
             file_mutations: Vec::new(),

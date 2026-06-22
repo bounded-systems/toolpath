@@ -171,8 +171,15 @@ fn extract_tool_result_text(content: &[ToolResultContent]) -> String {
     texts.join("\n")
 }
 
-fn usage_to_token_usage(usage: &Usage) -> TokenUsage {
-    TokenUsage {
+/// Pi's wire requires a `usage` object on every assistant message, so
+/// foreign-source projections fill it with zeros when the spend is
+/// unknown. A real API message can never cost zero tokens, so an
+/// all-zero `usage` decodes as "no usage recorded", not `Some(zeros)`.
+fn usage_to_token_usage(usage: &Usage) -> Option<TokenUsage> {
+    if usage.input == 0 && usage.output == 0 && usage.cache_read == 0 && usage.cache_write == 0 {
+        return None;
+    }
+    Some(TokenUsage {
         input_tokens: Some(usage.input as u32),
         output_tokens: Some(usage.output as u32),
         cache_read_tokens: if usage.cache_read > 0 {
@@ -185,7 +192,8 @@ fn usage_to_token_usage(usage: &Usage) -> TokenUsage {
         } else {
             None
         },
-    }
+        ..Default::default()
+    })
 }
 
 fn environment_for(session: &PiSession) -> EnvironmentSnapshot {
@@ -238,6 +246,7 @@ pub fn session_to_view(session: &PiSession) -> ConversationView {
                 turns.push(Turn {
                     id: base.id.clone(),
                     parent_id: base.parent_id.clone(),
+                    group_id: None,
                     role: Role::System,
                     timestamp: base.timestamp.clone(),
                     text: format!("Compacted (summary): {}", summary),
@@ -246,6 +255,7 @@ pub fn session_to_view(session: &PiSession) -> ConversationView {
                     model: None,
                     stop_reason: None,
                     token_usage: None,
+                    attributed_token_usage: None,
                     environment: Some(env.clone()),
                     delegations: vec![],
                     file_mutations: Vec::new(),
@@ -256,6 +266,7 @@ pub fn session_to_view(session: &PiSession) -> ConversationView {
                 turns.push(Turn {
                     id: base.id.clone(),
                     parent_id: base.parent_id.clone(),
+                    group_id: None,
                     role: Role::System,
                     timestamp: base.timestamp.clone(),
                     text: format!("Branch summary: {}", summary),
@@ -264,6 +275,7 @@ pub fn session_to_view(session: &PiSession) -> ConversationView {
                     model: None,
                     stop_reason: None,
                     token_usage: None,
+                    attributed_token_usage: None,
                     environment: Some(env.clone()),
                     delegations: vec![],
                     file_mutations: Vec::new(),
@@ -274,6 +286,7 @@ pub fn session_to_view(session: &PiSession) -> ConversationView {
                 turns.push(Turn {
                     id: base.id.clone(),
                     parent_id: base.parent_id.clone(),
+                    group_id: None,
                     role: Role::Other("custom".to_string()),
                     timestamp: base.timestamp.clone(),
                     text: String::new(),
@@ -282,6 +295,7 @@ pub fn session_to_view(session: &PiSession) -> ConversationView {
                     model: None,
                     stop_reason: None,
                     token_usage: None,
+                    attributed_token_usage: None,
                     environment: Some(env.clone()),
                     delegations: vec![],
                     file_mutations: Vec::new(),
@@ -297,6 +311,7 @@ pub fn session_to_view(session: &PiSession) -> ConversationView {
                 turns.push(Turn {
                     id: base.id.clone(),
                     parent_id: base.parent_id.clone(),
+                    group_id: None,
                     role: Role::Other(format!("custom:{}", custom_type)),
                     timestamp: base.timestamp.clone(),
                     text: extract_user_text(content),
@@ -305,6 +320,7 @@ pub fn session_to_view(session: &PiSession) -> ConversationView {
                     model: None,
                     stop_reason: None,
                     token_usage: None,
+                    attributed_token_usage: None,
                     environment: Some(env.clone()),
                     delegations: vec![],
                     file_mutations: Vec::new(),
@@ -339,7 +355,7 @@ pub fn session_to_view(session: &PiSession) -> ConversationView {
                         thinking = extract_assistant_thinking(content);
                         model = Some(m.clone());
                         stop_reason_s = Some(stop_reason_to_string(stop_reason));
-                        token_usage = Some(usage_to_token_usage(usage));
+                        token_usage = usage_to_token_usage(usage);
 
                         let turn_idx = turns.len();
                         for block in content {
@@ -435,6 +451,7 @@ pub fn session_to_view(session: &PiSession) -> ConversationView {
                 turns.push(Turn {
                     id: base.id.clone(),
                     parent_id: base.parent_id.clone(),
+                    group_id: None,
                     role,
                     timestamp: base.timestamp.clone(),
                     text,
@@ -443,6 +460,7 @@ pub fn session_to_view(session: &PiSession) -> ConversationView {
                     model,
                     stop_reason: stop_reason_s,
                     token_usage,
+                    attributed_token_usage: None,
                     environment: Some(env.clone()),
                     delegations,
                     file_mutations: Vec::new(),
@@ -614,6 +632,34 @@ mod tests {
     };
     use std::collections::HashMap;
     use std::path::PathBuf;
+
+    #[test]
+    fn test_all_zero_usage_decodes_as_none() {
+        // Pi's wire requires `usage`; foreign projections zero-fill it
+        // when spend is unknown. Zero is not a real spend.
+        let zero = Usage {
+            input: 0,
+            output: 0,
+            cache_read: 0,
+            cache_write: 0,
+            total_tokens: 0,
+            cost: CostBreakdown::default(),
+        };
+        assert!(usage_to_token_usage(&zero).is_none());
+
+        let real = Usage {
+            input: 10,
+            output: 5,
+            cache_read: 0,
+            cache_write: 0,
+            total_tokens: 15,
+            cost: CostBreakdown::default(),
+        };
+        let u = usage_to_token_usage(&real).unwrap();
+        assert_eq!(u.input_tokens, Some(10));
+        assert_eq!(u.output_tokens, Some(5));
+        assert_eq!(u.cache_read_tokens, None);
+    }
 
     fn header(id: &str, cwd: &str) -> SessionHeader {
         SessionHeader {

@@ -8,7 +8,7 @@ pub use derive::{DeriveConfig, derive_path, file_write_diff, unified_diff};
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 
 // ── Error ────────────────────────────────────────────────────────────
@@ -67,6 +67,13 @@ pub struct TokenUsage {
     /// Tokens written to cache.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_write_tokens: Option<u32>,
+    /// Optional decomposition of a top-level class into named sub-classes (keyed by the class
+    /// being broken down, e.g. "output"; inner map is sub-class → tokens, e.g.
+    /// {"reasoning": 450} or {"text": 300, "image": 500}). INFORMATIONAL ONLY:
+    /// breakdowns are never summed into the total — the parent class already
+    /// counts these tokens. Invariant: Σ(inner) ≤ the parent class's value.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub breakdowns: BTreeMap<String, BTreeMap<String, u32>>,
 }
 
 /// Identity of the software that produced a session: e.g.
@@ -246,6 +253,16 @@ pub struct Turn {
     /// Parent turn ID (for branching conversations).
     pub parent_id: Option<String>,
 
+    /// Identifier of the source accounting unit this turn belongs to —
+    /// a message for Claude (`message.id`), a round for Codex (`turn_id`).
+    /// A grouping key, not a turn identifier: when a provider derives
+    /// several turns from one unit (Claude writes one JSONL line per
+    /// content block; a Codex round emits several turns), every sibling
+    /// turn carries the same value, and group-level accounting
+    /// (`token_usage`) belongs to the group once (on its final turn).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group_id: Option<String>,
+
     /// Who produced this turn.
     pub role: Role,
 
@@ -267,8 +284,25 @@ pub struct Turn {
     /// Why the turn ended (e.g. "end_turn", "tool_use", "max_tokens").
     pub stop_reason: Option<String>,
 
-    /// Token usage for this turn.
+    /// Token usage for this turn. When this turn belongs to a `group_id`
+    /// group, this is the **whole message's total**, carried on the
+    /// group's final turn only (it always means "the total for a
+    /// message"; summing over turns yields session totals).
     pub token_usage: Option<TokenUsage>,
+
+    /// This turn's own attributed spend, when the source provides
+    /// step-aligned data — the output tokens generated *for this turn*,
+    /// distinct from [`Turn::token_usage`] (the whole message's total).
+    /// Populated where a provider streams per-step counts (Claude's
+    /// per-content-block cumulative `usage`, Codex's per-step
+    /// `token_count` deltas); absent where it can't be attributed.
+    /// Within a `group_id` group, `Σ attributed_token_usage` is the
+    /// group's attributed output; the unattributed remainder
+    /// (prompt-side input/cache, inherently per-message) stays in
+    /// `token_usage` on the group's final turn. A separate field from
+    /// `token_usage` precisely so the session-total sum is unaffected.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attributed_token_usage: Option<TokenUsage>,
 
     /// Environment at time of this turn.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -543,6 +577,7 @@ mod tests {
                 Turn {
                     id: "t1".into(),
                     parent_id: None,
+                    group_id: None,
                     role: Role::User,
                     timestamp: "2026-01-01T00:00:00Z".into(),
                     text: "Fix the authentication bug in login.rs".into(),
@@ -551,6 +586,7 @@ mod tests {
                     model: None,
                     stop_reason: None,
                     token_usage: None,
+                    attributed_token_usage: None,
                     environment: None,
                     delegations: vec![],
                     file_mutations: Vec::new(),
@@ -558,6 +594,7 @@ mod tests {
                 Turn {
                     id: "t2".into(),
                     parent_id: Some("t1".into()),
+                    group_id: None,
                     role: Role::Assistant,
                     timestamp: "2026-01-01T00:00:01Z".into(),
                     text: "I'll fix that for you.".into(),
@@ -579,7 +616,9 @@ mod tests {
                         output_tokens: Some(50),
                         cache_read_tokens: None,
                         cache_write_tokens: None,
+                        ..Default::default()
                     }),
+                    attributed_token_usage: None,
                     environment: None,
                     delegations: vec![],
                     file_mutations: Vec::new(),
@@ -587,6 +626,7 @@ mod tests {
                 Turn {
                     id: "t3".into(),
                     parent_id: Some("t2".into()),
+                    group_id: None,
                     role: Role::User,
                     timestamp: "2026-01-01T00:00:02Z".into(),
                     text: "Thanks!".into(),
@@ -595,6 +635,7 @@ mod tests {
                     model: None,
                     stop_reason: None,
                     token_usage: None,
+                    attributed_token_usage: None,
                     environment: None,
                     delegations: vec![],
                     file_mutations: Vec::new(),
@@ -799,6 +840,7 @@ mod tests {
             output_tokens: Some(50),
             cache_read_tokens: Some(500),
             cache_write_tokens: Some(200),
+            ..Default::default()
         };
         let json = serde_json::to_string(&usage).unwrap();
         let back: TokenUsage = serde_json::from_str(&json).unwrap();
@@ -924,6 +966,7 @@ mod tests {
         let turn = Turn {
             id: "t1".into(),
             parent_id: None,
+            group_id: None,
             role: Role::Assistant,
             timestamp: "2026-01-01T00:00:00Z".into(),
             text: "Delegating...".into(),
@@ -932,6 +975,7 @@ mod tests {
             model: None,
             stop_reason: None,
             token_usage: None,
+            attributed_token_usage: None,
             environment: Some(EnvironmentSnapshot {
                 working_dir: Some("/project".into()),
                 vcs_branch: Some("feat/auth".into()),
@@ -976,6 +1020,7 @@ mod tests {
                 output_tokens: Some(500),
                 cache_read_tokens: Some(800),
                 cache_write_tokens: None,
+                ..Default::default()
             }),
             provider_id: Some("claude-code".into()),
             files_changed: vec!["src/main.rs".into(), "src/lib.rs".into()],

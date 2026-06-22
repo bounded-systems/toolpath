@@ -502,6 +502,49 @@ Populated once the turn has real usage data:
 Absent/null `info` on the first `token_count` of a turn (delivered
 before the model responds); populated thereafter.
 
+**Cumulative vs. per-step — and the doubling trap:** per OpenAI's own
+field definitions, `total_token_usage` is "cumulative tokens consumed
+across the entire session" and `last_token_usage` is "the incremental
+token delta for that specific event" (a single API call's tokens). Never
+attribute the cumulative counter to a single turn (summing it per turn
+grows quadratically). A step's own spend is the **increase** in
+`total_token_usage` since the previous count. Crucially, derive that by
+**differencing the cumulative**, not by summing `last_token_usage`: Codex
+re-emits `token_count` events with a stale, repeated `last_token_usage`
+(observed as duplicate events with identical values; OpenAI documents it
+for rate-limit-only updates), so summing `last_token_usage` double-counts
+— while a repeated cumulative total is a 0 delta. This is a known trap:
+downstream tools that trust `last_token_usage` directly over-count
+(openai/codex [#14489](https://github.com/openai/codex/issues/14489),
+[#17539](https://github.com/openai/codex/issues/17539)). Each
+`token_count` follows the step it measures (a `function_call` or a
+`message`), so the delta attributes to that step.
+
+**Round scoping + attribution:** a Codex round (one user task) can emit
+several assistant messages (commentary + final) and many `token_count`
+events. `toolpath-codex` groups a round's assistant turns under
+`Turn.group_id` (the `turn_id` from `turn_context`/`task_started`),
+records each per-step delta as that step's `attributed_token_usage`, and
+sets the round's total `Turn.token_usage` (on its final turn) to the sum
+of those attributions — one source of truth, so the total and the
+per-step shares cannot drift, and `Σ token_usage == Σ attributed ==`
+session total. Every field is per-step here (each step is a separate API
+call re-sending context), so Codex attribution is full, not output-only.
+
+**Reasoning slice of output:** `total_token_usage.reasoning_output_tokens`
+is a **subset** of `output_tokens` (reasoning ⊆ output) and is itself a
+cumulative session counter. `toolpath-codex` differences it per call the
+*same* way as the other counters (never raw-summed — that would
+double-count for the same reason `last_token_usage` does) and surfaces the
+per-step reasoning delta under `attributed_token_usage.breakdowns["output"]["reasoning"]`,
+with the round total carrying the summed reasoning under
+`token_usage.breakdowns["output"]["reasoning"]`. Breakdowns are
+**informational only**: they are never added into any total (the parent
+`output_tokens` already counts those tokens), and the invariant
+`Σ(reasoning) ≤ output` holds by construction. A breakdown entry is
+written only when reasoning is `> 0`; zero-reasoning rounds leave the map
+empty so the field is omitted.
+
 ### `exec_command_end` detail
 
 ```json
@@ -816,7 +859,8 @@ The mapping below is what the provider actually emits. Source:
 | `custom_tool_call` / `_output` paired by `call_id` | same (raw `input` string preserved) |
 | `event_msg.exec_command_end` | back-fills `Turn.tool_uses[].result` with exit code / stdout / stderr |
 | `event_msg.patch_apply_end.changes[<file>]` | sibling `ArtifactChange` on the tool-call's turn with the unified diff as `raw` and `codex.{add,update,delete}` as `structural` |
-| `event_msg.token_count.info.total_token_usage` | `Turn.token_usage` (last-write-wins on the next assistant turn) + `ConversationView.total_usage` |
+| `event_msg.token_count.info.total_token_usage` | cumulative; differenced per step → `Turn.attributed_token_usage`, summed per round → `Turn.token_usage` (round's final turn) + `ConversationView.total_usage` |
+| `event_msg.token_count.info.total_token_usage.reasoning_output_tokens` (⊆ output, cumulative) | differenced per step → `breakdowns["output"]["reasoning"]` on `attributed_token_usage`; summed per round onto `token_usage` (informational, never summed into the total) |
 | `event_msg` non-turn types (`task_started`, `task_complete`, `user_message`, `agent_message`, etc.) | `ConversationView.events` as typed `ConversationEvent`s |
 | unknown `response_item` / `event_msg` kinds | preserved verbatim in `events` and round-trip via `RolloutItem::Unknown` / `ResponseItem::Other` / `EventMsg::Other` |
 

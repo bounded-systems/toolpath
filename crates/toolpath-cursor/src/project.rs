@@ -924,6 +924,7 @@ mod tests {
         Turn {
             id: id.into(),
             parent_id: None,
+            group_id: None,
             role: Role::User,
             timestamp: "2026-06-01T00:00:00.000Z".into(),
             text: text.into(),
@@ -932,6 +933,7 @@ mod tests {
             model: None,
             stop_reason: None,
             token_usage: None,
+            attributed_token_usage: None,
             environment: Some(EnvironmentSnapshot {
                 working_dir: Some("/proj".into()),
                 vcs_branch: None,
@@ -946,6 +948,7 @@ mod tests {
         Turn {
             id: id.into(),
             parent_id: None,
+            group_id: None,
             role: Role::Assistant,
             timestamp: "2026-06-01T00:00:01.000Z".into(),
             text: text.into(),
@@ -958,7 +961,9 @@ mod tests {
                 output_tokens: Some(5),
                 cache_read_tokens: None,
                 cache_write_tokens: None,
+                ..Default::default()
             }),
+            attributed_token_usage: None,
             environment: Some(EnvironmentSnapshot {
                 working_dir: Some("/proj".into()),
                 vcs_branch: None,
