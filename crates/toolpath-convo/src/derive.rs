@@ -102,6 +102,9 @@ pub fn derive_path(view: &ConversationView, config: &DeriveConfig) -> Path {
     let conv_artifact_key = format!("{}://{}", provider, view.id);
 
     let mut steps: Vec<Step> = Vec::with_capacity(view.turns.len());
+    // Final step id → index in `steps`, for resolving id collisions as steps
+    // are emitted (see `push_step_and_dedup`).
+    let mut by_id: HashMap<String, usize> = HashMap::new();
     let mut turn_to_step: HashMap<String, String> = HashMap::new();
     let mut actors: HashMap<String, ActorDefinition> = HashMap::new();
 
@@ -113,7 +116,6 @@ pub fn derive_path(view: &ConversationView, config: &DeriveConfig) -> Path {
         } else {
             turn.id.clone()
         };
-        turn_to_step.insert(turn.id.clone(), step_id.clone());
 
         let actor = actor_for_turn(turn, provider);
         record_actor(&mut actors, &actor, turn, provider, view);
@@ -331,7 +333,8 @@ pub fn derive_path(view: &ConversationView, config: &DeriveConfig) -> Path {
             );
         }
 
-        steps.push(step);
+        let final_id = push_step_and_dedup(&mut steps, &mut by_id, step);
+        turn_to_step.insert(turn.id.clone(), final_id);
     }
 
     // Emit `view.events` as `conversation.event` steps so that attachments,
@@ -415,8 +418,7 @@ pub fn derive_path(view: &ConversationView, config: &DeriveConfig) -> Path {
                 }),
             },
         );
-        steps.push(step);
-        last_step_id = Some(step_id);
+        last_step_id = Some(push_step_and_dedup(&mut steps, &mut by_id, step));
     }
 
     let head = steps.last().map(|s| s.step.id.clone()).unwrap_or_default();
@@ -471,6 +473,47 @@ pub fn derive_path(view: &ConversationView, config: &DeriveConfig) -> Path {
         steps,
         meta: Some(meta),
     }
+}
+
+/// Push `step` into `steps`, resolving an id collision with an already-emitted
+/// step so the path's step ids stay unique. A byte-identical re-emission (same
+/// serialized step) is dropped — keeping it would only duplicate a step that
+/// already exists — and a same-id-but-different step is re-IDed to a fresh
+/// `<id>#<n>` so the original id stays recoverable and no data is lost. Returns
+/// the id the step ended up under (the surviving id when dropped, the new id
+/// when re-IDed), which the caller records in `turn_to_step` / `last_step_id`
+/// so parent references keep pointing at a real step.
+fn push_step_and_dedup(
+    steps: &mut Vec<Step>,
+    by_id: &mut HashMap<String, usize>,
+    mut step: Step,
+) -> String {
+    let id = step.step.id.clone();
+    let Some(&existing) = by_id.get(&id) else {
+        by_id.insert(id.clone(), steps.len());
+        steps.push(step);
+        return id;
+    };
+    if serde_value_eq(&steps[existing], &step) {
+        return id;
+    }
+    let mut n = 2u32;
+    let mut renamed = format!("{id}#{n}");
+    while by_id.contains_key(&renamed) {
+        n += 1;
+        renamed = format!("{id}#{n}");
+    }
+    step.step.id = renamed.clone();
+    by_id.insert(renamed.clone(), steps.len());
+    steps.push(step);
+    renamed
+}
+
+/// Whether two steps are the same entry — equal once serialized, so dropping
+/// one is lossless. `Step` doesn't implement `PartialEq`, and this only runs on
+/// an actual id collision (rare), so the serialize cost is negligible.
+fn serde_value_eq(a: &Step, b: &Step) -> bool {
+    serde_json::to_value(a).ok() == serde_json::to_value(b).ok()
 }
 
 fn actor_for_turn(turn: &Turn, provider: &str) -> String {
@@ -710,6 +753,96 @@ mod tests {
             .find(|k| k.contains("://"))
             .expect("conversation artifact key present");
         step.change[key].structural.as_ref().unwrap()
+    }
+
+    #[test]
+    fn test_duplicate_id_identical_content_is_dropped() {
+        // A byte-identical re-emission of the same id collapses to one step.
+        let mut first = base_turn("dup", Role::User);
+        first.text = "same".into();
+        let mid = base_turn("mid", Role::Assistant);
+        let mut second = base_turn("dup", Role::User);
+        second.text = "same".into();
+        let view = view_with(vec![first, mid, second]);
+
+        let path = derive_path(&view, &DeriveConfig::default());
+        let ids: Vec<&str> = path.steps.iter().map(|s| s.step.id.as_str()).collect();
+        assert_eq!(ids, vec!["dup", "mid"], "identical re-emission is dropped");
+    }
+
+    #[test]
+    fn test_duplicate_id_different_content_is_renamed() {
+        // The same id with DIFFERENT content keeps both steps: the later one is
+        // re-IDed to `<id>#<n>` so the path stays unique and no data is lost.
+        let mut first = base_turn("dup", Role::User);
+        first.text = "original".into();
+        let mid = base_turn("mid", Role::Assistant);
+        let mut second = base_turn("dup", Role::User);
+        second.text = "replayed".into();
+        let view = view_with(vec![first, mid, second]);
+
+        let path = derive_path(&view, &DeriveConfig::default());
+        let ids: Vec<&str> = path.steps.iter().map(|s| s.step.id.as_str()).collect();
+        assert_eq!(ids, vec!["dup", "mid", "dup#2"]);
+        assert_eq!(
+            conv_change(&path.steps[0]).extra["text"],
+            serde_json::json!("original")
+        );
+        assert_eq!(
+            conv_change(&path.steps[2]).extra["text"],
+            serde_json::json!("replayed")
+        );
+    }
+
+    #[test]
+    fn test_renamed_duplicate_keeps_parent_references_correct() {
+        // Resolving collisions inline (as steps are emitted) — not as a
+        // post-pass — keeps parent references correct: a later turn whose
+        // parent_id matches a renamed duplicate resolves to the RENAMED step,
+        // not the first occurrence that kept the original id.
+        let mut first = base_turn("dup", Role::User);
+        first.text = "original".into();
+        let mut second = base_turn("dup", Role::User); // re-IDed to dup#2
+        second.text = "replayed".into();
+        let mut child = base_turn("child", Role::Assistant);
+        child.parent_id = Some("dup".into());
+        let view = view_with(vec![first, second, child]);
+
+        let path = derive_path(&view, &DeriveConfig::default());
+        let ids: Vec<&str> = path.steps.iter().map(|s| s.step.id.as_str()).collect();
+        assert_eq!(ids, vec!["dup", "dup#2", "child"]);
+        assert_eq!(
+            path.steps[2].step.parents,
+            vec!["dup#2".to_string()],
+            "child parents on the renamed later duplicate, not the first `dup`"
+        );
+    }
+
+    #[test]
+    fn test_duplicate_event_ids_are_resolved_to_unique_ids() {
+        // The blocking case: Claude Code reuses `uuid` on attachment lines, so
+        // two distinct events arrive with the same id. derive_path must still
+        // yield unique step ids (consumers key on them, e.g. a UNIQUE index).
+        let a = base_turn("t1", Role::User);
+        let mut view = view_with(vec![a]);
+        for v in ["v1", "v2"] {
+            view.events.push(crate::ConversationEvent {
+                id: "evt".into(), // same id, different content
+                timestamp: "2026-01-01T00:00:00Z".into(),
+                parent_id: None,
+                event_type: "attachment".into(),
+                data: std::collections::HashMap::from([("k".to_string(), serde_json::json!(v))]),
+            });
+        }
+
+        let path = derive_path(&view, &DeriveConfig::default());
+        let ids: Vec<&str> = path.steps.iter().map(|s| s.step.id.as_str()).collect();
+        let unique: std::collections::HashSet<&&str> = ids.iter().collect();
+        assert_eq!(unique.len(), ids.len(), "step ids must be unique: {ids:?}");
+        assert!(
+            ids.contains(&"evt") && ids.contains(&"evt#2"),
+            "both events survive with distinct ids: {ids:?}"
+        );
     }
 
     #[test]

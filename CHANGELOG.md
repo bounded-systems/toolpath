@@ -2,6 +2,17 @@
 
 All notable changes to the Toolpath workspace are documented here.
 
+## Derive: resolve duplicate step ids — 2026-07-01
+
+- **`toolpath-convo`** (0.11.1): `derive_path` now guarantees the derived
+  path's step ids are unique. Sources reuse ids across distinct records
+  (Claude Code reuses `uuid` on `attachment` lines, so two unrelated events
+  arrive with the same id), and carrying a duplicate through breaks any
+  consumer that keys on the id (e.g. a store with a
+  `UNIQUE (path_id, step_id)` constraint). Collisions are resolved before the
+  path is returned: a byte-identical re-emission is dropped, and a
+  same-id-but-different step is re-IDed to `<id>#<n>` so no data is lost.
+
 ## Token usage: once per message, with per-step attribution + kind v1.1.0 — 2026-06-17
 
 Fixes token over-counting in derived documents (~3× output-token
