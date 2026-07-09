@@ -26,12 +26,15 @@ path
   show        # markdown summary for one session (used by fzf preview)
   share       # one-shot interactive picker + Pathbase upload
   resume      # project a doc into a coding agent and exec --resume
-  query
-    ancestors --input FILE --step-id ID
-    dead-ends --input FILE
-    filter    --input FILE [--actor PREFIX] [--artifact PATH] [--after TIME] [--before TIME]
+  query       # jaq (jq) filter over cached steps
+              FILTER [--source NAME] [--id CACHE-ID] [--input FILE]
+              [--project PATH] [--kind SELECTOR] [-c] [-r]
+  kind        # list bundled kinds, or print a kind's schema
+              [KIND[/VERSION]]
   auth        login | status | whoami | logout [--url URL]
   p           # plumbing
+    query
+      ancestors --input FILE --step-id ID
     list
       git       [--repo PATH] [--remote NAME] [--json]
       claude    [--project PATH] [--json]
@@ -127,10 +130,10 @@ Reads the most recent Claude conversation for that project and maps it to a Tool
 ### Find abandoned approaches
 
 ```bash
-path query dead-ends --input doc.json --pretty
+path query --input doc.json 'map(select(.dead_end))'
 ```
 
-Returns steps that have no descendants leading to the path head. These are the things that were tried and discarded.
+`path query` loads every step in the local cache into one JSON array and transforms it with a jaq (jq) filter; `--input` scopes it to a single document instead. Each element wraps a step with `cache_id`, `path`, and `dead_end` — so `map(select(.dead_end))` returns the steps that have no descendants leading to the path head: the things that were tried and discarded.
 
 ### Track changes in real time
 

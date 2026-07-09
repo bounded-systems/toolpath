@@ -12,7 +12,6 @@ All notable changes to the Toolpath workspace are documented here.
   `UNIQUE (path_id, step_id)` constraint). Collisions are resolved before the
   path is returned: a byte-identical re-emission is dropped, and a
   same-id-but-different step is re-IDed to `<id>#<n>` so no data is lost.
-
 ## New provider: GitHub Copilot CLI (preview) — 2026-06-30
 
 Adds **`toolpath-copilot` 0.1.0**, a forward provider that derives Toolpath
@@ -93,6 +92,56 @@ documents from GitHub Copilot CLI (`@github/copilot`) sessions under
   express "unknown", so a zero written by a foreign-source projection must not
   round-trip to `Some(0)` — same absence rule already applied to its cache
   fields).
+
+## `path query` — query the local cache with jaq — 2026-06-29
+
+Adds `path query`, a porcelain that loads every step in the local cache
+(`~/.toolpath/documents/`) into a single JSON array and transforms it with
+an in-process jaq (pure-Rust jq) filter. Selection, projection, ranking,
+grouping, and top-N are all just jaq, so one command answers "find every
+turn that mentions `RefCell`", "which sessions touched `cmd_resume.rs`?",
+"the 10 steps that cost the most tokens", and so on.
+
+- **`path query [scope flags] '<jq filter>'`** — each array element is a
+  Toolpath step (`step`/`change`/`meta` verbatim) wrapped with `cache_id`,
+  `path` (the parent path's `id`/`base`/`meta`), and `dead_end` (whether the
+  step is off the head's ancestry). The filter is required, as in jq (`.`
+  emits the array unchanged); running one is the same as piping that array
+  to `jq`. Output mirrors jq:
+  pretty on a TTY, compact when piped (`-c` forces compact), and `-r`
+  prints string results unquoted (pipe a column of ids/paths into another
+  command, or read a turn's text/diff unescaped).
+- **Scope flags.** File selection (before parse): `--source <name>`
+  (cache-id prefix, e.g. `claude`/`git`), `--id <cache-id>` (repeatable),
+  `--input <file>` (`-` for stdin, repeatable). Content scoping (per path):
+  `--project <path>` (matches a `file://` base) and `--kind <selector>`
+  (semver-prefix match, e.g. `agent-coding-session/v1`). Everything else is
+  a jaq predicate on the real structure.
+- **`path kind`** — the cold-start companion: lists the kinds the binary
+  bundles a spec for; `path kind <kind>` prints that kind's bundled
+  `schema.json` (the per-field type + semantics reference for writing
+  filters). A trailing `/<version>` pins a version with the same prefix
+  rule as `--kind`.
+- **Streaming executor (no flag).** So the whole cache needn't sit in memory,
+  the executor *reads the filter*: it parses the jaq into its AST and, when it
+  can prove the shape decomposable, runs per document with a bounded merge —
+  element-wise `.[] | …` filters stream one doc at a time, and algebraic
+  aggregations split into a per-file partial + combine (`map(…)`, top-N
+  `sort_by(k) | .[:N]`, `length`). A global top-N is a subset of the per-file
+  top-Ns, so the answer is identical. Anything not provably decomposable falls
+  back to the whole-array path — including scalar `add` (float sums
+  re-associate), `min`/`max` (empty partitions yield null), `group_by`, and
+  `unique` —
+  which is still lean (values held once, no whole-cache byte buffer). The
+  planner never changes an answer — validated by tests asserting streamed
+  output equals slurp byte-for-byte. `TOOLPATH_QUERY_EXPLAIN=1` prints the
+  chosen strategy to stderr.
+
+**Breaking** (pre-1.0): the former `path query` subcommands change.
+`ancestors` moves to `path p query ancestors`; `dead-ends` and `filter`
+are gone in favor of jaq forms — `path query 'map(select(.dead_end))'` and
+`path query 'map(select(.step.actor | startswith("agent:")))'`. `path-cli`
+0.14.0 → 0.15.0; adds the `jaq-core`/`jaq-std`/`jaq-json` dependencies.
 
 ## Token usage: once per message, with per-step attribution + kind v1.1.0 — 2026-06-17
 

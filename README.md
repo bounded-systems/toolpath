@@ -115,14 +115,17 @@ path p import pathbase https://pathbase.dev/alex/pathstash/path-pr-42
 path resume https://pathbase.dev/alex/pathstash/path-pr-42
 path resume claude-<session-id> --harness claude -C /path/to/project
 
-# Query for dead ends (abandoned approaches)
-path query dead-ends --input doc.json
+# Query the whole local cache with a jaq (jq) filter over wrapped steps
+# (e.g. dead ends, or turns by an agent actor)
+path query 'map(select(.dead_end))'
+path query --input doc.json 'map(select(.step.actor | startswith("agent:")))'
 
-# Filter steps by actor
-path query filter --input doc.json --actor "agent:"
+# List bundled document kinds, or print a kind's schema (the field reference)
+path kind
+path kind agent-coding-session
 
-# Walk the ancestry of a step
-path query ancestors --input doc.json --step-id step-003
+# Walk the ancestry of a step (plumbing)
+path p query ancestors --input doc.json --step-id step-003
 
 # Merge multiple documents into a graph
 path p merge doc1.json doc2.json --title "Release v2" --pretty
@@ -144,12 +147,15 @@ path
     pi        --project PATH --session ID [--base DIR]
   share       # one-shot interactive picker + Pathbase upload
   resume      # project a doc into a coding agent and exec --resume
-  query
-    ancestors --input FILE --step-id ID
-    dead-ends --input FILE
-    filter    --input FILE [--actor PREFIX] [--artifact PATH] [--after TIME] [--before TIME]
+  query       # jaq (jq) filter over cached steps
+              FILTER [--source NAME] [--id CACHE-ID] [--input FILE]
+              [--project PATH] [--kind SELECTOR] [-c] [-r]
+  kind        # list bundled kinds, or print a kind's schema
+              [KIND[/VERSION]]
   auth        login | status | whoami | logout [--url URL]
   p           # plumbing: lower-level building blocks
+    query
+      ancestors --input FILE --step-id ID
     list
       git       [--repo PATH] [--remote NAME] [--format pretty|json|tsv]
       github    --repo OWNER/REPO [--format ...]
