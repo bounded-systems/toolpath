@@ -36,7 +36,7 @@ pub struct Scope {
 
 /// Run `filter` over the scoped steps and print the result.
 ///
-/// `filter` is jaq source; `None` is treated as `.` (emit the array verbatim).
+/// `filter` is jaq source (`.` emits the array verbatim).
 /// `compact` forces single-line JSON; otherwise output is pretty-printed.
 /// `raw` prints string results without JSON quoting (like `jq -r`).
 ///
@@ -46,8 +46,7 @@ pub struct Scope {
 /// only its per-file partials — the filter's own output, not the input cache.
 /// Anything the planner can't prove decomposable falls back to the whole-array
 /// path, which is still lean — the step values are held once, not re-serialized.
-pub fn run(scope: &Scope, filter: Option<&str>, compact: bool, raw: bool) -> Result<()> {
-    let code = filter.unwrap_or(".");
+pub fn run(scope: &Scope, code: &str, compact: bool, raw: bool) -> Result<()> {
     let plan = plan::analyze(code);
     // Opt-in observability: `TOOLPATH_QUERY_EXPLAIN=1` reveals the execution
     // strategy on stderr. Not a behavioral flag — purely diagnostic.

@@ -21,11 +21,12 @@ grouping, and top-N are all just jaq, so one command answers "find every
 turn that mentions `RefCell`", "which sessions touched `cmd_resume.rs`?",
 "the 10 steps that cost the most tokens", and so on.
 
-- **`path query [scope flags] ['<jq filter>']`** — each array element is a
+- **`path query [scope flags] '<jq filter>'`** — each array element is a
   Toolpath step (`step`/`change`/`meta` verbatim) wrapped with `cache_id`,
   `path` (the parent path's `id`/`base`/`meta`), and `dead_end` (whether the
-  step is off the head's ancestry). With no filter it emits the array; a
-  filter is the same as piping that array to `jq`. Output mirrors jq:
+  step is off the head's ancestry). The filter is required, as in jq (`.`
+  emits the array unchanged); running one is the same as piping that array
+  to `jq`. Output mirrors jq:
   pretty on a TTY, compact when piped (`-c` forces compact), and `-r`
   prints string results unquoted (pipe a column of ids/paths into another
   command, or read a turn's text/diff unescaped).

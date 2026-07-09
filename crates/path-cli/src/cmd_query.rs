@@ -21,9 +21,9 @@ use crate::query::Scope;
 #[derive(Parser, Debug)]
 #[command(after_long_help = WRAPPER_HELP)]
 pub struct QueryArgs {
-    /// jaq (jq) filter to run over the scoped step array. Omit to emit the
-    /// array unchanged (equivalent to the `.` filter).
-    filter: Option<String>,
+    /// jaq (jq) filter to run over the scoped step array
+    /// (use `.` to emit the array unchanged).
+    filter: String,
 
     /// Select cached files by source prefix
     /// (claude/gemini/codex/opencode/cursor/pi/git/github).
@@ -101,5 +101,5 @@ pub fn run(args: QueryArgs, pretty: bool) -> Result<()> {
     // pretty on a TTY or when the global `--pretty` flag is set.
     let compact = args.compact || (!pretty && !std::io::stdout().is_terminal());
 
-    crate::query::run(&scope, args.filter.as_deref(), compact, args.raw)
+    crate::query::run(&scope, &args.filter, compact, args.raw)
 }
