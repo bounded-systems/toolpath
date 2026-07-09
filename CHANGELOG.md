@@ -13,6 +13,87 @@ All notable changes to the Toolpath workspace are documented here.
   path is returned: a byte-identical re-emission is dropped, and a
   same-id-but-different step is re-IDed to `<id>#<n>` so no data is lost.
 
+## New provider: GitHub Copilot CLI (preview) — 2026-06-30
+
+Adds **`toolpath-copilot` 0.1.0**, a forward provider that derives Toolpath
+documents from GitHub Copilot CLI (`@github/copilot`) sessions under
+`~/.copilot/session-state/<id>/events.jsonl`.
+
+- Parses the `events.jsonl` stream (`session.*`, `user.message`,
+  `assistant.*`, `tool.execution_*`, `subagent.*`, `skill.*`, `hook.*`,
+  `abort`) into `toolpath_convo::ConversationView` and hands off to the shared
+  `derive_path`. Tool names are classified into the `ToolCategory` ontology;
+  file writes whose args carry full content get a `raw` unified-diff
+  perspective. Tool `start`/`complete` pairing uses a correlation id when
+  present and falls back to positional pairing when absent (the id field is
+  unverified), so an id-less stream doesn't double-count tool calls.
+- Reads git context (root / repository / branch / revision) from the sibling
+  `workspace.yaml` into `Path.base`, via a tolerant key-scan parser (no YAML
+  dependency — the file's schema is itself reverse-engineered).
+- **Preview / schema partly verified.** Copilot CLI's `events.jsonl` format is
+  undocumented. First built from docs + reverse-engineering, then **verified
+  against a first-hand capture at `copilotVersion` 1.0.67** — which corrected
+  several guessed field locations (cwd/git under `session.start.context`, tool
+  results under `result.content`, `copilotVersion`, `reasoningText`,
+  `outputTokens`) and confirmed the envelope + core event types. Types not seen
+  in that session (`subagent.*`/`skill`/`hook`/`abort`/`shutdown`/compaction) and
+  the `checkpoints/` format remain unverified; the parser stays tolerant.
+- Adds the on-disk format reference at `docs/agents/formats/copilot-cli/`
+  (folder, every claim confidence-tagged) and its verification checklist.
+- Wired into the CLI **both directions**: forward (`path p import/list/show
+  copilot`, `path share`) and reverse via a new `CopilotProjector`
+  (`path p export copilot`, `path resume`). Resume/export write
+  `~/.copilot/session-state/<id>/` + a `session-store.db` `sessions` row
+  (INSERTing only a fresh id, never touching existing sessions). **✅ Verified in
+  copilot 1.0.67:** a projected session loads and resumes in the real
+  `copilot --resume`; the loader's writer contract (UUID `id`/`parentId`,
+  offset-ISO timestamps, `turnId`, `messageId`, non-empty `toolCallId`, full
+  `session.start` shape) is documented with verbatim errors in
+  `docs/agents/formats/copilot-cli/writing-compatible.md`. Also validated by the
+  cross-harness conformance matrix (`test-fixtures/copilot/`) + a round-trip test.
+- Bumps **`path-cli` to 0.15.0** (new `toolpath-copilot` dependency, the new
+  subcommands, Copilot in `path share`/`path resume`, and `uuid` `v4`).
+- The Copilot **resume loader contract** was mapped from live `copilot --resume`
+  runs and codified in `docs/agents/formats/copilot-cli/writing-compatible.md`
+  (9 requirements, each with its verbatim rejection): UUID `id`; offset-ISO
+  `timestamp` on every event; present `parentId` (UUID/null); `session-store.db`
+  row; full `session.start` shape incl. `startTime`; `turnId` and `messageId` on
+  turn-scoped events; non-empty `toolCallId`; and `subagent.*` fields
+  (`toolCallId`/`agentName`/`agentDisplayName`/`agentDescription`). Verified on a
+  27-event session **and** a 5817-event session with sub-agents.
+- **S-tier verification**: a real feature-elicit session (shell, create/edit/
+  view, glob+grep, errored read, real sub-agent, reasoning, per-message +
+  shutdown tokens) captured live at 1.0.68 now drives the cross-harness matrix
+  (`test-fixtures/copilot/convo.jsonl` — tokens and sub-agent included, no
+  dodges) and new crate tests (`real_fixture_roundtrip.rs`: forward invariants,
+  projection round-trip fidelity, wire-level serde value-identity). The capture
+  corrected the `session.shutdown` parser (`tokenDetails.{…}.tokenCount`;
+  model-keyed `modelMetrics`), resolved sub-agent semantics (`subagent.*` are
+  thin markers sharing the `task` tool's `toolCallId` — delegations pair by it,
+  ids preserved through projection), and upgraded file fidelity to
+  **Codex-grade** (native `edit`/`create` embed the real file-state diff in
+  `result.detailedContent`; the forward path now consumes it). Live loop
+  committed as `scripts/verify-copilot-live.sh` (isolated-home loader check +
+  resumed-model context probe — the probe answers session-specific questions
+  correctly); `scripts/capture-elicit-fixtures.sh` learned copilot.
+- File edits now **render as diffs** in a resumed session: `FileWrite` tool calls
+  project to Copilot's native `edit`/`create` shape with a git-style unified diff
+  in `result.detailedContent` (mapping a Claude `Edit`/`Write` accordingly). See
+  `docs/agents/formats/copilot-cli/file-fidelity.md`.
+- Adds the missing **`path p export copilot`** plumbing command (the projector
+  was previously reachable only via `path resume`): `--project <dir>` writes a
+  resume-ready session under `~/.copilot/session-state/<id>/`, `--output <file>`
+  or stdout emit the projected `events.jsonl`.
+- Session token total now **merges `session.shutdown` totals** even when
+  per-message `outputTokens` are present: Copilot only reports `output`
+  per-message, so the session's input + cache totals (≈222k in the real
+  fixture) live on the shutdown and were being dropped. Output comes from the
+  per-message sum; input/cache from the shutdown.
+- **`toolpath-pi` 0.6.1**: decode a zero wire `input` as `None` (the wire can't
+  express "unknown", so a zero written by a foreign-source projection must not
+  round-trip to `Some(0)` — same absence rule already applied to its cache
+  fields).
+
 ## Token usage: once per message, with per-step attribution + kind v1.1.0 — 2026-06-17
 
 Fixes token over-counting in derived documents (~3× output-token
