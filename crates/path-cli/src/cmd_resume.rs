@@ -45,9 +45,9 @@ use clap::Args;
 use std::path::PathBuf;
 
 /// Re-exported so external callers (integration tests, future consumers)
-/// can construct [`ResumeArgs`] without depending on the `cmd_share`
-/// module directly.
-pub use crate::cmd_share::HarnessArg;
+/// can construct [`ResumeArgs`] without depending on the private
+/// `cmd_share` module directly.
+pub use crate::cmd_share::Harness;
 
 #[derive(Args, Debug)]
 pub struct ResumeArgs {
@@ -65,7 +65,7 @@ pub struct ResumeArgs {
 
     /// Pin the resume target. Skips the interactive picker.
     #[arg(long, value_enum)]
-    pub harness: Option<HarnessArg>,
+    pub harness: Option<Harness>,
 
     /// Skip the cache entirely when fetching from Pathbase: don't read
     /// an existing entry, don't write the fetched body. Useful for
@@ -123,8 +123,7 @@ use toolpath::v1::{Graph, Path as TPath, PathOrRef};
 /// Read a path's source harness from `meta.source` (set by
 /// `toolpath-convo::derive_path` to the provider id), falling back to
 /// actor-string sniffing across the path's steps.
-pub(crate) fn infer_source_harness(path: &TPath) -> Option<crate::cmd_share::Harness> {
-    use crate::cmd_share::Harness;
+pub(crate) fn infer_source_harness(path: &TPath) -> Option<Harness> {
     let meta_source = path.meta.as_ref().and_then(|m| m.source.as_deref());
     if let Some(source) = meta_source {
         match source {
@@ -148,6 +147,9 @@ pub(crate) fn infer_source_harness(path: &TPath) -> Option<crate::cmd_share::Har
         }
         if actor.starts_with("agent:codex") {
             return Some(Harness::Codex);
+        }
+        if actor.starts_with("agent:copilot") {
+            return Some(Harness::Copilot);
         }
         if actor.starts_with("agent:opencode") {
             return Some(Harness::Opencode);
@@ -197,9 +199,7 @@ pub(crate) fn ensure_path_with_agent(g: &Graph) -> Result<&TPath> {
 /// Resolve the user-supplied `<input>` argument into a parsed `Graph`
 /// plus the source harness inferred from its single inline path (if
 /// any). See spec § "Input resolution" for the order.
-pub(crate) fn resolve_input(
-    args: &ResumeArgs,
-) -> Result<(Graph, Option<crate::cmd_share::Harness>)> {
+pub(crate) fn resolve_input(args: &ResumeArgs) -> Result<(Graph, Option<Harness>)> {
     let raw = args.input.as_str();
 
     enum Shape<'a> {
@@ -302,11 +302,7 @@ pub(crate) fn binary_on_path(name: &str, path_override: Option<&std::path::Path>
 /// explicitly from the IDE's command palette, but `open -a Cursor`
 /// (macOS) / `xdg-open` (Linux) always work. Treat cursor as available
 /// when either path is open.
-pub(crate) fn harness_available(
-    harness: crate::cmd_share::Harness,
-    path_override: Option<&std::path::Path>,
-) -> bool {
-    use crate::cmd_share::Harness;
+pub(crate) fn harness_available(harness: Harness, path_override: Option<&std::path::Path>) -> bool {
     if binary_on_path(harness.name(), path_override) {
         return true;
     }
@@ -323,16 +319,6 @@ pub(crate) fn harness_available(
     false
 }
 
-const ALL_HARNESSES: &[crate::cmd_share::Harness] = &[
-    crate::cmd_share::Harness::Claude,
-    crate::cmd_share::Harness::Gemini,
-    crate::cmd_share::Harness::Codex,
-    crate::cmd_share::Harness::Copilot,
-    crate::cmd_share::Harness::Opencode,
-    crate::cmd_share::Harness::Cursor,
-    crate::cmd_share::Harness::Pi,
-];
-
 /// Decide which harness to resume in.
 ///
 /// - If `arg` is `Some`, validate the named harness is on PATH and return it.
@@ -341,14 +327,11 @@ const ALL_HARNESSES: &[crate::cmd_share::Harness] = &[
 ///
 /// `path_override` is `None` in production; tests pass `Some(dir)` to fake `$PATH`.
 pub(crate) fn pick_harness(
-    arg: Option<HarnessArg>,
-    source: Option<crate::cmd_share::Harness>,
+    arg: Option<Harness>,
+    source: Option<Harness>,
     path_override: Option<&std::path::Path>,
-) -> Result<crate::cmd_share::Harness> {
-    use crate::cmd_share::Harness;
-
-    if let Some(a) = arg {
-        let h = Harness::from_arg(a);
+) -> Result<Harness> {
+    if let Some(h) = arg {
         if !harness_available(h, path_override) {
             anyhow::bail!(
                 "harness `{}` isn't on PATH; install it or pick another with `--harness`",
@@ -358,7 +341,7 @@ pub(crate) fn pick_harness(
         return Ok(h);
     }
 
-    let installed: Vec<Harness> = ALL_HARNESSES
+    let installed: Vec<Harness> = Harness::ALL
         .iter()
         .copied()
         .filter(|h| harness_available(*h, path_override))
@@ -373,10 +356,7 @@ pub(crate) fn pick_harness(
     interactive_pick(&installed, source)
 }
 
-fn interactive_pick(
-    installed: &[crate::cmd_share::Harness],
-    source: Option<crate::cmd_share::Harness>,
-) -> Result<crate::cmd_share::Harness> {
+fn interactive_pick(installed: &[Harness], source: Option<Harness>) -> Result<Harness> {
     if !crate::fuzzy::available() {
         let hint = if crate::fuzzy::embedded_picker_available() {
             "rerun in a terminal"
@@ -421,8 +401,7 @@ fn interactive_pick(
 
 /// Static map from harness to resume-argv shape. Lives here because
 /// it's a per-harness CLI convention, not a projection concern.
-pub(crate) fn argv_for(harness: crate::cmd_share::Harness, session_id: &str) -> Vec<String> {
-    use crate::cmd_share::Harness;
+pub(crate) fn argv_for(harness: Harness, session_id: &str) -> Vec<String> {
     match harness {
         Harness::Claude => vec!["-r".into(), session_id.into()],
         Harness::Gemini => vec!["--resume".into(), session_id.into()],
@@ -441,11 +420,10 @@ pub(crate) fn argv_for(harness: crate::cmd_share::Harness, session_id: &str) -> 
 }
 
 pub(crate) fn invocation_for(
-    harness: crate::cmd_share::Harness,
+    harness: Harness,
     session_id: &str,
     cwd: &std::path::Path,
 ) -> (String, Vec<String>) {
-    use crate::cmd_share::Harness;
     if harness == Harness::Cursor {
         return cursor_invocation(cwd);
     }
@@ -479,10 +457,9 @@ fn cursor_invocation(cwd: &std::path::Path) -> (String, Vec<String>) {
 /// returning the projected session id.
 pub(crate) fn project_into_harness(
     path: &TPath,
-    harness: crate::cmd_share::Harness,
+    harness: Harness,
     cwd: &std::path::Path,
 ) -> Result<String> {
-    use crate::cmd_share::Harness;
     match harness {
         Harness::Claude => crate::cmd_export::project_claude(path, cwd),
         Harness::Gemini => crate::cmd_export::project_gemini(path, cwd),
@@ -627,7 +604,7 @@ mod tests {
         let args = ResumeArgs {
             input: doc_file.to_string_lossy().to_string(),
             cwd: Some(cwd.path().to_path_buf()),
-            harness: Some(HarnessArg::Claude),
+            harness: Some(Harness::Claude),
             no_cache: false,
             force: false,
             url: None,
@@ -642,7 +619,6 @@ mod tests {
         assert_eq!(cap.cwd, std::fs::canonicalize(cwd.path()).unwrap());
     }
 
-    use crate::cmd_share::Harness;
     use toolpath::v1::{Graph, PathMeta, PathOrRef};
 
     fn make_step_with_actor(id: &str, actor: &str) -> toolpath::v1::Step {
@@ -923,10 +899,10 @@ mod tests {
     #[test]
     fn pick_harness_explicit_arg_validates_path() {
         let td = fake_path_with(&["claude"]);
-        let result = pick_harness(Some(HarnessArg::Claude), None, Some(td.path()));
+        let result = pick_harness(Some(Harness::Claude), None, Some(td.path()));
         assert_eq!(result.unwrap(), Harness::Claude);
 
-        let err = pick_harness(Some(HarnessArg::Gemini), None, Some(td.path())).unwrap_err();
+        let err = pick_harness(Some(Harness::Gemini), None, Some(td.path())).unwrap_err();
         assert!(err.to_string().contains("`gemini` isn't on PATH"));
     }
 
@@ -935,7 +911,7 @@ mod tests {
     fn cursor_available_via_open_fallback_on_macos() {
         let td = fake_path_with(&["open"]);
         assert!(harness_available(Harness::Cursor, Some(td.path())));
-        let picked = pick_harness(Some(HarnessArg::Cursor), None, Some(td.path()));
+        let picked = pick_harness(Some(Harness::Cursor), None, Some(td.path()));
         assert_eq!(picked.unwrap(), Harness::Cursor);
     }
 
