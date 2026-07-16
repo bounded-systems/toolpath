@@ -994,6 +994,38 @@ fn import_ingests_thinking_maximally() {
     );
 }
 
+#[test]
+fn import_after_query_sync_is_a_noop_not_an_error() {
+    let (home, _session_file) = claude_home_fixture();
+    let cfg = tempfile::tempdir().unwrap();
+    let project = home.path().join("proj");
+
+    // A bare query auto-syncs the session into the cache…
+    cmd()
+        .env("HOME", home.path())
+        .env("TOOLPATH_CONFIG_DIR", cfg.path())
+        .args(["query", "--source", "claude", "length"])
+        .assert()
+        .success();
+
+    // …and the documented explicit import must not die on the exists-check.
+    cmd()
+        .env("HOME", home.path())
+        .env("TOOLPATH_CONFIG_DIR", cfg.path())
+        .args([
+            "p",
+            "import",
+            "claude",
+            "--session",
+            "session-abc",
+            "--project",
+        ])
+        .arg(&project)
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("already up to date"));
+}
+
 #[cfg(unix)]
 #[test]
 fn bulk_import_skips_unreadable_sessions() {
