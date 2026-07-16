@@ -2,6 +2,94 @@
 
 All notable changes to the Toolpath workspace are documented here.
 
+## `path p cache sync` — incremental session ingestion — 2026-07-16
+
+Adds `path p cache sync [types…]`, the first step toward a cache that
+fills itself: it enumerates sessions across the installed agent
+harnesses and derives into the cache only what is new or changed since
+the last sync, so users no longer have to `p import` each session by
+hand.
+
+- **`path-cli`** (0.16.0):
+  - `path p cache sync
+    [claude|gemini|codex|opencode|cursor|pi|copilot|git]…` syncs the
+    named artifact types; with no arguments it syncs every harness.
+    Per-type summary on stderr (`claude   3 new, 1 updated, 240
+    unchanged`); on a default run, harnesses with no sessions stay
+    silent, explicit types always report. Derivation failures warn and
+    tally as `failed` without aborting the run.
+  - The provider-specific halves of sync live behind a per-provider
+    `ArtifactSource` trait (`sync/sources.rs`: enumerate / stamp /
+    derive, one impl per provider) with the engine
+    (`sync/engine.rs`) never matching on artifact type — a provider
+    change is a change to that provider's source, not to the engine.
+    Sources derive through the same provider managers as `p import`
+    (the `derive_*_session_with` helpers), so listing and derivation
+    always agree on provider roots.
+  - The sync manifest at `~/.toolpath/sync.json` maps artifact type →
+    artifact id → `{path?, cache_id?, modified?, size?, synced_at}`.
+    Change detection is stat-level — source mtime + size for the
+    file-backed providers, the DB row's updated-at for opencode/cursor
+    — so deciding "nothing changed" reads no session bodies and a
+    no-op sync is milliseconds. An all-`None` stamp can never vouch
+    for a record in the unchanged gate — unknowable freshness
+    re-derives. The manifest is written atomically (temp file +
+    rename, `0600`) and checkpointed every 10 writes with derives
+    running newest-first, so an interrupted first run keeps nearly
+    everything it derived — and spent its time on the sessions that
+    matter most. Pending work reports progress on stderr (live
+    `<type> done/total` on a TTY, a plain line every 25 items
+    otherwise; no-op syncs stay silent).
+  - Manifest writers are serialized by an advisory lock
+    (`sync.json.lock`) and every write is a locked read-merge-save —
+    sync checkpoints merge only the records the run wrote — so
+    concurrent invocations union their records instead of clobbering
+    each other.
+  - Sync owns refresh semantics: it overwrites cache entries it
+    re-derives (no `--force` needed), while manual `p import` keeps its
+    error-on-hit default. Sessions deleted upstream keep both their
+    cache document and their manifest record.
+  - The manifest is an artifact *index*, not just a cache inventory:
+    `cache_id` on a record is optional, and a record without one means
+    "known, not materialized". `p cache rm` downgrades records instead
+    of orphaning them (the next sync re-materializes the doc), and
+    sync verifies doc existence before skipping, so out-of-band
+    deletions self-heal too.
+  - `p import` and `share` record what they write: session derives
+    carry a provenance `ArtifactRef` (source stamped before the read,
+    in `DerivedDoc.provenance`), and the cache write upserts the
+    manifest — so sync never re-derives an artifact that import or
+    share just produced, and re-importing an artifact whose record is
+    still fresh is a friendly no-op instead of an exists-error.
+    `ArtifactType` gains `Git`: git imports are recorded (repo path +
+    `<repo-tag>-<graph-id>` id) but never re-derived by sync, since
+    repos aren't discoverable. Github and pathbase stay out of the
+    manifest — remote services, not artifact sources.
+  - Claude fingerprints cover the whole session chain. Claude Code
+    rotates to a new JSONL file on continuation (plan-mode exit,
+    resume, fork) while `list_conversations` keys the chain by its
+    *oldest* segment — appends land in the newest file, so statting
+    the head file would freeze the fingerprint at the first rotation
+    and sync would never see later turns. All three stamp sites
+    (enumeration, import provenance, the `share` fast path) share
+    `claude_chain_stamp`: max mtime across the chain's segments plus
+    the sum of their sizes — exactly the files `read_conversation`
+    merges, so the fingerprint and the derived doc move in lockstep
+    however rotation behavior shifts across Claude Code versions.
+    Import also normalizes its manifest key to the chain head, so
+    importing a successor-segment id records the artifact sync will
+    look for.
+  - `share` uploads straight from the cache when the picked session is
+    unchanged since its last sync (manifest stamp matches a fresh stat
+    and the doc exists) — re-deriving would reproduce the same bytes.
+    The freshness stat targets that one artifact directly, no sibling
+    enumeration; a grown session steps around the fast path and
+    derives as before.
+  - Copilot participates in sync like every other harness: an
+    `ArtifactType::Copilot` with stat-only enumeration over
+    `session-state/<id>/events.jsonl`, and per-session import loops
+    with provenance.
+
 ## One artifact-type layer and per-session imports — 2026-07-16
 
 Groundwork for a cache that fills itself: one enum for artifact

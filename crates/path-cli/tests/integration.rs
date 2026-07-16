@@ -686,6 +686,279 @@ fn claude_home_fixture() -> (tempfile::TempDir, PathBuf) {
 }
 
 #[test]
+fn cache_sync_ingests_reskips_and_updates() {
+    let (home, session_file) = claude_home_fixture();
+    let cfg = tempfile::tempdir().unwrap();
+    let sync = || {
+        let mut c = cmd();
+        c.env("HOME", home.path())
+            .env("TOOLPATH_CONFIG_DIR", cfg.path())
+            .args(["p", "cache", "sync", "claude"]);
+        c
+    };
+
+    // First run derives the session into the cache and records it.
+    sync()
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("1 new, 0 updated, 0 unchanged"));
+    let manifest: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(cfg.path().join("sync.json")).unwrap())
+            .unwrap();
+    let record = &manifest["claude"]["session-abc"];
+    let cache_id = record["cache_id"].as_str().unwrap();
+    assert!(
+        cfg.path()
+            .join(format!("documents/{cache_id}.json"))
+            .exists()
+    );
+
+    // Nothing changed: the second run derives nothing.
+    sync()
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("0 new, 0 updated, 1 unchanged"));
+
+    // The session grows a turn; the third run re-derives it.
+    let mut body = std::fs::read_to_string(&session_file).unwrap();
+    body.push_str(
+        r#"{"type":"user","uuid":"u-2","timestamp":"2024-01-01T00:05:00Z","cwd":"/x","message":{"role":"user","content":"more"}}"#,
+    );
+    body.push('\n');
+    std::fs::write(&session_file, body).unwrap();
+    sync()
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("0 new, 1 updated, 0 unchanged"));
+}
+
+#[test]
+fn cache_sync_default_run_with_no_sessions_reports_nothing() {
+    let home = tempfile::tempdir().unwrap();
+    let cfg = tempfile::tempdir().unwrap();
+    cmd()
+        .env("HOME", home.path())
+        // opencode resolves through $XDG_DATA_HOME before $HOME — drop it
+        // so the sandboxed run can't see the developer's real database.
+        .env_remove("XDG_DATA_HOME")
+        .env("TOOLPATH_CONFIG_DIR", cfg.path())
+        .args(["p", "cache", "sync"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("nothing to sync"));
+    assert!(!cfg.path().join("sync.json").exists());
+}
+
+#[test]
+fn import_records_manifest_so_sync_skips() {
+    let (home, _session_file) = claude_home_fixture();
+    let cfg = tempfile::tempdir().unwrap();
+    let project = home.path().join("proj");
+
+    cmd()
+        .env("HOME", home.path())
+        .env("TOOLPATH_CONFIG_DIR", cfg.path())
+        .args([
+            "p",
+            "import",
+            "claude",
+            "--session",
+            "session-abc",
+            "--project",
+        ])
+        .arg(&project)
+        .assert()
+        .success();
+
+    let manifest: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(cfg.path().join("sync.json")).unwrap())
+            .unwrap();
+    let record = &manifest["claude"]["session-abc"];
+    assert!(record["modified"].is_string(), "import must stamp mtime");
+    assert!(record["size"].is_u64(), "import must stamp size");
+
+    // Sync sees the import's record and derives nothing.
+    cmd()
+        .env("HOME", home.path())
+        .env("TOOLPATH_CONFIG_DIR", cfg.path())
+        .args(["p", "cache", "sync", "claude"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("0 new, 0 updated, 1 unchanged"));
+}
+
+#[test]
+fn bulk_import_records_every_session() {
+    let (home, session_file) = claude_home_fixture();
+    let cfg = tempfile::tempdir().unwrap();
+    let project = home.path().join("proj");
+    // A second session alongside the fixture's, so --all has a batch.
+    std::fs::write(
+        session_file.parent().unwrap().join("deadbeef-second.jsonl"),
+        format!(
+            r#"{{"type":"user","uuid":"u-9","timestamp":"2024-02-01T00:00:00Z","cwd":"{cwd}","message":{{"role":"user","content":"second"}}}}
+"#,
+            cwd = project.display()
+        ),
+    )
+    .unwrap();
+
+    cmd()
+        .env("HOME", home.path())
+        .env("TOOLPATH_CONFIG_DIR", cfg.path())
+        .args(["p", "import", "claude", "--all", "--project"])
+        .arg(&project)
+        .assert()
+        .success();
+
+    let manifest: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(cfg.path().join("sync.json")).unwrap())
+            .unwrap();
+    assert_eq!(
+        manifest["claude"].as_object().unwrap().len(),
+        2,
+        "--all must record every session it writes"
+    );
+
+    cmd()
+        .env("HOME", home.path())
+        .env("TOOLPATH_CONFIG_DIR", cfg.path())
+        .args(["p", "cache", "sync", "claude"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("0 new, 0 updated, 2 unchanged"));
+}
+
+#[test]
+fn git_import_lands_in_manifest_and_sync_leaves_it_alone() {
+    let (dir, branch) = git_fixture();
+    let cfg = tempfile::tempdir().unwrap();
+
+    cmd()
+        .env("TOOLPATH_CONFIG_DIR", cfg.path())
+        .args(["p", "import", "git", "--branch"])
+        .arg(&branch)
+        .arg("--repo")
+        .arg(dir.path())
+        .assert()
+        .success();
+
+    let manifest: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(cfg.path().join("sync.json")).unwrap())
+            .unwrap();
+    let git_records = manifest["git"].as_object().unwrap();
+    assert_eq!(git_records.len(), 1);
+    let record = git_records.values().next().unwrap();
+    assert!(
+        record["path"].is_string(),
+        "git records carry the repo path"
+    );
+
+    // Git artifacts are recorded, not discovered: sync reports zeros
+    // and must not fail or re-derive.
+    let home = tempfile::tempdir().unwrap();
+    cmd()
+        .env("HOME", home.path())
+        .env("TOOLPATH_CONFIG_DIR", cfg.path())
+        .args(["p", "cache", "sync", "git"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("0 new, 0 updated, 0 unchanged"));
+}
+
+#[test]
+fn share_records_manifest_so_sync_skips() {
+    let (port, server, _temp, project, home) = share_anon_fixture();
+    let cfg = tempfile::tempdir().unwrap();
+
+    cmd()
+        .env("HOME", &home)
+        .env("TOOLPATH_CONFIG_DIR", cfg.path())
+        .args([
+            "share",
+            "--harness",
+            "claude",
+            "--session",
+            "session-abc",
+            "--project",
+        ])
+        .arg(&project)
+        .args(["--anon", "--url"])
+        .arg(format!("http://127.0.0.1:{port}"))
+        .assert()
+        .success();
+    server.join().unwrap();
+
+    let manifest: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(cfg.path().join("sync.json")).unwrap())
+            .unwrap();
+    assert!(manifest["claude"]["session-abc"]["modified"].is_string());
+
+    cmd()
+        .env("HOME", &home)
+        .env("TOOLPATH_CONFIG_DIR", cfg.path())
+        .args(["p", "cache", "sync", "claude"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("0 new, 0 updated, 1 unchanged"));
+}
+
+#[test]
+fn share_uploads_cached_doc_when_source_unchanged() {
+    let (home, session_file) = claude_home_fixture();
+    let cfg = tempfile::tempdir().unwrap();
+    let project = home.path().join("proj");
+    let share = |port: u16| {
+        let mut c = cmd();
+        c.env("HOME", home.path())
+            .env("TOOLPATH_CONFIG_DIR", cfg.path())
+            .args([
+                "share",
+                "--harness",
+                "claude",
+                "--session",
+                "session-abc",
+                "--project",
+            ])
+            .arg(&project)
+            .args(["--anon", "--url"])
+            .arg(format!("http://127.0.0.1:{port}"));
+        c
+    };
+
+    // First share derives + records.
+    let (port, server) = one_shot_anon_server();
+    share(port)
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("uploading without re-deriving").not());
+    server.join().unwrap();
+
+    // Unchanged source: the second share must not re-derive.
+    let (port, server) = one_shot_anon_server();
+    share(port)
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("uploading without re-deriving"));
+    server.join().unwrap();
+
+    // The session grows: the fast path steps aside and share re-derives.
+    let mut body = std::fs::read_to_string(&session_file).unwrap();
+    body.push_str(
+        r#"{"type":"user","uuid":"u-2","timestamp":"2024-01-01T00:05:00Z","cwd":"/x","message":{"role":"user","content":"more"}}"#,
+    );
+    body.push('\n');
+    std::fs::write(&session_file, body).unwrap();
+    let (port, server) = one_shot_anon_server();
+    share(port)
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("uploading without re-deriving").not())
+        .stderr(predicate::str::contains("Cached claude session"));
+    server.join().unwrap();
+}
+
+#[test]
 fn import_ingests_thinking_maximally() {
     let (home, session_file) = claude_home_fixture();
     let cfg = tempfile::tempdir().unwrap();
@@ -742,6 +1015,17 @@ fn bulk_import_skips_unreadable_sessions() {
         .success()
         .stderr(predicate::str::contains("Warning: skipping session"))
         .stderr(predicate::str::contains("Imported"));
+}
+
+#[test]
+fn cache_sync_rejects_unknown_type() {
+    let cfg = tempfile::tempdir().unwrap();
+    cmd()
+        .env("TOOLPATH_CONFIG_DIR", cfg.path())
+        .args(["p", "cache", "sync", "frobnicate"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("invalid value"));
 }
 
 #[test]

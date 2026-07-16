@@ -23,12 +23,22 @@ pub enum CacheOp {
         /// Cache id (filename without `.json`)
         id: String,
     },
+    /// Ingest agent sessions into the cache, deriving only what is new
+    /// or changed since the last sync (tracked in `$CONFIG_DIR/sync.json`)
+    #[cfg(not(target_os = "emscripten"))]
+    Sync {
+        /// Artifact types to sync (default: every agent harness)
+        #[arg(value_enum)]
+        types: Vec<crate::sync::ArtifactType>,
+    },
 }
 
 pub fn run(op: CacheOp) -> Result<()> {
     match op {
         CacheOp::Ls => run_ls(),
         CacheOp::Rm { id } => run_rm(&id),
+        #[cfg(not(target_os = "emscripten"))]
+        CacheOp::Sync { types } => crate::sync::run(types),
     }
 }
 
@@ -46,6 +56,12 @@ fn run_ls() -> Result<()> {
 
 fn run_rm(id: &str) -> Result<()> {
     remove_cached(id)?;
+    // The artifact is still real — downgrade its manifest record to
+    // "known, not cached" so the next sync can re-materialize it.
+    #[cfg(not(target_os = "emscripten"))]
+    if let Err(e) = crate::sync::evict_cache_id(id) {
+        eprintln!("warning: sync manifest not updated: {e}");
+    }
     eprintln!("Removed {id}");
     Ok(())
 }
