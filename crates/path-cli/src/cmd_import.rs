@@ -14,14 +14,17 @@ use clap::Subcommand;
 use std::path::PathBuf;
 use toolpath::v1::Graph;
 
+#[cfg(not(target_os = "emscripten"))]
 use crate::artifact::ArtifactType;
-use crate::cache::{make_id, write_cached};
+#[cfg(not(target_os = "emscripten"))]
+use crate::cache::make_id;
+use crate::cache::write_cached;
 use crate::derive::{
-    doc_inner_id,
-    DerivedDoc, derive_claude_session_with, derive_codex_session_with,
-    derive_copilot_session_with, derive_cursor_session_with, derive_gemini_session_with,
-    derive_opencode_session_with, derive_pi_session_with,
+    DerivedDoc, derive_claude_session_with, derive_codex_session_with, derive_copilot_session_with,
+    derive_gemini_session_with, derive_pi_session_with,
 };
+#[cfg(not(target_os = "emscripten"))]
+use crate::derive::{derive_cursor_session_with, derive_opencode_session_with, doc_inner_id};
 
 #[derive(Subcommand, Debug)]
 pub enum ImportSource {
@@ -1496,7 +1499,10 @@ fn derive_pathbase(target: String, url_flag: Option<String>) -> Result<Vec<Deriv
 
     #[cfg(not(target_os = "emscripten"))]
     {
-        Ok(vec![crate::derive::pathbase_fetch_to_doc(&target, url_flag.as_deref())?])
+        Ok(vec![crate::derive::pathbase_fetch_to_doc(
+            &target,
+            url_flag.as_deref(),
+        )?])
     }
 }
 
@@ -1579,5 +1585,4 @@ mod tests {
             assert!(d.cache_id.starts_with("claude-"));
         }
     }
-
 }
