@@ -14,8 +14,8 @@ use clap::Subcommand;
 use std::path::PathBuf;
 use toolpath::v1::Graph;
 
-use crate::cmd_cache::{make_id, write_cached};
 use crate::artifact::ArtifactType;
+use crate::cmd_cache::{make_id, write_cached};
 
 #[derive(Subcommand, Debug)]
 pub enum ImportSource {
