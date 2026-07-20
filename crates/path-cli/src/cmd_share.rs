@@ -812,7 +812,7 @@ fn share_explicit(
         // the upload uses the fresh body, not the cache. Always
         // overwrite so cache and upload agree (use `--no-cache` to skip
         // the cache write entirely).
-        let path = crate::cmd_cache::write_cached(&derived.cache_id, &derived.doc, true)?;
+        let path = crate::cache::write_cached(&derived.cache_id, &derived.doc, true)?;
         eprintln!(
             "Cached {} session → {} ({})",
             harness.name(),
@@ -892,21 +892,21 @@ fn derive_session(
     harness: ArtifactType,
     project: Option<&str>,
     session: &str,
-) -> Result<crate::cmd_import::DerivedDoc> {
+) -> Result<crate::derive::DerivedDoc> {
     match harness {
         ArtifactType::Claude => {
-            crate::cmd_import::derive_claude_session(project.expect("path_keyed"), session)
+            crate::derive::derive_claude_session(project.expect("path_keyed"), session)
         }
         ArtifactType::Gemini => {
-            crate::cmd_import::derive_gemini_session(project.expect("path_keyed"), session)
+            crate::derive::derive_gemini_session(project.expect("path_keyed"), session)
         }
-        ArtifactType::Copilot => crate::cmd_import::derive_copilot_session(session),
+        ArtifactType::Copilot => crate::derive::derive_copilot_session(session),
         ArtifactType::Pi => {
-            crate::cmd_import::derive_pi_session(project.expect("path_keyed"), session, None)
+            crate::derive::derive_pi_session(project.expect("path_keyed"), session, None)
         }
-        ArtifactType::Codex => crate::cmd_import::derive_codex_session(session),
-        ArtifactType::Opencode => crate::cmd_import::derive_opencode_session(session, false),
-        ArtifactType::Cursor => crate::cmd_import::derive_cursor_session(session),
+        ArtifactType::Codex => crate::derive::derive_codex_session(session),
+        ArtifactType::Opencode => crate::derive::derive_opencode_session(session, false),
+        ArtifactType::Cursor => crate::derive::derive_cursor_session(session),
         ArtifactType::Git => {
             anyhow::bail!("share only handles agent sessions; git artifacts go through `p import`")
         }
