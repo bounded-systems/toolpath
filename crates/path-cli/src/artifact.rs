@@ -3,7 +3,7 @@
 
 /// The kind of artifact an operation ranges over. One enum, used
 /// everywhere a command names artifact sources (`share`/`resume`
-/// `--harness` via the [`Harness`](crate::cmd_share::Harness) layer,
+/// `--harness` via the [`Harness`](crate::harness::Harness) layer,
 /// import cache-id prefixes); `name()` doubles as the cache-id prefix.
 /// Github and pathbase are absent on purpose: they are remote
 /// services, not local artifact sources.
