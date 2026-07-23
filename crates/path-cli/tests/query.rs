@@ -562,7 +562,7 @@ fn query_syncs_its_scope_before_reading() {
         .success()
         .stdout(predicate::str::contains("true"))
         .stderr(predicate::str::contains("synced claude: 1 new"));
-    assert!(cfg.path().join("sync.json").exists());
+    assert!(cfg.path().join("manifest.json").exists());
 
     // Second run: nothing changed, so the sync is silent.
     fixture_query(&home, cfg.path(), ["--source", "claude", "length > 0"])
@@ -578,7 +578,7 @@ fn query_no_sync_reads_the_cache_as_is() {
     fixture_query(&home, cfg.path(), ["--no-sync", "length"])
         .success()
         .stdout(predicate::str::contains("0"));
-    assert!(!cfg.path().join("sync.json").exists());
+    assert!(!cfg.path().join("manifest.json").exists());
 }
 
 #[test]
@@ -598,5 +598,5 @@ fn input_only_query_never_touches_the_cache() {
         .assert()
         .success()
         .stdout(predicate::str::contains("true"));
-    assert!(!cfg.path().join("sync.json").exists());
+    assert!(!cfg.path().join("manifest.json").exists());
 }
