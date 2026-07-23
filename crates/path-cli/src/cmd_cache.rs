@@ -16,7 +16,7 @@ pub enum CacheOp {
         id: String,
     },
     /// Ingest agent sessions into the cache, deriving only what is new
-    /// or changed since the last sync (tracked in `$CONFIG_DIR/sync.json`)
+    /// or changed since the last sync (tracked in `$CONFIG_DIR/manifest.json`)
     #[cfg(not(target_os = "emscripten"))]
     Sync {
         /// Artifact types to sync (default: every agent harness)

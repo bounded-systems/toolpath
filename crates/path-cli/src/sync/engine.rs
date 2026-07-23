@@ -1,4 +1,4 @@
-//! The sync engine: the manifest at `$CONFIG_DIR/sync.json`, the
+//! The sync engine: the manifest at `$CONFIG_DIR/manifest.json`, the
 //! stat-gated ingestion loop, and the record surfaces `p import`,
 //! `share`, and `p cache rm` use to keep the manifest honest.
 
@@ -11,10 +11,15 @@ use std::path::PathBuf;
 use super::sources::{self, ArtifactSource};
 use crate::artifact::{ArtifactRef, ArtifactType};
 use crate::cache::write_cached;
-use crate::config::config_dir;
+use crate::config::{MANIFEST_FILE_NAME, MANIFEST_LOCK_FILE_NAME, config_dir};
 use crate::harness::HarnessBundle;
 
-const MANIFEST_FILE: &str = "sync.json";
+/// How many manifest writes accumulate before a mid-run checkpoint.
+/// Small enough that an interrupted first sync loses at most a few
+/// records (the cache docs themselves survive either way); large
+/// enough that manifest serialization stays noise against the
+/// derives it punctuates.
+const MANIFEST_CHECKPOINT_EVERY_WRITES: usize = 10;
 
 /// What the manifest remembers about one known artifact. A record
 /// with a `cache_id` is materialized in the cache; one without is
@@ -85,7 +90,7 @@ fn resolve_types(args: &[ArtifactType]) -> Vec<ArtifactType> {
 
 /// Sync the given artifact types from `bundle` into the cache,
 /// newest artifacts first. The manifest is checkpointed every few
-/// writes (see [`CHECKPOINT_EVERY`]), so an interrupted run keeps
+/// writes (see [`MANIFEST_CHECKPOINT_EVERY_WRITES`]), so an interrupted run keeps
 /// nearly everything it derived. Reads come from a point-in-time
 /// snapshot; each checkpoint merges only the records this run
 /// wrote, under the manifest lock, so concurrent invocations
@@ -115,13 +120,6 @@ pub(crate) fn sync_bundle(
     }
     Ok(out)
 }
-
-/// How many manifest writes accumulate before a mid-run checkpoint.
-/// Small enough that an interrupted first sync loses at most a few
-/// records (the cache docs themselves survive either way); large
-/// enough that manifest serialization stays noise against the
-/// derives it punctuates.
-const CHECKPOINT_EVERY: usize = 10;
 
 /// The stat gate: a materialized record whose real stamps match the
 /// artifact needs nothing — no read, no scope check. All-`None` stamps
@@ -166,7 +164,7 @@ fn flush_writes(pending: &mut BTreeMap<&'static str, BTreeMap<String, SyncRecord
 
 /// Sync one source's artifacts against a snapshot of its manifest
 /// records, newest first. Records are checkpointed to the manifest every
-/// [`CHECKPOINT_EVERY`] writes (and once more at the end), so an
+/// [`MANIFEST_CHECKPOINT_EVERY_WRITES`] writes (and once more at the end), so an
 /// interrupted run keeps nearly everything it derived. Derivation
 /// failures are warned and tallied, not fatal; cache-write failures
 /// (disk, permissions) abort.
@@ -249,7 +247,7 @@ fn sync_artifacts(
             }
         }
         progress.tick();
-        if unflushed >= CHECKPOINT_EVERY {
+        if unflushed >= MANIFEST_CHECKPOINT_EVERY_WRITES {
             flush_writes(&mut writes)?;
             unflushed = 0;
         }
@@ -424,7 +422,7 @@ pub(crate) fn evict_cache_id(cache_id: &str) -> Result<()> {
 // ── manifest IO ────────────────────────────────────────────────────
 
 fn manifest_path() -> Result<PathBuf> {
-    Ok(config_dir()?.join(MANIFEST_FILE))
+    Ok(config_dir()?.join(MANIFEST_FILE_NAME))
 }
 
 /// Take the exclusive advisory lock serializing manifest writers
@@ -435,7 +433,7 @@ fn lock_manifest() -> Result<std::fs::File> {
     let path = manifest_path()?;
     let dir = path.parent().expect("manifest path has a parent");
     std::fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
-    let lock_path = dir.join(format!("{MANIFEST_FILE}.lock"));
+    let lock_path = dir.join(MANIFEST_LOCK_FILE_NAME);
     let file = std::fs::File::create(&lock_path)
         .with_context(|| format!("create {}", lock_path.display()))?;
     #[cfg(unix)]
@@ -485,7 +483,7 @@ fn save_manifest(manifest: &Manifest) -> Result<()> {
         let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700));
     }
     let json = serde_json::to_string_pretty(manifest)?;
-    let tmp = dir.join(format!("{MANIFEST_FILE}.{}.tmp", std::process::id()));
+    let tmp = dir.join(format!("{MANIFEST_FILE_NAME}.{}.tmp", std::process::id()));
     std::fs::write(&tmp, json).with_context(|| format!("write {}", tmp.display()))?;
     #[cfg(unix)]
     {

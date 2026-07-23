@@ -26,7 +26,7 @@ hand.
     Sources derive through the same provider managers as `p import`
     (the `derive_*_session_with` helpers), so listing and derivation
     always agree on provider roots.
-  - The sync manifest at `~/.toolpath/sync.json` maps artifact type →
+  - The sync manifest at `~/.toolpath/manifest.json` maps artifact type →
     artifact id → `{path?, cache_id?, modified?, size?, synced_at}`.
     Change detection is stat-level — source mtime + size for the
     file-backed providers, the DB row's updated-at for opencode/cursor
@@ -41,7 +41,7 @@ hand.
     `<type> done/total` on a TTY, a plain line every 25 items
     otherwise; no-op syncs stay silent).
   - Manifest writers are serialized by an advisory lock
-    (`sync.json.lock`) and every write is a locked read-merge-save —
+    (`manifest.json.lock`) and every write is a locked read-merge-save —
     sync checkpoints merge only the records the run wrote — so
     concurrent invocations union their records instead of clobbering
     each other.
