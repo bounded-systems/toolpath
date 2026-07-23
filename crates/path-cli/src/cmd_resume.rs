@@ -44,10 +44,7 @@ use anyhow::{Context, Result};
 use clap::Args;
 use std::path::PathBuf;
 
-/// Re-exported so external callers (integration tests, future consumers)
-/// can construct [`ResumeArgs`] without depending on the private
-/// `cmd_share` module directly.
-pub use crate::harness::Harness;
+use crate::harness::Harness;
 
 #[derive(Args, Debug)]
 pub struct ResumeArgs {
@@ -222,11 +219,12 @@ pub(crate) fn resolve_input(args: &ResumeArgs) -> Result<(Graph, Option<Harness>
     let graph: Graph = match shape {
         Shape::PathbaseUrl(u) | Shape::PathbaseShorthand(u) => {
             // Probe the local cache before going to the network. The cache
-            // id is purely a function of (owner, repo, slug), so we can
-            // compute it without fetching. `--force` skips the probe and
-            // re-fetches; `--no-cache` skips both the probe AND the post-
-            // fetch write (still useful for ephemeral environments).
-            let cache_id = crate::derive::pathbase_cache_id_of(u, args.url.as_deref())?;
+            // id is purely a function of the parsed (owner, repo, id), so
+            // we can compute it without fetching. `--force` skips the probe
+            // and re-fetches; `--no-cache` skips both the probe AND the
+            // post-fetch write (still useful for ephemeral environments).
+            let (_, ref_) = crate::derive::parse_pathbase_ref(u, args.url.as_deref())?;
+            let cache_id = crate::cache::pathbase_cache_id(&ref_.owner, &ref_.repo, &ref_.id);
             if !args.force
                 && !args.no_cache
                 && let Ok(cache_path) = crate::cache::cache_path(&cache_id)
@@ -368,7 +366,7 @@ fn interactive_pick(installed: &[Harness], source: Option<Harness>) -> Result<Ha
     let mut lines: Vec<String> = Vec::with_capacity(installed.len());
     for h in installed {
         let suffix = if Some(*h) == source { "  (source)" } else { "" };
-        lines.push(format!("{}{}", h.symbol(), suffix));
+        lines.push(format!("{}{}", h.padded_name(), suffix));
     }
 
     let header = match source {
@@ -391,8 +389,9 @@ fn interactive_pick(installed: &[Harness], source: Option<Harness>) -> Result<Ha
         }
     };
 
+    let picked_name = selected.split_whitespace().next().unwrap_or_default();
     for h in installed {
-        if selected.starts_with(h.symbol()) {
+        if picked_name == h.name() {
             return Ok(*h);
         }
     }

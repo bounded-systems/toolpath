@@ -10,9 +10,7 @@
 use anyhow::{Result, anyhow};
 use chrono::{DateTime, Utc};
 
-use crate::artifact::{
-    ArtifactRef, ArtifactType, claude_chain_stamp, codex_artifact_id, stat_stamp,
-};
+use crate::artifact::{ArtifactRef, ArtifactType, claude_chain_stamp, stat_stamp};
 use crate::derive::{self, DerivedDoc};
 use crate::harness::{
     HarnessBundle, is_not_found_claude, is_not_found_codex, is_not_found_cursor,
@@ -197,7 +195,7 @@ impl ArtifactSource for CodexSource<'_> {
             let Some(stem) = file.file_stem().and_then(|s| s.to_str()) else {
                 continue;
             };
-            let id = codex_artifact_id(stem).to_string();
+            let id = toolpath_codex::session_id_from_stem(stem).to_string();
             let (modified, size) = stat_stamp(&file);
             out.push(ArtifactRef {
                 artifact_type: ArtifactType::Codex,

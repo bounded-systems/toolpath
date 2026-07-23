@@ -14,7 +14,6 @@ use clap::Subcommand;
 use std::path::PathBuf;
 use toolpath::v1::Graph;
 
-use crate::artifact::codex_artifact_id;
 #[cfg(not(target_os = "emscripten"))]
 use crate::artifact::{ArtifactRef, ArtifactType};
 #[cfg(not(target_os = "emscripten"))]
@@ -815,19 +814,14 @@ fn derive_codex(session: Option<String>, all: bool) -> Result<Vec<DerivedDoc>> {
     let session_ids: Vec<String> = match (session, all) {
         (Some(s), _) => vec![s],
         (None, true) => {
-            let files = manager
-                .io()
-                .list_rollout_files()
+            let ids = manager
+                .list_session_ids()
                 .map_err(|e| anyhow::anyhow!("{}", e))?;
-            if files.is_empty() {
+            if ids.is_empty() {
                 anyhow::bail!("No Codex sessions found in ~/.codex/sessions");
             }
-            let mut docs = Vec::with_capacity(files.len());
-            for file in &files {
-                let Some(stem) = file.file_stem().and_then(|s| s.to_str()) else {
-                    continue;
-                };
-                let id = codex_artifact_id(stem);
+            let mut docs = Vec::with_capacity(ids.len());
+            for id in &ids {
                 match derive_codex_session_with(&manager, id) {
                     Ok(doc) => docs.push(doc),
                     Err(e) => eprintln!("Warning: skipping session {id}: {e}"),
@@ -1049,7 +1043,10 @@ fn derive_opencode(
                 }
                 let mut out = Vec::with_capacity(metas.len());
                 for m in &metas {
-                    out.push(derive_one(&m.id)?);
+                    match derive_one(&m.id) {
+                        Ok(doc) => out.push(doc),
+                        Err(e) => eprintln!("Warning: skipping session {}: {e}", m.id),
+                    }
                 }
                 return Ok(out);
             }
@@ -1173,7 +1170,10 @@ fn derive_cursor(
                 }
                 let mut out = Vec::with_capacity(filtered.len());
                 for m in &filtered {
-                    out.push(derive_one(&m.id)?);
+                    match derive_one(&m.id) {
+                        Ok(doc) => out.push(doc),
+                        Err(e) => eprintln!("Warning: skipping session {}: {e}", m.id),
+                    }
                 }
                 return Ok(out);
             }

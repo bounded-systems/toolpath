@@ -8,9 +8,7 @@ use anyhow::Result;
 use std::path::PathBuf;
 use toolpath::v1::Graph;
 
-use crate::artifact::{
-    ArtifactRef, ArtifactType, claude_chain_stamp, codex_artifact_id, stat_stamp,
-};
+use crate::artifact::{ArtifactRef, ArtifactType, claude_chain_stamp, stat_stamp};
 use crate::cache::make_id;
 
 pub(crate) struct DerivedDoc {
@@ -156,7 +154,7 @@ pub(crate) fn derive_codex_session_with(
         .as_deref()
         .and_then(|f| f.file_stem())
         .and_then(|stem| stem.to_str())
-        .map(|stem| codex_artifact_id(stem).to_string())
+        .map(|stem| toolpath_codex::session_id_from_stem(stem).to_string())
         .unwrap_or_else(|| session.to_string());
     let config = toolpath_codex::derive::DeriveConfig { project_path: None };
     let s = manager
@@ -354,16 +352,6 @@ pub(crate) fn derive_pi_session_with(
     })
 }
 
-/// Compute the local cache id a Pathbase ref would land at, without
-/// hitting the network. Lets `path resume` probe the cache before
-/// deciding whether to fetch.
-#[cfg(not(target_os = "emscripten"))]
-pub(crate) fn pathbase_cache_id_of(target: &str, url_flag: Option<&str>) -> Result<String> {
-    let (_base, ref_) = parse_pathbase_ref(target, url_flag)?;
-    let PathRef { owner, repo, id } = ref_;
-    Ok(make_id("pathbase", &format!("{owner}-{repo}-{id}")))
-}
-
 /// Fetch a Pathbase ref (`https://host/u/owner/repos/repo/graphs/<uuid>`
 /// URL or bare `owner/repo/<uuid>` triple) and parse it as a toolpath
 /// document. Used by `path import pathbase` and `path resume <url>`.
@@ -381,7 +369,7 @@ pub(crate) fn pathbase_fetch_to_doc(target: &str, url_flag: Option<&str>) -> Res
 
     let PathRef { owner, repo, id } = ref_;
     let body = graphs_download(&base_url, token, &owner, &repo, &id)?;
-    let cache_id = make_id("pathbase", &format!("{owner}-{repo}-{id}"));
+    let cache_id = crate::cache::pathbase_cache_id(&owner, &repo, &id);
     let doc = Graph::from_json(&body)
         .map_err(|e| anyhow::anyhow!("server returned a non-toolpath document: {e}"))?;
     Ok(DerivedDoc {
@@ -396,10 +384,10 @@ pub(crate) fn pathbase_fetch_to_doc(target: &str, url_flag: Option<&str>) -> Res
 /// `parse_pathbase_ref` rejects non-UUID trailing segments.
 #[cfg(not(target_os = "emscripten"))]
 #[derive(Debug, PartialEq)]
-struct PathRef {
-    owner: String,
-    repo: String,
-    id: String,
+pub(crate) struct PathRef {
+    pub(crate) owner: String,
+    pub(crate) repo: String,
+    pub(crate) id: String,
 }
 
 /// Parse a positional ref for `path import pathbase`. Returns `(override_base, ref)`.
@@ -412,7 +400,10 @@ struct PathRef {
 /// - `<owner>/<repo>/<uuid>` — bare triple, used with `--url` or the
 ///   stored session.
 #[cfg(not(target_os = "emscripten"))]
-fn parse_pathbase_ref(target: &str, url_flag: Option<&str>) -> Result<(Option<String>, PathRef)> {
+pub(crate) fn parse_pathbase_ref(
+    target: &str,
+    url_flag: Option<&str>,
+) -> Result<(Option<String>, PathRef)> {
     use crate::cmd_pathbase::resolve_url;
 
     let scheme = if target.starts_with("https://") {

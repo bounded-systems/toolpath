@@ -186,8 +186,8 @@ fn sync_artifacts(
     let mut progress = Progress::start(
         artifacts
             .first()
-            .map(|a| a.artifact_type.symbol())
-            .unwrap_or(""),
+            .map(|a| a.artifact_type.padded_name())
+            .unwrap_or_default(),
         pending_total,
     );
     let mut writes: BTreeMap<&'static str, BTreeMap<String, SyncRecord>> = BTreeMap::new();
@@ -264,14 +264,14 @@ fn sync_artifacts(
 /// artifacts needing work count toward the total — a no-op sync
 /// draws nothing.
 struct Progress {
-    label: &'static str,
+    label: String,
     total: usize,
     done: usize,
     tty: bool,
 }
 
 impl Progress {
-    fn start(label: &'static str, total: usize) -> Self {
+    fn start(label: String, total: usize) -> Self {
         use std::io::IsTerminal;
         let progress = Self {
             label,
@@ -325,7 +325,7 @@ fn render_summary(outcomes: &[(ArtifactType, SyncOutcome)], explicit: bool) -> S
         }
         s.push_str(&format!(
             "{} {} new, {} updated, {} unchanged",
-            artifact_type.symbol(),
+            artifact_type.padded_name(),
             o.new,
             o.updated,
             o.unchanged
@@ -995,7 +995,7 @@ mod tests {
     #[test]
     fn progress_line_counts_only_pending_work() {
         let mut progress = Progress {
-            label: "claude  ",
+            label: crate::artifact::ArtifactType::Claude.padded_name(),
             total: 3,
             done: 0,
             tty: false,

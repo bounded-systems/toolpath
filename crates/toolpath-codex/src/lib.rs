@@ -9,7 +9,7 @@ pub mod types;
 
 pub use error::{ConvoError, Result};
 pub use io::ConvoIO;
-pub use paths::PathResolver;
+pub use paths::{PathResolver, session_id_from_stem};
 pub use reader::RolloutReader;
 pub use types::{
     BaseInstructions, ContentPart, CustomToolCall, CustomToolCallOutput, EventMsg, ExecCommandEnd,

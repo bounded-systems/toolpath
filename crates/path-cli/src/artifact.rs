@@ -52,19 +52,15 @@ impl ArtifactType {
         }
     }
 
-    /// Padded so all symbols line up in the fzf column. Longest is
-    /// "opencode" (8); pad shorter names to match.
-    pub(crate) fn symbol(&self) -> &'static str {
-        match self {
-            ArtifactType::Claude => "claude  ",
-            ArtifactType::Gemini => "gemini  ",
-            ArtifactType::Codex => "codex   ",
-            ArtifactType::Opencode => "opencode",
-            ArtifactType::Cursor => "cursor  ",
-            ArtifactType::Pi => "pi      ",
-            ArtifactType::Copilot => "copilot ",
-            ArtifactType::Git => "git     ",
-        }
+    /// Width of the provider-name column in picker rows: the length of
+    /// the longest `name()` ("opencode"). A test asserts they stay in
+    /// sync.
+    pub(crate) const NAME_COLUMN_WIDTH: usize = 8;
+
+    /// `name()` left-justified to [`Self::NAME_COLUMN_WIDTH`], so the
+    /// text after it starts at the same column on every picker row.
+    pub(crate) fn padded_name(&self) -> String {
+        format!("{:<width$}", self.name(), width = Self::NAME_COLUMN_WIDTH)
     }
 
     /// True when the underlying provider keys artifacts by a filesystem
@@ -153,29 +149,28 @@ pub(crate) fn claude_chain_stamp(
     (modified, size)
 }
 
-/// The trailing UUID of a codex rollout filename stem
-/// (`rollout-<timestamp>-<uuid>`), or the whole stem when it doesn't end
-/// in one. Codex's `read_session` resolves either form.
-pub(crate) fn codex_artifact_id(stem: &str) -> &str {
-    stem.len()
-        .checked_sub(36)
-        .and_then(|at| stem.get(at..))
-        .filter(|tail| tail.bytes().filter(|&b| b == b'-').count() == 4)
-        .unwrap_or(stem)
-}
-
 #[cfg(test)]
 mod type_tests {
     use super::ArtifactType;
 
     #[test]
-    fn names_and_symbols_are_distinct() {
+    fn names_are_distinct() {
         let names: std::collections::HashSet<&str> =
             ArtifactType::ALL.iter().map(|t| t.name()).collect();
-        let symbols: std::collections::HashSet<&str> =
-            ArtifactType::ALL.iter().map(|t| t.symbol()).collect();
         assert_eq!(names.len(), ArtifactType::ALL.len());
-        assert_eq!(symbols.len(), ArtifactType::ALL.len());
+    }
+
+    #[test]
+    fn name_column_width_is_the_longest_name() {
+        let longest = ArtifactType::ALL
+            .iter()
+            .map(|t| t.name().len())
+            .max()
+            .unwrap();
+        assert_eq!(ArtifactType::NAME_COLUMN_WIDTH, longest);
+        for t in ArtifactType::ALL {
+            assert_eq!(t.padded_name().len(), ArtifactType::NAME_COLUMN_WIDTH);
+        }
     }
 
     #[test]

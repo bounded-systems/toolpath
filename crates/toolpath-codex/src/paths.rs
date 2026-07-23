@@ -98,9 +98,14 @@ impl PathResolver {
     ///
     /// Accepts:
     /// - A full filename stem: `rollout-2026-04-20T12-43-30-019dabc6-8fef-7681-a054-b5bb75fcb97d`
+    ///   (resolved without walking the tree — the stem's date names its
+    ///   `YYYY/MM/DD` bucket)
     /// - A bare session UUID (suffix match): `019dabc6-8fef-7681-a054-b5bb75fcb97d`
     /// - A short UUID prefix: `019dabc6` (resolves if unique)
     pub fn find_rollout_file(&self, session_id: &str) -> Result<PathBuf> {
+        if let Some(direct) = self.rollout_file_for_stem(session_id)? {
+            return Ok(direct);
+        }
         let all = self.list_rollout_files()?;
         // Exact filename stem match first.
         for p in &all {
@@ -130,6 +135,79 @@ impl PathResolver {
             ))),
         }
     }
+
+    /// Direct lookup for a full filename stem: `rollout-<YYYY-MM-DD>T…`
+    /// lives at `sessions/YYYY/MM/DD/<stem>.jsonl`. `None` when the id
+    /// isn't stem-shaped or the file isn't at its dated path (the caller
+    /// falls back to the tree walk).
+    fn rollout_file_for_stem(&self, session_id: &str) -> Result<Option<PathBuf>> {
+        let Some(date) = session_id.strip_prefix("rollout-").and_then(|r| r.get(..10)) else {
+            return Ok(None);
+        };
+        let parts: Vec<&str> = date.split('-').collect();
+        let [y, m, d] = parts.as_slice() else {
+            return Ok(None);
+        };
+        if y.len() != 4 || m.len() != 2 || d.len() != 2 {
+            return Ok(None);
+        }
+        let candidate = self
+            .sessions_root()?
+            .join(y)
+            .join(m)
+            .join(d)
+            .join(format!("{session_id}.jsonl"));
+        Ok(candidate.is_file().then_some(candidate))
+    }
+}
+
+/// The session id embedded in a rollout filename stem
+/// (`rollout-<timestamp>-<uuid>`): the trailing UUID when present,
+/// otherwise the whole stem. This is the same fallback identity the
+/// reader assigns a session whose file has no `session_meta` line, so
+/// ids derived from filenames agree with `Session.id` — and either
+/// form resolves through [`PathResolver::find_rollout_file`].
+pub fn session_id_from_stem(stem: &str) -> &str {
+    match find_uuid_start(stem) {
+        Some(at) => &stem[at..],
+        None => stem,
+    }
+}
+
+/// Position of the first 36-char run matching a UUID shape
+/// (8-4-4-4-12 hex groups) in the stem.
+fn find_uuid_start(stem: &str) -> Option<usize> {
+    let mut idx = 0usize;
+    let bytes = stem.as_bytes();
+    while idx + 36 <= bytes.len() {
+        if is_uuid_shape(&stem[idx..idx + 36]) {
+            return Some(idx);
+        }
+        idx += 1;
+    }
+    None
+}
+
+fn is_uuid_shape(s: &str) -> bool {
+    let b = s.as_bytes();
+    if b.len() != 36 {
+        return false;
+    }
+    for (i, c) in b.iter().enumerate() {
+        match i {
+            8 | 13 | 18 | 23 => {
+                if *c != b'-' {
+                    return false;
+                }
+            }
+            _ => {
+                if !c.is_ascii_hexdigit() {
+                    return false;
+                }
+            }
+        }
+    }
+    true
 }
 
 /// Recursively collect `rollout-*.jsonl` files under `root`.
@@ -265,6 +343,41 @@ mod tests {
         .unwrap();
         let p = r.find_rollout_file("019dabc6-unique").unwrap();
         assert!(p.exists());
+    }
+
+    #[test]
+    fn is_uuid_shape_accepts_v7() {
+        assert!(is_uuid_shape("019dabc6-8fef-7681-a054-b5bb75fcb97d"));
+        assert!(!is_uuid_shape("019dabc6-8fef-7681-a054-b5bb75fcb97")); // too short
+        assert!(!is_uuid_shape("zzz"));
+    }
+
+    #[test]
+    fn session_id_from_stem_extracts_uuid_or_passes_through() {
+        assert_eq!(
+            session_id_from_stem(
+                "rollout-2026-04-20T12-43-30-019dabc6-8fef-7681-a054-b5bb75fcb97d"
+            ),
+            "019dabc6-8fef-7681-a054-b5bb75fcb97d"
+        );
+        assert_eq!(
+            session_id_from_stem("rollout-2026-04-20T10-00-00-abc-xyz"),
+            "rollout-2026-04-20T10-00-00-abc-xyz"
+        );
+        assert_eq!(session_id_from_stem("not-a-rollout"), "not-a-rollout");
+    }
+
+    /// A stem whose date doesn't match the directory it sits in misses
+    /// the direct dated-path lookup and must still resolve via the walk.
+    #[test]
+    fn find_rollout_stem_in_mismatched_date_dir_falls_back_to_walk() {
+        let (_t, r) = setup();
+        let day = r.sessions_root().unwrap().join("2026/04/21");
+        fs::create_dir_all(&day).unwrap();
+        let stem = "rollout-2026-04-20T10-00-00-abc-xyz";
+        fs::write(day.join(format!("{}.jsonl", stem)), "{}").unwrap();
+        let p = r.find_rollout_file(stem).unwrap();
+        assert_eq!(p.file_stem().unwrap(), stem);
     }
 
     #[test]

@@ -98,6 +98,12 @@ hand.
     and `--no-sync` opts out. This is the piece that makes the cache
     an implementation detail: a new user can run `path query` with no
     setup and get their sessions.
+- **`toolpath-codex`** (0.6.1, extends the bump below):
+  `session_id_from_stem` is public — the trailing UUID of a rollout
+  filename stem (or the whole stem when it has none), the same
+  extraction the reader uses for `Session.id`'s filename fallback.
+  Codex sync enumeration and import provenance stamp ids through it
+  instead of a CLI-side copy of the filename convention.
 
 ## One artifact-type layer and per-session imports — 2026-07-16
 
@@ -152,6 +158,12 @@ session-fingerprint APIs in the provider crates.
   rotations without reading bodies. It rides the same cached chain
   index as `list_conversations`, so calling it after a listing costs
   no extra IO.
+- **`toolpath-codex`** (0.6.1): new `list_session_ids` on
+  `CodexConvo`/`ConvoIO` lists session ids (rollout filename stems)
+  from a single directory walk with no file reads, and
+  `find_rollout_file` resolves a full stem directly through its
+  `YYYY/MM/DD` bucket instead of walking the tree. Together these make
+  enumerate-then-read (`p import codex --all`) one parse per file.
 
 ## Derive: resolve duplicate step ids — 2026-07-01
 
