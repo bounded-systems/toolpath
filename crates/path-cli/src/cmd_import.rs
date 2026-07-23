@@ -779,17 +779,17 @@ fn derive_codex(session: Option<String>, all: bool) -> Result<Vec<DerivedDoc>> {
     let session_ids: Vec<String> = match (session, all) {
         (Some(s), _) => vec![s],
         (None, true) => {
-            let metas = manager
-                .list_sessions()
+            let ids = manager
+                .list_session_ids()
                 .map_err(|e| anyhow::anyhow!("{}", e))?;
-            if metas.is_empty() {
+            if ids.is_empty() {
                 anyhow::bail!("No Codex sessions found in ~/.codex/sessions");
             }
-            let mut docs = Vec::with_capacity(metas.len());
-            for m in &metas {
-                match derive_codex_session_with(&manager, &m.id) {
+            let mut docs = Vec::with_capacity(ids.len());
+            for id in &ids {
+                match derive_codex_session_with(&manager, id) {
                     Ok(doc) => docs.push(doc),
-                    Err(e) => eprintln!("Warning: skipping session {}: {e}", m.id),
+                    Err(e) => eprintln!("Warning: skipping session {id}: {e}"),
                 }
             }
             return Ok(docs);
