@@ -14,7 +14,6 @@ use clap::Subcommand;
 use std::path::PathBuf;
 use toolpath::v1::Graph;
 
-use crate::artifact::codex_artifact_id;
 #[cfg(not(target_os = "emscripten"))]
 use crate::artifact::{ArtifactRef, ArtifactType};
 #[cfg(not(target_os = "emscripten"))]

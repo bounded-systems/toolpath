@@ -89,6 +89,12 @@ hand.
     `ArtifactType::Copilot` with stat-only enumeration over
     `session-state/<id>/events.jsonl`, and per-session import loops
     with provenance.
+- **`toolpath-codex`** (0.6.1, extends the bump below):
+  `session_id_from_stem` is public — the trailing UUID of a rollout
+  filename stem (or the whole stem when it has none), the same
+  extraction the reader uses for `Session.id`'s filename fallback.
+  Codex sync enumeration and import provenance stamp ids through it
+  instead of a CLI-side copy of the filename convention.
 
 ## One artifact-type layer and per-session imports — 2026-07-16
 

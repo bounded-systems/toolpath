@@ -149,17 +149,6 @@ pub(crate) fn claude_chain_stamp(
     (modified, size)
 }
 
-/// The trailing UUID of a codex rollout filename stem
-/// (`rollout-<timestamp>-<uuid>`), or the whole stem when it doesn't end
-/// in one. Codex's `read_session` resolves either form.
-pub(crate) fn codex_artifact_id(stem: &str) -> &str {
-    stem.len()
-        .checked_sub(36)
-        .and_then(|at| stem.get(at..))
-        .filter(|tail| tail.bytes().filter(|&b| b == b'-').count() == 4)
-        .unwrap_or(stem)
-}
-
 #[cfg(test)]
 mod type_tests {
     use super::ArtifactType;

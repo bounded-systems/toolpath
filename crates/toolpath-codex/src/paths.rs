@@ -161,6 +161,55 @@ impl PathResolver {
     }
 }
 
+/// The session id embedded in a rollout filename stem
+/// (`rollout-<timestamp>-<uuid>`): the trailing UUID when present,
+/// otherwise the whole stem. This is the same fallback identity the
+/// reader assigns a session whose file has no `session_meta` line, so
+/// ids derived from filenames agree with `Session.id` — and either
+/// form resolves through [`PathResolver::find_rollout_file`].
+pub fn session_id_from_stem(stem: &str) -> &str {
+    match find_uuid_start(stem) {
+        Some(at) => &stem[at..],
+        None => stem,
+    }
+}
+
+/// Position of the first 36-char run matching a UUID shape
+/// (8-4-4-4-12 hex groups) in the stem.
+fn find_uuid_start(stem: &str) -> Option<usize> {
+    let mut idx = 0usize;
+    let bytes = stem.as_bytes();
+    while idx + 36 <= bytes.len() {
+        if is_uuid_shape(&stem[idx..idx + 36]) {
+            return Some(idx);
+        }
+        idx += 1;
+    }
+    None
+}
+
+fn is_uuid_shape(s: &str) -> bool {
+    let b = s.as_bytes();
+    if b.len() != 36 {
+        return false;
+    }
+    for (i, c) in b.iter().enumerate() {
+        match i {
+            8 | 13 | 18 | 23 => {
+                if *c != b'-' {
+                    return false;
+                }
+            }
+            _ => {
+                if !c.is_ascii_hexdigit() {
+                    return false;
+                }
+            }
+        }
+    }
+    true
+}
+
 /// Recursively collect `rollout-*.jsonl` files under `root`.
 fn walk_for_rollouts(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
     for entry in fs::read_dir(dir)?.flatten() {
@@ -294,6 +343,28 @@ mod tests {
         .unwrap();
         let p = r.find_rollout_file("019dabc6-unique").unwrap();
         assert!(p.exists());
+    }
+
+    #[test]
+    fn is_uuid_shape_accepts_v7() {
+        assert!(is_uuid_shape("019dabc6-8fef-7681-a054-b5bb75fcb97d"));
+        assert!(!is_uuid_shape("019dabc6-8fef-7681-a054-b5bb75fcb97")); // too short
+        assert!(!is_uuid_shape("zzz"));
+    }
+
+    #[test]
+    fn session_id_from_stem_extracts_uuid_or_passes_through() {
+        assert_eq!(
+            session_id_from_stem(
+                "rollout-2026-04-20T12-43-30-019dabc6-8fef-7681-a054-b5bb75fcb97d"
+            ),
+            "019dabc6-8fef-7681-a054-b5bb75fcb97d"
+        );
+        assert_eq!(
+            session_id_from_stem("rollout-2026-04-20T10-00-00-abc-xyz"),
+            "rollout-2026-04-20T10-00-00-abc-xyz"
+        );
+        assert_eq!(session_id_from_stem("not-a-rollout"), "not-a-rollout");
     }
 
     /// A stem whose date doesn't match the directory it sits in misses

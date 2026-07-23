@@ -8,9 +8,7 @@ use anyhow::Result;
 use std::path::PathBuf;
 use toolpath::v1::Graph;
 
-use crate::artifact::{
-    ArtifactRef, ArtifactType, claude_chain_stamp, codex_artifact_id, stat_stamp,
-};
+use crate::artifact::{ArtifactRef, ArtifactType, claude_chain_stamp, stat_stamp};
 use crate::cache::make_id;
 
 pub(crate) struct DerivedDoc {
@@ -156,7 +154,7 @@ pub(crate) fn derive_codex_session_with(
         .as_deref()
         .and_then(|f| f.file_stem())
         .and_then(|stem| stem.to_str())
-        .map(|stem| codex_artifact_id(stem).to_string())
+        .map(|stem| toolpath_codex::session_id_from_stem(stem).to_string())
         .unwrap_or_else(|| session.to_string());
     let config = toolpath_codex::derive::DeriveConfig { project_path: None };
     let s = manager
