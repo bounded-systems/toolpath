@@ -53,8 +53,8 @@ impl Harness {
         self.artifact_type().name()
     }
 
-    pub(crate) fn symbol(&self) -> &'static str {
-        self.artifact_type().symbol()
+    pub(crate) fn padded_name(&self) -> String {
+        self.artifact_type().padded_name()
     }
 }
 

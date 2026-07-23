@@ -20,8 +20,8 @@ use crate::artifact::ArtifactType;
 use crate::cache::make_id;
 use crate::cache::write_cached;
 use crate::derive::{
-    DerivedDoc, derive_claude_session_with, derive_codex_session_with, derive_copilot_session_with,
-    derive_gemini_session_with, derive_pi_session_with,
+    DerivedDoc, derive_claude_session_with, derive_codex_session_file, derive_codex_session_with,
+    derive_copilot_session_with, derive_gemini_session_with, derive_pi_session_with,
 };
 #[cfg(not(target_os = "emscripten"))]
 use crate::derive::{derive_cursor_session_with, derive_opencode_session_with, doc_inner_id};
@@ -224,17 +224,6 @@ fn emit(docs: &[DerivedDoc], force: bool, no_cache: bool, pretty: bool) -> Resul
         }
     }
     Ok(())
-}
-
-/// The trailing UUID of a codex rollout filename stem
-/// (`rollout-<timestamp>-<uuid>`), or the whole stem when it doesn't end
-/// in one. Codex's `read_session` resolves either form.
-fn codex_artifact_id(stem: &str) -> &str {
-    stem.len()
-        .checked_sub(36)
-        .and_then(|at| stem.get(at..))
-        .filter(|tail| tail.bytes().filter(|&b| b == b'-').count() == 4)
-        .unwrap_or(stem)
 }
 
 fn doc_summary(doc: &Graph) -> String {
@@ -799,13 +788,9 @@ fn derive_codex(session: Option<String>, all: bool) -> Result<Vec<DerivedDoc>> {
             }
             let mut docs = Vec::with_capacity(files.len());
             for file in &files {
-                let Some(stem) = file.file_stem().and_then(|s| s.to_str()) else {
-                    continue;
-                };
-                let id = codex_artifact_id(stem);
-                match derive_codex_session_with(&manager, id) {
+                match derive_codex_session_file(&manager, file) {
                     Ok(doc) => docs.push(doc),
-                    Err(e) => eprintln!("Warning: skipping session {id}: {e}"),
+                    Err(e) => eprintln!("Warning: skipping {}: {e}", file.display()),
                 }
             }
             return Ok(docs);
