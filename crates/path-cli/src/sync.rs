@@ -3,7 +3,7 @@
 //!
 //! Sync enumerates artifacts across the requested types (today all six
 //! are agent-session providers), compares each against the sync
-//! manifest at `$CONFIG_DIR/sync.json`, and derives + caches only what
+//! manifest at `$CONFIG_DIR/manifest.json`, and derives + caches only what
 //! is new or changed. Change detection is stat-level: the fingerprint
 //! is the source file's mtime + size (or the database row's updated-at
 //! for the SQLite-backed providers), so deciding "nothing changed"

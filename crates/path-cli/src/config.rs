@@ -11,6 +11,13 @@ use std::path::PathBuf;
 pub(crate) const CONFIG_DIR_NAME: &str = ".toolpath";
 pub(crate) const CONFIG_DIR_ENV: &str = "TOOLPATH_CONFIG_DIR";
 
+/// The artifact manifest under the config dir (see `sync::engine`).
+pub(crate) const MANIFEST_FILE_NAME: &str = "manifest.json";
+/// Sibling advisory lock serializing manifest writers. A separate
+/// file because the manifest itself is replaced by rename on every
+/// write, which would drop any lock held on it.
+pub(crate) const MANIFEST_LOCK_FILE_NAME: &str = "manifest.json.lock";
+
 /// The configured toolpath config directory (default `~/.toolpath`,
 /// overridable via `$TOOLPATH_CONFIG_DIR`).
 pub(crate) fn config_dir() -> Result<PathBuf> {

@@ -703,7 +703,7 @@ fn cache_sync_ingests_reskips_and_updates() {
         .success()
         .stderr(predicate::str::contains("1 new, 0 updated, 0 unchanged"));
     let manifest: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(cfg.path().join("sync.json")).unwrap())
+        serde_json::from_str(&std::fs::read_to_string(cfg.path().join("manifest.json")).unwrap())
             .unwrap();
     let record = &manifest["claude"]["session-abc"];
     let cache_id = record["cache_id"].as_str().unwrap();
@@ -746,7 +746,7 @@ fn cache_sync_default_run_with_no_sessions_reports_nothing() {
         .assert()
         .success()
         .stderr(predicate::str::contains("nothing to sync"));
-    assert!(!cfg.path().join("sync.json").exists());
+    assert!(!cfg.path().join("manifest.json").exists());
 }
 
 #[test]
@@ -771,7 +771,7 @@ fn import_records_manifest_so_sync_skips() {
         .success();
 
     let manifest: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(cfg.path().join("sync.json")).unwrap())
+        serde_json::from_str(&std::fs::read_to_string(cfg.path().join("manifest.json")).unwrap())
             .unwrap();
     let record = &manifest["claude"]["session-abc"];
     assert!(record["modified"].is_string(), "import must stamp mtime");
@@ -812,7 +812,7 @@ fn bulk_import_records_every_session() {
         .success();
 
     let manifest: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(cfg.path().join("sync.json")).unwrap())
+        serde_json::from_str(&std::fs::read_to_string(cfg.path().join("manifest.json")).unwrap())
             .unwrap();
     assert_eq!(
         manifest["claude"].as_object().unwrap().len(),
@@ -844,7 +844,7 @@ fn git_import_lands_in_manifest_and_sync_leaves_it_alone() {
         .success();
 
     let manifest: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(cfg.path().join("sync.json")).unwrap())
+        serde_json::from_str(&std::fs::read_to_string(cfg.path().join("manifest.json")).unwrap())
             .unwrap();
     let git_records = manifest["git"].as_object().unwrap();
     assert_eq!(git_records.len(), 1);
@@ -890,7 +890,7 @@ fn share_records_manifest_so_sync_skips() {
     server.join().unwrap();
 
     let manifest: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(cfg.path().join("sync.json")).unwrap())
+        serde_json::from_str(&std::fs::read_to_string(cfg.path().join("manifest.json")).unwrap())
             .unwrap();
     assert!(manifest["claude"]["session-abc"]["modified"].is_string());
 
