@@ -20,8 +20,8 @@ use crate::artifact::ArtifactType;
 use crate::cache::make_id;
 use crate::cache::write_cached;
 use crate::derive::{
-    DerivedDoc, derive_claude_session_with, derive_codex_session_file, derive_codex_session_with,
-    derive_copilot_session_with, derive_gemini_session_with, derive_pi_session_with,
+    DerivedDoc, derive_claude_session_with, derive_codex_session_with, derive_copilot_session_with,
+    derive_gemini_session_with, derive_pi_session_with,
 };
 #[cfg(not(target_os = "emscripten"))]
 use crate::derive::{derive_cursor_session_with, derive_opencode_session_with, doc_inner_id};
@@ -779,18 +779,17 @@ fn derive_codex(session: Option<String>, all: bool) -> Result<Vec<DerivedDoc>> {
     let session_ids: Vec<String> = match (session, all) {
         (Some(s), _) => vec![s],
         (None, true) => {
-            let files = manager
-                .io()
-                .list_rollout_files()
+            let metas = manager
+                .list_sessions()
                 .map_err(|e| anyhow::anyhow!("{}", e))?;
-            if files.is_empty() {
+            if metas.is_empty() {
                 anyhow::bail!("No Codex sessions found in ~/.codex/sessions");
             }
-            let mut docs = Vec::with_capacity(files.len());
-            for file in &files {
-                match derive_codex_session_file(&manager, file) {
+            let mut docs = Vec::with_capacity(metas.len());
+            for m in &metas {
+                match derive_codex_session_with(&manager, &m.id) {
                     Ok(doc) => docs.push(doc),
-                    Err(e) => eprintln!("Warning: skipping {}: {e}", file.display()),
+                    Err(e) => eprintln!("Warning: skipping session {}: {e}", m.id),
                 }
             }
             return Ok(docs);
@@ -1009,7 +1008,10 @@ fn derive_opencode(
                 }
                 let mut out = Vec::with_capacity(metas.len());
                 for m in &metas {
-                    out.push(derive_one(&m.id)?);
+                    match derive_one(&m.id) {
+                        Ok(doc) => out.push(doc),
+                        Err(e) => eprintln!("Warning: skipping session {}: {e}", m.id),
+                    }
                 }
                 return Ok(out);
             }
@@ -1133,7 +1135,10 @@ fn derive_cursor(
                 }
                 let mut out = Vec::with_capacity(filtered.len());
                 for m in &filtered {
-                    out.push(derive_one(&m.id)?);
+                    match derive_one(&m.id) {
+                        Ok(doc) => out.push(doc),
+                        Err(e) => eprintln!("Warning: skipping session {}: {e}", m.id),
+                    }
                 }
                 return Ok(out);
             }

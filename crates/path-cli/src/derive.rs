@@ -97,35 +97,16 @@ pub(crate) fn derive_codex_session_with(
     manager: &toolpath_codex::CodexConvo,
     session: &str,
 ) -> Result<DerivedDoc> {
+    let config = toolpath_codex::derive::DeriveConfig { project_path: None };
     let s = manager
         .read_session(session)
         .map_err(|e| anyhow::anyhow!("{}", e))?;
-    Ok(codex_doc(&s))
-}
-
-/// [`derive_codex_session`] for an already-located rollout file. Used by
-/// `p import codex --all`, which enumerates the files itself — reading
-/// by path skips resolving each session id back to the file it came
-/// from.
-pub(crate) fn derive_codex_session_file(
-    manager: &toolpath_codex::CodexConvo,
-    file: &std::path::Path,
-) -> Result<DerivedDoc> {
-    let s = manager
-        .io()
-        .read_session_path(file)
-        .map_err(|e| anyhow::anyhow!("{}", e))?;
-    Ok(codex_doc(&s))
-}
-
-fn codex_doc(s: &toolpath_codex::Session) -> DerivedDoc {
-    let config = toolpath_codex::derive::DeriveConfig { project_path: None };
-    let path = toolpath_codex::derive::derive_path(s, &config);
+    let path = toolpath_codex::derive::derive_path(&s, &config);
     let cache_id = make_id(ArtifactType::Codex.name(), &path.path.id);
-    DerivedDoc {
+    Ok(DerivedDoc {
         cache_id,
         doc: Graph::from_path(path),
-    }
+    })
 }
 
 /// Derive a single Copilot session given an explicit session id.
