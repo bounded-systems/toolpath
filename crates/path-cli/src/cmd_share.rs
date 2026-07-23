@@ -882,7 +882,7 @@ fn format_picker_row(row: &ArtifactRow) -> String {
         .or_else(|| row.cwd.clone())
         .unwrap_or_default();
     let scope = if row.matches_cwd { "·" } else { " " };
-    let leading = format!("{scope} {}", row.artifact_type.symbol());
+    let leading = format!("{scope} {}", row.artifact_type.padded_name());
     let display = render_row(
         Some(&leading),
         row.last_activity,

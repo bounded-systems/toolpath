@@ -11,8 +11,8 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
-use path_cli::cmd_resume::Harness;
 use path_cli::cmd_resume::ResumeArgs;
+use path_cli::harness::Harness;
 
 /// Process-wide lock for tests that mutate `$HOME`, `$PATH`, or
 /// `$TOOLPATH_CONFIG_DIR`. Integration tests under `tests/resume.rs`

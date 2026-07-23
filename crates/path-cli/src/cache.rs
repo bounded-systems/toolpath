@@ -165,6 +165,13 @@ pub(crate) fn make_id(source: &str, inner: &str) -> String {
     format!("{source}-{safe}")
 }
 
+/// The cache id a Pathbase download lands at:
+/// `pathbase-<owner>-<repo>-<uuid>`.
+#[cfg(not(target_os = "emscripten"))]
+pub(crate) fn pathbase_cache_id(owner: &str, repo: &str, id: &str) -> String {
+    make_id("pathbase", &format!("{owner}-{repo}-{id}"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

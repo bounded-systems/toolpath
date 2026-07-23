@@ -8,8 +8,8 @@
 
 #![cfg(not(target_os = "emscripten"))]
 
-use path_cli::cmd_resume::Harness;
 use path_cli::cmd_resume::{RecordingExec, ResumeArgs, run_with_strategy};
+use path_cli::harness::Harness;
 
 mod support;
 use support::*;

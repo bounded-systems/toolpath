@@ -143,6 +143,12 @@ session-fingerprint APIs in the provider crates.
   rotations without reading bodies. It rides the same cached chain
   index as `list_conversations`, so calling it after a listing costs
   no extra IO.
+- **`toolpath-codex`** (0.6.1): new `list_session_ids` on
+  `CodexConvo`/`ConvoIO` lists session ids (rollout filename stems)
+  from a single directory walk with no file reads, and
+  `find_rollout_file` resolves a full stem directly through its
+  `YYYY/MM/DD` bucket instead of walking the tree. Together these make
+  enumerate-then-read (`p import codex --all`) one parse per file.
 
 ## Derive: resolve duplicate step ids — 2026-07-01
 
