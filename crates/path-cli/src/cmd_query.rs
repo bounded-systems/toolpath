@@ -123,7 +123,7 @@ fn sync_query_scope(args: &QueryArgs) {
         return;
     }
     let bundle = crate::harness::HarnessBundle::from_environment();
-    match crate::sync::sync_bundle(&bundle, &types) {
+    match crate::sync::sync_bundle(&bundle, &types, &mut ()) {
         Ok(outcomes) => {
             for (t, o) in outcomes {
                 if o.new + o.updated + o.failed > 0 {
