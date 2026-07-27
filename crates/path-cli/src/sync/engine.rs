@@ -60,33 +60,26 @@ pub(crate) struct SyncOutcome {
 }
 
 impl SyncOutcome {
-    fn total(&self) -> usize {
+    pub(crate) fn total(&self) -> usize {
         self.new + self.updated + self.unchanged + self.failed
     }
 }
 
-pub(crate) fn run(types: Vec<ArtifactType>) -> Result<()> {
-    let explicit = !types.is_empty();
-    let types = resolve_types(&types);
-    let bundle = HarnessBundle::from_environment();
-    let outcomes = sync_bundle(&bundle, &types)?;
-    eprint!("{}", render_summary(&outcomes, explicit));
-    Ok(())
+/// How the engine reports progress; rendering is the caller's
+/// concern. `p cache sync` draws a live stderr line, callers that
+/// sync logically with no UI pass `&mut ()`. Per artifact type:
+/// one `begin` once the stat pass has sized the pending work, one
+/// `failed` per derive error (before its `tick`), one `tick` per
+/// finished derive, one `end` when the type's loop is done.
+pub(crate) trait SyncObserver {
+    fn begin(&mut self, _artifact_type: ArtifactType, _pending: usize) {}
+    fn tick(&mut self) {}
+    fn failed(&mut self, _artifact: &ArtifactRef, _error: &anyhow::Error) {}
+    fn end(&mut self) {}
 }
 
-/// Explicit args → dedup'd type list; no args → every type.
-fn resolve_types(args: &[ArtifactType]) -> Vec<ArtifactType> {
-    if args.is_empty() {
-        return ArtifactType::ALL.to_vec();
-    }
-    let mut out: Vec<ArtifactType> = Vec::with_capacity(args.len());
-    for &t in args {
-        if !out.contains(&t) {
-            out.push(t);
-        }
-    }
-    out
-}
+/// The no-UI observer: a sync that draws nothing.
+impl SyncObserver for () {}
 
 /// Sync the given artifact types from `bundle` into the cache,
 /// newest artifacts first. The manifest is checkpointed every few
@@ -99,6 +92,7 @@ fn resolve_types(args: &[ArtifactType]) -> Vec<ArtifactType> {
 pub(crate) fn sync_bundle(
     bundle: &HarnessBundle,
     types: &[ArtifactType],
+    observer: &mut dyn SyncObserver,
 ) -> Result<Vec<(ArtifactType, SyncOutcome)>> {
     let manifest = load_manifest()?;
     let mut out = Vec::with_capacity(types.len());
@@ -115,7 +109,13 @@ pub(crate) fn sync_bundle(
             .get(artifact_type.name())
             .cloned()
             .unwrap_or_default();
-        let outcome = sync_artifacts(source.as_ref(), &artifacts, &records)?;
+        let outcome = sync_artifacts(
+            source.as_ref(),
+            artifact_type,
+            &artifacts,
+            &records,
+            observer,
+        )?;
         out.push((artifact_type, outcome));
     }
     Ok(out)
@@ -170,8 +170,10 @@ fn flush_writes(pending: &mut BTreeMap<&'static str, BTreeMap<String, SyncRecord
 /// (disk, permissions) abort.
 fn sync_artifacts(
     source: &dyn ArtifactSource,
+    artifact_type: ArtifactType,
     artifacts: &[ArtifactRef],
     records: &BTreeMap<String, SyncRecord>,
+    observer: &mut dyn SyncObserver,
 ) -> Result<SyncOutcome> {
     let mut outcome = SyncOutcome::default();
     // Evaluate the stat gate once per artifact: the pass feeds both the
@@ -181,13 +183,7 @@ fn sync_artifacts(
         .map(|artifact| (artifact, is_unchanged(records.get(&artifact.id), artifact)))
         .collect();
     let pending_total = order.iter().filter(|(_, unchanged)| !unchanged).count();
-    let mut progress = Progress::start(
-        artifacts
-            .first()
-            .map(|a| a.artifact_type.padded_name())
-            .unwrap_or_default(),
-        pending_total,
-    );
+    observer.begin(artifact_type, pending_total);
     let mut writes: BTreeMap<&'static str, BTreeMap<String, SyncRecord>> = BTreeMap::new();
     let mut unflushed = 0usize;
     for (artifact, unchanged) in order {
@@ -237,106 +233,19 @@ fn sync_artifacts(
                 }
             }
             Err(e) => {
-                progress.interrupt();
-                eprintln!(
-                    "warning: sync {}: {}: {e}",
-                    artifact.artifact_type.name(),
-                    artifact.id
-                );
+                observer.failed(artifact, &e);
                 outcome.failed += 1;
             }
         }
-        progress.tick();
+        observer.tick();
         if unflushed >= MANIFEST_CHECKPOINT_EVERY_WRITES {
             flush_writes(&mut writes)?;
             unflushed = 0;
         }
     }
     flush_writes(&mut writes)?;
-    progress.interrupt();
+    observer.end();
     Ok(outcome)
-}
-
-/// Live sync progress on stderr: a `\r`-updating `<type> done/total`
-/// line on a terminal, a plain line every 25 items otherwise. Only
-/// artifacts needing work count toward the total — a no-op sync
-/// draws nothing.
-struct Progress {
-    label: String,
-    total: usize,
-    done: usize,
-    tty: bool,
-}
-
-impl Progress {
-    fn start(label: String, total: usize) -> Self {
-        use std::io::IsTerminal;
-        let progress = Self {
-            label,
-            total,
-            done: 0,
-            tty: std::io::stderr().is_terminal(),
-        };
-        progress.draw();
-        progress
-    }
-
-    fn line(&self) -> String {
-        format!("{} {}/{}", self.label, self.done, self.total)
-    }
-
-    fn draw(&self) {
-        if self.total > 0 && self.tty {
-            eprint!("\r{}", self.line());
-        }
-    }
-
-    fn tick(&mut self) {
-        if self.total == 0 {
-            return;
-        }
-        self.done += 1;
-        if self.tty {
-            self.draw();
-        } else if self.done.is_multiple_of(25) {
-            eprintln!("{}", self.line());
-        }
-    }
-
-    /// Clear the live line so a warning or summary prints clean;
-    /// the next `tick` redraws in full.
-    fn interrupt(&self) {
-        if self.total > 0 && self.tty {
-            eprint!("\r\x1b[2K");
-        }
-    }
-}
-
-/// One stderr line per artifact type. Types the user didn't name
-/// are shown only when they had artifacts, so a default run doesn't
-/// list every uninstalled provider.
-fn render_summary(outcomes: &[(ArtifactType, SyncOutcome)], explicit: bool) -> String {
-    let mut s = String::new();
-    for (artifact_type, o) in outcomes {
-        if o.total() == 0 && !explicit {
-            continue;
-        }
-        s.push_str(&format!(
-            "{} {} new, {} updated, {} unchanged",
-            artifact_type.padded_name(),
-            o.new,
-            o.updated,
-            o.unchanged
-        ));
-        if o.failed > 0 {
-            s.push_str(&format!(", {} failed", o.failed));
-        }
-        s.push('\n');
-    }
-    if s.is_empty() {
-        s.push_str("nothing to sync\n");
-    }
-    s
 }
 
 /// Record an externally-derived cache write (`p import`, `share`) in
@@ -632,7 +541,7 @@ mod tests {
             write_claude_session(home, "-test-project", "sess-bbb", "Fix a bug");
             let bundle = claude_bundle(home);
 
-            let outcomes = sync_bundle(&bundle, &[ArtifactType::Claude]).unwrap();
+            let outcomes = sync_bundle(&bundle, &[ArtifactType::Claude], &mut ()).unwrap();
             assert_eq!(outcomes.len(), 1);
             let (_, first) = outcomes[0];
             assert_eq!(
@@ -656,7 +565,7 @@ mod tests {
                 "cache doc must exist for {cache_id}"
             );
 
-            let (_, second) = sync_bundle(&bundle, &[ArtifactType::Claude]).unwrap()[0];
+            let (_, second) = sync_bundle(&bundle, &[ArtifactType::Claude], &mut ()).unwrap()[0];
             assert_eq!(
                 (second.new, second.updated, second.unchanged, second.failed),
                 (0, 0, 2, 0)
@@ -669,7 +578,7 @@ mod tests {
         with_cfg(|home| {
             write_claude_session(home, "-test-project", "sess-aaa", "Add a feature");
             let bundle = claude_bundle(home);
-            sync_bundle(&bundle, &[ArtifactType::Claude]).unwrap();
+            sync_bundle(&bundle, &[ArtifactType::Claude], &mut ()).unwrap();
 
             let cache_id = load_manifest().unwrap()["claude"]["sess-aaa"]
                 .cache_id
@@ -687,7 +596,7 @@ mod tests {
             body.push('\n');
             std::fs::write(&file, body).unwrap();
 
-            let (_, outcome) = sync_bundle(&bundle, &[ArtifactType::Claude]).unwrap()[0];
+            let (_, outcome) = sync_bundle(&bundle, &[ArtifactType::Claude], &mut ()).unwrap()[0];
             assert_eq!(
                 (
                     outcome.new,
@@ -710,7 +619,7 @@ mod tests {
             write_claude_session(home, "-test-project", "sess-aaa", "Add a feature");
             let bundle = claude_bundle(home);
 
-            let outcomes = sync_bundle(&bundle, &[ArtifactType::Codex]).unwrap();
+            let outcomes = sync_bundle(&bundle, &[ArtifactType::Codex], &mut ()).unwrap();
             assert_eq!(outcomes[0].1, SyncOutcome::default());
             assert!(
                 load_manifest().unwrap().is_empty(),
@@ -724,13 +633,13 @@ mod tests {
         with_cfg(|home| {
             write_claude_session(home, "-test-project", "sess-aaa", "Add a feature");
             let bundle = claude_bundle(home);
-            sync_bundle(&bundle, &[ArtifactType::Claude]).unwrap();
+            sync_bundle(&bundle, &[ArtifactType::Claude], &mut ()).unwrap();
 
             // Losing the manifest (or a prior manual `p import`) leaves a
             // cache entry sync doesn't know about; re-syncing must
             // overwrite it, not die on the exists-check.
             std::fs::remove_file(manifest_path().unwrap()).unwrap();
-            let (_, outcome) = sync_bundle(&bundle, &[ArtifactType::Claude]).unwrap()[0];
+            let (_, outcome) = sync_bundle(&bundle, &[ArtifactType::Claude], &mut ()).unwrap()[0];
             assert_eq!((outcome.new, outcome.failed), (1, 0));
         });
     }
@@ -744,7 +653,14 @@ mod tests {
             let mut artifacts = source.enumerate();
             artifacts.push(make_ref(ArtifactType::Claude, "does-not-exist"));
 
-            let outcome = sync_artifacts(source.as_ref(), &artifacts, &BTreeMap::new()).unwrap();
+            let outcome = sync_artifacts(
+                source.as_ref(),
+                ArtifactType::Claude,
+                &artifacts,
+                &BTreeMap::new(),
+                &mut (),
+            )
+            .unwrap();
             assert_eq!((outcome.new, outcome.failed), (1, 1));
             let records = &load_manifest().unwrap()["claude"];
             assert!(records.contains_key("sess-aaa"));
@@ -760,7 +676,7 @@ mod tests {
         with_cfg(|home| {
             write_claude_session(home, "-test-project", "sess-aaa", "Add a feature");
             let bundle = claude_bundle(home);
-            sync_bundle(&bundle, &[ArtifactType::Claude]).unwrap();
+            sync_bundle(&bundle, &[ArtifactType::Claude], &mut ()).unwrap();
             let cache_id = load_manifest().unwrap()["claude"]["sess-aaa"]
                 .cache_id
                 .clone()
@@ -781,7 +697,7 @@ mod tests {
             )
             .unwrap();
 
-            let (_, outcome) = sync_bundle(&bundle, &[ArtifactType::Claude]).unwrap()[0];
+            let (_, outcome) = sync_bundle(&bundle, &[ArtifactType::Claude], &mut ()).unwrap()[0];
             assert_eq!(
                 (outcome.new, outcome.updated, outcome.unchanged),
                 (0, 1, 0),
@@ -798,7 +714,7 @@ mod tests {
             );
 
             // And the grown chain settles: a third sync is a no-op.
-            let (_, again) = sync_bundle(&bundle, &[ArtifactType::Claude]).unwrap()[0];
+            let (_, again) = sync_bundle(&bundle, &[ArtifactType::Claude], &mut ()).unwrap()[0];
             assert_eq!((again.updated, again.unchanged), (0, 1));
         });
     }
@@ -808,7 +724,7 @@ mod tests {
         with_cfg(|home| {
             write_claude_session(home, "-test-project", "sess-aaa", "Add a feature");
             let bundle = claude_bundle(home);
-            sync_bundle(&bundle, &[ArtifactType::Claude]).unwrap();
+            sync_bundle(&bundle, &[ArtifactType::Claude], &mut ()).unwrap();
 
             // A record whose stamps are all None (stat failed when it
             // was written) must not match a stub whose stat also
@@ -819,7 +735,14 @@ mod tests {
             rec.size = None;
             let artifact = make_ref(ArtifactType::Claude, "sess-aaa");
             let source = sources::source_for(&bundle, ArtifactType::Claude).unwrap();
-            let outcome = sync_artifacts(source.as_ref(), &[artifact], &records).unwrap();
+            let outcome = sync_artifacts(
+                source.as_ref(),
+                ArtifactType::Claude,
+                &[artifact],
+                &records,
+                &mut (),
+            )
+            .unwrap();
             assert_eq!((outcome.updated, outcome.unchanged), (1, 0));
         });
     }
@@ -845,7 +768,7 @@ mod tests {
             record_artifact(artifact, &derived.cache_id).unwrap();
 
             // The import's stamp must match sync's own enumeration.
-            let (_, outcome) = sync_bundle(&bundle, &[ArtifactType::Claude]).unwrap()[0];
+            let (_, outcome) = sync_bundle(&bundle, &[ArtifactType::Claude], &mut ()).unwrap()[0];
             assert_eq!(
                 (
                     outcome.new,
@@ -863,7 +786,7 @@ mod tests {
         with_cfg(|home| {
             write_claude_session(home, "-test-project", "sess-aaa", "Add a feature");
             let bundle = claude_bundle(home);
-            sync_bundle(&bundle, &[ArtifactType::Claude]).unwrap();
+            sync_bundle(&bundle, &[ArtifactType::Claude], &mut ()).unwrap();
             let cache_id = load_manifest().unwrap()["claude"]["sess-aaa"]
                 .cache_id
                 .clone()
@@ -878,7 +801,7 @@ mod tests {
                     .is_none()
             );
 
-            let (_, outcome) = sync_bundle(&bundle, &[ArtifactType::Claude]).unwrap()[0];
+            let (_, outcome) = sync_bundle(&bundle, &[ArtifactType::Claude], &mut ()).unwrap()[0];
             assert_eq!((outcome.new, outcome.updated), (0, 1));
             assert!(
                 crate::cache::cache_path(&cache_id).unwrap().exists(),
@@ -892,7 +815,7 @@ mod tests {
         with_cfg(|home| {
             write_claude_session(home, "-test-project", "sess-aaa", "Add a feature");
             let bundle = claude_bundle(home);
-            sync_bundle(&bundle, &[ArtifactType::Claude]).unwrap();
+            sync_bundle(&bundle, &[ArtifactType::Claude], &mut ()).unwrap();
             let cache_id = load_manifest().unwrap()["claude"]["sess-aaa"]
                 .cache_id
                 .clone()
@@ -902,7 +825,7 @@ mod tests {
             // materialization, but sync verifies the doc exists.
             let doc = crate::cache::cache_path(&cache_id).unwrap();
             std::fs::remove_file(&doc).unwrap();
-            let (_, outcome) = sync_bundle(&bundle, &[ArtifactType::Claude]).unwrap()[0];
+            let (_, outcome) = sync_bundle(&bundle, &[ArtifactType::Claude], &mut ()).unwrap()[0];
             assert_eq!((outcome.new, outcome.updated), (0, 1));
             assert!(doc.exists());
         });
@@ -925,7 +848,7 @@ mod tests {
                 .is_none()
             );
 
-            sync_bundle(&bundle, &[ArtifactType::Claude]).unwrap();
+            sync_bundle(&bundle, &[ArtifactType::Claude], &mut ()).unwrap();
             let cache_id = fresh_cache_id(
                 &bundle,
                 ArtifactType::Claude,
@@ -951,7 +874,7 @@ mod tests {
                 )
                 .is_none()
             );
-            sync_bundle(&bundle, &[ArtifactType::Claude]).unwrap();
+            sync_bundle(&bundle, &[ArtifactType::Claude], &mut ()).unwrap();
             assert!(
                 fresh_cache_id(
                     &bundle,
@@ -988,70 +911,5 @@ mod tests {
         let stubs = vec![old, unstamped, new];
         let ids: Vec<&str> = newest_first(&stubs).iter().map(|s| s.id.as_str()).collect();
         assert_eq!(ids, vec!["new", "old", "unstamped"]);
-    }
-
-    #[test]
-    fn progress_line_counts_only_pending_work() {
-        let mut progress = Progress {
-            label: crate::artifact::ArtifactType::Claude.padded_name(),
-            total: 3,
-            done: 0,
-            tty: false,
-        };
-        progress.tick();
-        progress.tick();
-        assert_eq!(progress.line(), "claude   2/3");
-    }
-
-    #[test]
-    fn resolve_types_defaults_to_all_and_dedups() {
-        assert_eq!(resolve_types(&[]), ArtifactType::ALL.to_vec());
-        assert_eq!(
-            resolve_types(&[
-                ArtifactType::Codex,
-                ArtifactType::Claude,
-                ArtifactType::Codex
-            ]),
-            vec![ArtifactType::Codex, ArtifactType::Claude]
-        );
-    }
-
-    #[test]
-    fn render_summary_hides_empty_types_unless_explicit() {
-        let outcomes = vec![
-            (
-                ArtifactType::Claude,
-                SyncOutcome {
-                    new: 2,
-                    updated: 1,
-                    unchanged: 3,
-                    failed: 0,
-                },
-            ),
-            (ArtifactType::Cursor, SyncOutcome::default()),
-        ];
-        let default_run = render_summary(&outcomes, false);
-        assert!(default_run.contains("claude"));
-        assert!(!default_run.contains("cursor"));
-
-        let explicit_run = render_summary(&outcomes, true);
-        assert!(explicit_run.contains("cursor"));
-    }
-
-    #[test]
-    fn render_summary_shows_failures_and_empty_case() {
-        let outcomes = vec![(
-            ArtifactType::Codex,
-            SyncOutcome {
-                new: 0,
-                updated: 0,
-                unchanged: 1,
-                failed: 2,
-            },
-        )];
-        let s = render_summary(&outcomes, false);
-        assert!(s.contains("2 failed"));
-
-        assert_eq!(render_summary(&[], false), "nothing to sync\n");
     }
 }

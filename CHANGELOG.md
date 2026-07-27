@@ -25,7 +25,10 @@ hand.
     change is a change to that provider's source, not to the engine.
     Sources derive through the same provider managers as `p import`
     (the `derive_*_session_with` helpers), so listing and derivation
-    always agree on provider roots.
+    always agree on provider roots. The engine draws no UI: it
+    reports through a `SyncObserver` trait (`&mut ()` for a silent
+    sync), and the stderr progress line + summary live in the
+    command layer (`cmd_cache.rs`).
   - The sync manifest at `~/.toolpath/manifest.json` maps artifact type →
     artifact id → `{path?, cache_id?, modified?, size?, synced_at}`.
     Change detection is stat-level — source mtime + size for the
