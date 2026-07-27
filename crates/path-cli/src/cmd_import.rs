@@ -218,7 +218,7 @@ fn emit(docs: &[DerivedDoc], force: bool, no_cache: bool, pretty: bool) -> Resul
             println!("{}", json);
         } else {
             // The implicit sync in `path query` fills the cache under
-            // these same ids; re-importing an artifact whose record is
+            // these same IDs; re-importing an artifact whose record is
             // still fresh is a no-op, not an exists-error.
             #[cfg(not(target_os = "emscripten"))]
             if !force
