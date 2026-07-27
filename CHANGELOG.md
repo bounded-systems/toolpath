@@ -92,6 +92,15 @@ hand.
     `ArtifactType::Copilot` with stat-only enumeration over
     `session-state/<id>/events.jsonl`, and per-session import loops
     with provenance.
+  - `path query` now syncs before it reads, scoped to the query's own
+    flags: `--source claude` syncs only claude, `--id` prefixes narrow
+    likewise, a bare cache-wide query syncs every type, and
+    `--input`-only queries never touch the cache. Output is quiet
+    unless something was actually ingested (`synced claude: 3 new, 1
+    updated`), a sync failure degrades to querying the cache as-is,
+    and `--no-sync` opts out. This is the piece that makes the cache
+    an implementation detail: a new user can run `path query` with no
+    setup and get their sessions.
 - **`toolpath-codex`** (0.6.1, extends the bump below):
   `session_id_from_stem` is public — the trailing UUID of a rollout
   filename stem (or the whole stem when it has none), the same
