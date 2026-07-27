@@ -15,7 +15,7 @@ use std::path::PathBuf;
 use toolpath::v1::Graph;
 
 #[cfg(not(target_os = "emscripten"))]
-use crate::artifact::ArtifactType;
+use crate::artifact::{ArtifactRef, ArtifactType};
 #[cfg(not(target_os = "emscripten"))]
 use crate::cache::make_id;
 use crate::cache::write_cached;
@@ -217,8 +217,29 @@ fn emit(docs: &[DerivedDoc], force: bool, no_cache: bool, pretty: bool) -> Resul
             };
             println!("{}", json);
         } else {
+            // `p cache sync` fills the cache under these same ids;
+            // re-importing an artifact whose record is still fresh is
+            // a no-op, not an exists-error.
+            #[cfg(not(target_os = "emscripten"))]
+            if !force
+                && let Some(stub) = &d.provenance
+                && crate::sync::record_is_current(stub, &d.cache_id)
+            {
+                println!("{}", crate::cache::cache_path(&d.cache_id)?.display());
+                eprintln!(
+                    "{} is already up to date (pass --force to re-derive)",
+                    d.cache_id
+                );
+                continue;
+            }
             let path = write_cached(&d.cache_id, &d.doc, force)?;
             println!("{}", path.display());
+            #[cfg(not(target_os = "emscripten"))]
+            if let Some(stub) = &d.provenance
+                && let Err(e) = crate::sync::record_artifact(stub, &d.cache_id)
+            {
+                eprintln!("warning: sync manifest not updated: {e}");
+            }
             let summary = doc_summary(&d.doc);
             eprintln!("Imported {} → {}", summary, d.cache_id);
         }
@@ -324,7 +345,17 @@ fn derive_git(
         let repo_tag = short_path_hash(&canonical.to_string_lossy());
         let inner = doc_inner_id(&doc);
         let cache_id = make_id(ArtifactType::Git.name(), &format!("{repo_tag}-{inner}"));
-        Ok(vec![DerivedDoc { cache_id, doc }])
+        Ok(vec![DerivedDoc {
+            cache_id,
+            doc,
+            provenance: Some(ArtifactRef {
+                artifact_type: ArtifactType::Git,
+                id: format!("{repo_tag}-{inner}"),
+                path: Some(canonical.to_string_lossy().into_owned()),
+                modified: None,
+                size: None,
+            }),
+        }])
     }
 }
 
@@ -381,7 +412,11 @@ fn derive_github(
         let path = toolpath_github::derive_pull_request(&owner, &repo_name, pr_number, &config)?;
         let doc = Graph::from_path(path);
         let cache_id = make_id("github", &format!("{owner}_{repo_name}-{pr_number}"));
-        Ok(vec![DerivedDoc { cache_id, doc }])
+        Ok(vec![DerivedDoc {
+            cache_id,
+            doc,
+            provenance: None,
+        }])
     }
 }
 

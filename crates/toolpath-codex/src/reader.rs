@@ -105,54 +105,10 @@ impl RolloutReader {
         }
         // Fall back to the UUID suffix of the filename stem.
         if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
-            // Filename pattern: rollout-YYYY-MM-DDThh-mm-ss-<uuid>
-            if let Some(uuid_start) = find_uuid_start(stem) {
-                return stem[uuid_start..].to_string();
-            }
-            return stem.to_string();
+            return crate::paths::session_id_from_stem(stem).to_string();
         }
         "unknown".to_string()
     }
-}
-
-/// Heuristic: look for the first hex group matching a UUIDv7 shape
-/// (8-4-4-4-12 or a prefix thereof) in the filename stem.
-fn find_uuid_start(stem: &str) -> Option<usize> {
-    // `rollout-` + `YYYY-MM-DDTHH-MM-SS-` prefix has exactly 28
-    // characters before the UUID in normal filenames.
-    // Fall back to searching for a group of 8 hex characters followed
-    // by a `-` and more hex.
-    let mut idx = 0usize;
-    let bytes = stem.as_bytes();
-    while idx + 36 <= bytes.len() {
-        if is_uuid_shape(&stem[idx..idx + 36]) {
-            return Some(idx);
-        }
-        idx += 1;
-    }
-    None
-}
-
-fn is_uuid_shape(s: &str) -> bool {
-    let b = s.as_bytes();
-    if b.len() != 36 {
-        return false;
-    }
-    for (i, c) in b.iter().enumerate() {
-        match i {
-            8 | 13 | 18 | 23 => {
-                if *c != b'-' {
-                    return false;
-                }
-            }
-            _ => {
-                if !c.is_ascii_hexdigit() {
-                    return false;
-                }
-            }
-        }
-    }
-    true
 }
 
 /// Type alias exposed for consumers to avoid re-importing `PathBuf`.
@@ -266,13 +222,6 @@ mod tests {
         let f = write_fixture(&sample_rollout());
         let size = RolloutReader::file_size(f.path()).unwrap();
         assert!(size > 0);
-    }
-
-    #[test]
-    fn is_uuid_shape_accepts_v7() {
-        assert!(is_uuid_shape("019dabc6-8fef-7681-a054-b5bb75fcb97d"));
-        assert!(!is_uuid_shape("019dabc6-8fef-7681-a054-b5bb75fcb97")); // too short
-        assert!(!is_uuid_shape("zzz"));
     }
 
     #[test]
