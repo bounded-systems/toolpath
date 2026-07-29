@@ -22,6 +22,39 @@ API. Together they broke resume for most projected sessions.
   resume, and without one the first appended entry landed on the same
   line as the last projected entry, corrupting the JSONL.
 
+## Claude Code plugin — `/path:share` and `/path:query` — 2026-07-29
+
+Adds a Claude Code plugin so users get the `path` CLI without a manual
+install: `/plugin marketplace add empathic/toolpath`, then
+`/plugin install path@toolpath`.
+
+- **`.claude-plugin/marketplace.json`** (marketplace `toolpath`) +
+  **`plugins/claude-code/`** (plugin `path` 0.1.0). Future harness
+  integrations land as siblings under `plugins/`.
+- Two slash commands: `/path:share` uploads an agent session to Pathbase
+  (defaults to the current conversation; takes a session hint,
+  `--harness`, and the `share` pass-through flags) and `/path:query`
+  answers questions about the local session cache, translating plain
+  English into jaq filters.
+- No committed binaries: both commands run through
+  `plugins/claude-code/scripts/ensure-path.sh`, which prefers an
+  existing Toolpath install, else downloads the latest GitHub release
+  (sha256-verified, same logic as `install.sh`) and installs globally to
+  `~/.local/bin` (`~/.toolpath/bin` when a foreign `path` binary claims
+  the name). Warns when the resolved CLI predates the plugin's
+  `MIN_VERSION`.
+- Command docs encode two discovered constraints: inline `!` context
+  commands and model-issued Bash must avoid `$PWD` (Claude Code's
+  permission checker rejects non-statically-analyzable commands — the
+  `sessions` helper mode exists for this), and `--project` must be
+  absolute (path-cli does not canonicalize relative values; `.` silently
+  matches nothing).
+- Tests: `scripts/test-plugin.sh` — manifest consistency plus offline
+  bootstrap tests against a stubbed curl/release (resolution order, exec
+  and sessions modes, min-version warning, clean install, foreign-name
+  fallback, checksum rejection) — wired into `quality_gates.sh` as the
+  new `plugin` gate; plugin shell scripts join the shellcheck gate.
+
 ## `path p cache sync` — incremental session ingestion — 2026-07-16
 
 Adds `path p cache sync [types…]`, the first step toward a cache that
