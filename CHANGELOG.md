@@ -32,10 +32,10 @@ install: `/plugin marketplace add empathic/toolpath`, then
   **`plugins/claude-code/`** (plugin `path` 0.1.0). Future harness
   integrations land as siblings under `plugins/`.
 - Two slash commands: `/path:share` uploads an agent session to Pathbase
-  (defaults to the current conversation; takes a session hint,
-  `--harness`, and the `share` pass-through flags) and `/path:query`
-  answers questions about the local session cache, translating plain
-  English into jaq filters.
+  (defaults to the current conversation, identified exactly via
+  `$CLAUDE_CODE_SESSION_ID`; takes a session hint, `--harness`, and the
+  `share` pass-through flags) and `/path:query` answers questions about
+  the local session cache, translating plain English into jaq filters.
 - No committed binaries: both commands run through
   `plugins/claude-code/scripts/ensure-path.sh`, which prefers an
   existing Toolpath install, else downloads the latest GitHub release

@@ -5,10 +5,12 @@
 #   ensure-path.sh                 print the absolute binary path on stdout
 #   ensure-path.sh exec <args...>  resolve, then run `path <args...>`
 #   ensure-path.sh sessions        list Claude Code sessions for the cwd (TSV)
+#   ensure-path.sh current-session print $CLAUDE_CODE_SESSION_ID, or "unknown"
 #
-# `sessions` exists so slash-command context blocks can list the current
-# project's sessions without `$PWD` in the command line — Claude Code's
-# permission checker rejects inline commands it cannot statically analyze.
+# `sessions` and `current-session` exist so slash-command context blocks can
+# reach `$PWD` / `$CLAUDE_CODE_SESSION_ID` without variables on the command
+# line — Claude Code's permission checker rejects inline commands it cannot
+# statically analyze.
 #
 # Everything except the resolved path / exec'd command output goes to stderr.
 #
@@ -188,6 +190,13 @@ install_path() {
 }
 
 main() {
+    # Needs no binary — answer before resolution so it can never block or
+    # trigger a download.
+    if [ "${1:-}" = "current-session" ]; then
+        echo "${CLAUDE_CODE_SESSION_ID:-unknown}"
+        return 0
+    fi
+
     local bin
     if ! bin="$(resolve_existing)"; then
         install_path
@@ -207,7 +216,7 @@ main() {
             echo "$bin"
             ;;
         *)
-            log "usage: ensure-path.sh [exec <args...> | sessions]"
+            log "usage: ensure-path.sh [exec <args...> | sessions | current-session]"
             exit 2
             ;;
     esac

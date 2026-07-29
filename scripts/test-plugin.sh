@@ -92,7 +92,15 @@ out="$(PATH="$STUB1:$PATH" "$ENSURE" sessions)"
     || fail "sessions mode: unexpected invocation: $out"
 ok "sessions mode lists sessions for the current directory"
 
-# 4. A binary older than MIN_VERSION warns on stderr but still resolves.
+# 4. current-session echoes the harness env var (or "unknown") and never
+#    resolves a binary — it must work with no `path` and no network.
+out="$(PATH="/usr/bin:/bin" CLAUDE_CODE_SESSION_ID="sess-123" "$ENSURE" current-session)"
+[ "$out" = "sess-123" ] || fail "current-session: expected sess-123, got $out"
+out="$(env -u CLAUDE_CODE_SESSION_ID PATH="/usr/bin:/bin" "$ENSURE" current-session)"
+[ "$out" = "unknown" ] || fail "current-session without env: expected unknown, got $out"
+ok "current-session reports the env var without resolving a binary"
+
+# 5. A binary older than MIN_VERSION warns on stderr but still resolves.
 STUB_OLD="$SANDBOX/stub-old"
 make_fake_path "$STUB_OLD/path" "0.1.0"
 err="$(PATH="$STUB_OLD:$PATH" "$ENSURE" 2>&1 >/dev/null)"

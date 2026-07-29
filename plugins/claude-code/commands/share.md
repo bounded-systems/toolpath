@@ -8,6 +8,7 @@ allowed-tools: Bash(${CLAUDE_PLUGIN_ROOT}/scripts/ensure-path.sh:*)
 
 - Toolpath CLI: !`"${CLAUDE_PLUGIN_ROOT}/scripts/ensure-path.sh"`
 - Auth: !`"${CLAUDE_PLUGIN_ROOT}/scripts/ensure-path.sh" exec auth status`
+- Current session id: !`"${CLAUDE_PLUGIN_ROOT}/scripts/ensure-path.sh" current-session`
 - Claude Code sessions for this project, newest first: !`"${CLAUDE_PLUGIN_ROOT}/scripts/ensure-path.sh" sessions`
 
 ## Your task
@@ -28,7 +29,7 @@ In every command you run, write paths as literal absolute strings — never `$PW
 
 The session list above is TSV: project, session id, timestamp, step count, first user message.
 
-- **No arguments**: share the current conversation. The list is newest-first and includes this live session, so take the first row's session id.
+- **No arguments**: share the current conversation — the "Current session id" from the context above. If it reads `unknown`, fall back to the first row of the session list (newest-first, and this live session is in it).
 - **A textual hint**: match it against the first-user-message and session-id columns. If no row matches confidently, show the closest candidates and ask which one.
 - **`--harness <name>`** (claude / gemini / codex / copilot / opencode / cursor / pi): list that harness instead with `exec p list <name> --format tsv`. For claude/gemini/pi add `--project <absolute cwd>` and read the session id from column 2; for the others the session id is column 1.
 
