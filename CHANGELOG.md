@@ -36,6 +36,9 @@ install: `/plugin marketplace add empathic/toolpath`, then
   `$CLAUDE_CODE_SESSION_ID`; takes a session hint, `--harness`, and the
   `share` pass-through flags) and `/path:query` answers questions about
   the local session cache, translating plain English into jaq filters.
+  Session listings are fetched lazily as tool output, never embedded in
+  the command context: eager embedding re-injects old session titles as
+  prompt text, where the harness re-expands `@path` file mentions.
 - No committed binaries: both commands run through
   `plugins/claude-code/scripts/ensure-path.sh`, which prefers an
   existing Toolpath install, else downloads the latest GitHub release
