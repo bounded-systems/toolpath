@@ -2,6 +2,26 @@
 
 All notable changes to the Toolpath workspace are documented here.
 
+## Projected Claude sessions are resumable again — 2026-07-30
+
+Two fixes found by live-resuming a projected session against the real
+API. Together they broke resume for most projected sessions.
+
+- **`toolpath-claude`** (0.12.2): `ContentPart::Thinking` serializes a
+  `None` signature as an **absent key** instead of `"signature": null`.
+  The Anthropic API rejects a null signature outright
+  (`400 …thinking.signature.str: Input should be a valid string`), so
+  any projected session containing thinking blocks — most real agent
+  sessions — failed on the first message after resume. An absent
+  signature is tolerated: the thinking block is dropped on replay, per
+  the documented writer contract in
+  `docs/agents/formats/claude-code/writing-compatible-jsonl.md`. Real
+  signatures still round-trip untouched.
+- **`path-cli`** (0.16.0, unreleased): the Claude JSONL export now ends
+  with a trailing newline. Claude Code appends to the projected file on
+  resume, and without one the first appended entry landed on the same
+  line as the last projected entry, corrupting the JSONL.
+
 ## `path p cache sync` — incremental session ingestion — 2026-07-16
 
 Adds `path p cache sync [types…]`, the first step toward a cache that
