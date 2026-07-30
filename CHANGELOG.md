@@ -17,7 +17,7 @@ API. Together they broke resume for most projected sessions.
   the documented writer contract in
   `docs/agents/formats/claude-code/writing-compatible-jsonl.md`. Real
   signatures still round-trip untouched.
-- **`path-cli`** (0.16.0, unreleased): the Claude JSONL export now ends
+- **`path-cli`** (0.16.1): the Claude JSONL export now ends
   with a trailing newline. Claude Code appends to the projected file on
   resume, and without one the first appended entry landed on the same
   line as the last projected entry, corrupting the JSONL.
