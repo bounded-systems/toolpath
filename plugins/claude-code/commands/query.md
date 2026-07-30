@@ -1,6 +1,6 @@
 ---
-description: Query your local agent-session history with plain English or a jaq filter
-argument-hint: "<question or jaq filter> [--source claude|codex|...]"
+description: Query your local agent-session history
+argument-hint: "question"
 allowed-tools: Bash(${CLAUDE_PLUGIN_ROOT}/scripts/ensure-path.sh:*)
 ---
 

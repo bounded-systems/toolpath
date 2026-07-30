@@ -29,7 +29,7 @@ install: `/plugin marketplace add empathic/toolpath`, then
 `/plugin install path@toolpath`.
 
 - **`.claude-plugin/marketplace.json`** (marketplace `toolpath`) +
-  **`plugins/claude-code/`** (plugin `path` 0.1.3). Future harness
+  **`plugins/claude-code/`** (plugin `path` 0.1.4). Future harness
   integrations land as siblings under `plugins/`.
 - Two slash commands: `/path:share` uploads an agent session to Pathbase
   (defaults to the current conversation, identified exactly via
