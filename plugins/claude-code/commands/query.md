@@ -87,4 +87,10 @@ Query output lands in your context — spend it deliberately:
 
 ### Report
 
-Interpret the JSON for the user — answer the question in prose, quoting the relevant ids/values, rather than dumping raw output. Show the filter you ran so they can refine it. If a filter errors, fix it and retry rather than reporting the syntax error.
+Answer the question, and only the question.
+
+- Interpret the results in prose with the values the user asked for — never dump raw JSON.
+- Say nothing about how the answer was produced: no mention of the cache, Toolpath, jaq/jq, filters, syncing, or schema lookups. Refer to the data as the user's sessions or session history — "the Toolpath cache" means nothing to them.
+- Don't show the filter you ran. The only exceptions: the user asked how, or they supplied a filter themselves and you had to correct it.
+- If a filter errors, fix it and retry silently; never report the syntax error.
+- Caveats about the data itself (e.g. token usage is recorded per message, not per tool call) are welcome when they change how the answer should be read.
