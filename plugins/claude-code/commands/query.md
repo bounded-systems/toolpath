@@ -35,15 +35,23 @@ Always invoke the CLI through the wrapper (it resolves or installs the binary re
 ```
 
 - `step.actor` is `human:<name>`, `agent:<model>` (e.g. `agent:claude-opus-5`, `agent:gpt-5.2-codex`), or `tool:<harness>` (e.g. `tool:claude-code`); to filter by harness use `path.meta.source` or `--source`, not the actor.
-- `change[].structural.type` for agent sessions is one of `conversation.append` (role, text, thinking, tool_uses, token_usage, ...), `conversation.event`, `conversation.compact`, or `file.write`; git/GitHub-derived steps carry file diffs instead.
 - `dead_end` marks steps not on the ancestry of the path head (abandoned work).
-- For the full field reference run `exec kind agent-coding-session`.
+- Before a filter references structural fields, look up the schema: `exec kind` lists the bundled kinds, `exec kind agent-coding-session` prints the field reference for agent sessions. Never guess field names — a wrong guess wastes a query, and index errors can dump large values into the output.
 
 ### Scoping and freshness
 
 - `--source claude|gemini|codex|copilot|opencode|cursor|pi|git|github` narrows by harness, `--project <dir>` by project, `--kind <selector>` by path kind, `--id <cache-id>` by document; `--input <file>` queries a file without touching the cache.
 - `-r` prints raw strings (like `jq -r`); `-c` forces compact output.
 - path-cli 0.16+ auto-syncs the queried scope from the installed harnesses before running. On older versions, if results look empty or stale, fill the cache first with `exec p cache sync` (0.16+) or `exec p import claude --project <absolute cwd> --force`, and inspect it with `exec p cache ls`. Always write `--project` as a literal absolute path — `$PWD` fails the permission check, and relative paths match nothing.
+
+### Token discipline
+
+Query output lands in your context — spend it deliberately:
+
+- **Aggregate before you enumerate**: prefer counts, maxes, and `group_by` over listing steps; list rows only after an aggregate shows the interesting rows are few.
+- **Project to scalars**: never emit raw `text`/`thinking`/`before`/`after` — use `length` or `.[0:200]` slices, and cap every list with `.[:10]`.
+- **One call per question**: combine projections over the same selection into one object rather than querying the same steps twice.
+- **Repeat queries**: the first query already synced the scope — pass `--no-sync` on subsequent queries (0.16+) to skip the re-sync and its progress lines.
 
 ### Example filters
 
@@ -65,6 +73,16 @@ Always invoke the CLI through the wrapper (it resolves or installs the binary re
 
 # agent (vs. human) steps this month
 'map(select((.step.actor | startswith("agent:")) and .step.timestamp > "2026-07")) | length'
+
+# top 10 steps by input tokens
+'[.[] | {id: .step.id, doc: .cache_id, u: (first(.change[]?.structural.token_usage // empty) // null)}
+  | select(.u)] | sort_by(-(.u.input_tokens // 0)) | .[:10]
+  | map({id, doc, in: .u.input_tokens, out: .u.output_tokens})'
+
+# per-session token totals, biggest output first
+'group_by(.cache_id) | map({doc: .[0].cache_id,
+  in: ([.[] | .change[]?.structural.token_usage.input_tokens // 0] | add),
+  out: ([.[] | .change[]?.structural.token_usage.output_tokens // 0] | add)}) | sort_by(-.out) | .[:10]'
 ```
 
 ### Report
