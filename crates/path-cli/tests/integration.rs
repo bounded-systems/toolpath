@@ -904,7 +904,7 @@ fn share_records_manifest_so_sync_skips() {
 }
 
 #[test]
-fn cache_sync_parent_dir_limits_ingestion() {
+fn cache_sync_project_under_limits_ingestion() {
     let (home, _session_file) = claude_home_fixture();
     let cfg = tempfile::tempdir().unwrap();
     let project = home.path().join("proj");
@@ -912,7 +912,7 @@ fn cache_sync_parent_dir_limits_ingestion() {
     cmd()
         .env("HOME", home.path())
         .env("TOOLPATH_CONFIG_DIR", cfg.path())
-        .args(["p", "cache", "sync", "claude", "-d", "/nowhere"])
+        .args(["p", "cache", "sync", "claude", "--project-under", "/nowhere"])
         .assert()
         .success()
         .stderr(predicate::str::contains("0 new, 0 updated, 0 unchanged"));
@@ -920,7 +920,7 @@ fn cache_sync_parent_dir_limits_ingestion() {
     cmd()
         .env("HOME", home.path())
         .env("TOOLPATH_CONFIG_DIR", cfg.path())
-        .args(["p", "cache", "sync", "claude", "-d"])
+        .args(["p", "cache", "sync", "claude", "--project-under"])
         .arg(&project)
         .assert()
         .success()

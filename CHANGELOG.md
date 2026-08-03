@@ -157,9 +157,9 @@ hand.
     and `--no-sync` opts out. This is the piece that makes the cache
     an implementation detail: a new user can run `path query` with no
     setup and get their sessions.
-  - `--parent-dir <dir>` / `-d` on `p cache sync` and `path query`
-    restricts ingestion (and the query's reads) to artifacts under a
-    directory. Stat gate first, always: unchanged+cached artifacts skip
+  - `--project-under <dir>` on `p cache sync` and `path query`
+    restricts ingestion (and the query's reads) to sessions whose
+    project directory (recorded cwd) is under a directory. Stat gate first, always: unchanged+cached artifacts skip
     before any scope check; only artifacts that would cost a derive get
     the constraint, with a one-line peek for codex and copilot (whose
     cwd lives inside the session file) memoized into the manifest so it

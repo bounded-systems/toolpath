@@ -34,11 +34,12 @@ pub enum CacheOp {
         #[arg(value_enum)]
         types: Vec<crate::artifact::ArtifactType>,
 
-        /// Only ingest artifacts living under this directory (subtree
+        /// Only ingest sessions whose project directory (recorded
+        /// working directory) lies under this directory (subtree
         /// match). Out-of-scope artifacts are noted in the manifest but
         /// not derived.
-        #[arg(long, short = 'd')]
-        parent_dir: Option<PathBuf>,
+        #[arg(long)]
+        project_under: Option<PathBuf>,
     },
 }
 
@@ -47,7 +48,7 @@ pub fn run(op: CacheOp) -> Result<()> {
         CacheOp::Ls => run_ls(),
         CacheOp::Rm { id } => run_rm(&id),
         #[cfg(not(target_os = "emscripten"))]
-        CacheOp::Sync { types, parent_dir } => run_sync(types, parent_dir),
+        CacheOp::Sync { types, project_under } => run_sync(types, project_under),
     }
 }
 
@@ -76,11 +77,11 @@ fn run_rm(id: &str) -> Result<()> {
 }
 
 #[cfg(not(target_os = "emscripten"))]
-fn run_sync(types: Vec<ArtifactType>, parent_dir: Option<PathBuf>) -> Result<()> {
+fn run_sync(types: Vec<ArtifactType>, project_under: Option<PathBuf>) -> Result<()> {
     let explicit = !types.is_empty();
     let types = resolve_types(&types);
     let bundle = HarnessBundle::from_environment();
-    let outcomes = sync_bundle(&bundle, &types, parent_dir.as_deref(), &mut Progress::new())?;
+    let outcomes = sync_bundle(&bundle, &types, project_under.as_deref(), &mut Progress::new())?;
     eprint!("{}", render_summary(&outcomes, explicit));
     Ok(())
 }

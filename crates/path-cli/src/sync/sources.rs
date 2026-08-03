@@ -26,10 +26,10 @@ pub(crate) type Stamp = (Option<DateTime<Utc>>, Option<u64>);
 /// One provider, as the sync engine sees it.
 pub(crate) trait ArtifactSource {
     /// Enumerate this provider's artifacts with stat-level
-    /// fingerprints, pruning to `parent_dir` when the provider's
+    /// fingerprints, pruning to `project_under` when the provider's
     /// listing is path-keyed. Never reads session bodies. Listing
     /// errors warn and skip so one broken provider can't block a run.
-    fn enumerate(&self, parent_dir: Option<&Path>) -> Vec<ArtifactRef>;
+    fn enumerate(&self, project_under: Option<&Path>) -> Vec<ArtifactRef>;
 
     /// Stat-level fingerprint for a single artifact, resolved
     /// directly — the same stat targets as [`Self::enumerate`], so the
@@ -50,11 +50,11 @@ pub(crate) trait ArtifactSource {
         None
     }
 
-    /// Whether `dir` lies under `parent_dir` in this provider's key
+    /// Whether `dir` lies under `project_under` in this provider's key
     /// space. Providers whose keys are lossy dir encodings (claude,
     /// pi) compare in the encoded space instead of as real paths.
-    fn in_scope(&self, dir: &str, parent_dir: &Path) -> bool {
-        dir_in_scope(dir, parent_dir)
+    fn in_scope(&self, dir: &str, project_under: &Path) -> bool {
+        dir_in_scope(dir, project_under)
     }
 }
 
@@ -93,9 +93,9 @@ fn canonicalize_or_self(p: &Path) -> PathBuf {
 /// Subtree check for a real filesystem path. Canonicalizes both
 /// sides, but also accepts the raw parent so a not-yet-resolvable
 /// constraint (or an unresolvable dir) still matches literally.
-fn dir_in_scope(dir: &str, parent_dir: &Path) -> bool {
+fn dir_in_scope(dir: &str, project_under: &Path) -> bool {
     let d = canonicalize_or_self(Path::new(dir));
-    d.starts_with(canonicalize_or_self(parent_dir)) || d.starts_with(parent_dir)
+    d.starts_with(canonicalize_or_self(project_under)) || d.starts_with(project_under)
 }
 
 // ── claude ─────────────────────────────────────────────────────────
@@ -108,7 +108,7 @@ impl ArtifactSource for ClaudeSource<'_> {
     /// segment and its id is rotation-stable; the fingerprint covers
     /// the whole chain (see `claude_chain_stamp`) because appends land
     /// in the newest segment, not the head file.
-    fn enumerate(&self, parent_dir: Option<&Path>) -> Vec<ArtifactRef> {
+    fn enumerate(&self, project_under: Option<&Path>) -> Vec<ArtifactRef> {
         let mut out = Vec::new();
         let projects = match self.0.list_projects() {
             Ok(ps) => ps,
@@ -119,8 +119,8 @@ impl ArtifactSource for ClaudeSource<'_> {
             }
         };
         for project in projects {
-            if let Some(parent_dir) = parent_dir
-                && !claude_project_in_scope(&project, parent_dir)
+            if let Some(project_under) = project_under
+                && !claude_project_in_scope(&project, project_under)
             {
                 continue;
             }
@@ -153,8 +153,8 @@ impl ArtifactSource for ClaudeSource<'_> {
         derive::derive_claude_session_with(self.0, require_path(artifact)?, &artifact.id)
     }
 
-    fn in_scope(&self, dir: &str, parent_dir: &Path) -> bool {
-        claude_project_in_scope(dir, parent_dir)
+    fn in_scope(&self, dir: &str, project_under: &Path) -> bool {
+        claude_project_in_scope(dir, project_under)
     }
 }
 
@@ -162,14 +162,14 @@ impl ArtifactSource for ClaudeSource<'_> {
 /// became '-', and un-sanitizing only restores '/'. Comparing real
 /// paths therefore misfilters any project containing '.' or '_';
 /// compare in slug space instead, where '/' boundaries are '-'.
-fn claude_project_in_scope(project: &str, parent_dir: &Path) -> bool {
+fn claude_project_in_scope(project: &str, project_under: &Path) -> bool {
     fn slug(s: &str) -> String {
         s.replace(['/', '_', '.'], "-")
     }
     let p = slug(project);
     [
-        slug(&parent_dir.to_string_lossy()),
-        slug(&canonicalize_or_self(parent_dir).to_string_lossy()),
+        slug(&project_under.to_string_lossy()),
+        slug(&canonicalize_or_self(project_under).to_string_lossy()),
     ]
     .iter()
     .any(|parent| p == *parent || p.starts_with(&format!("{parent}-")))
@@ -183,7 +183,7 @@ impl ArtifactSource for GeminiSource<'_> {
     /// Session entries via a bounded identity peek (`toolpath-gemini`
     /// reads at most the first 4 KiB of a main file); the fingerprint
     /// stats the main file (or the orphan sub-agent directory).
-    fn enumerate(&self, parent_dir: Option<&Path>) -> Vec<ArtifactRef> {
+    fn enumerate(&self, project_under: Option<&Path>) -> Vec<ArtifactRef> {
         let mut out = Vec::new();
         let projects = match self.0.list_projects() {
             Ok(ps) => ps,
@@ -194,8 +194,8 @@ impl ArtifactSource for GeminiSource<'_> {
             }
         };
         for project in projects {
-            if let Some(parent_dir) = parent_dir
-                && !dir_in_scope(&project, parent_dir)
+            if let Some(project_under) = project_under
+                && !dir_in_scope(&project, project_under)
             {
                 continue;
             }
@@ -241,7 +241,7 @@ impl ArtifactSource for CodexSource<'_> {
     /// Rollout files, stat-only. The artifact id is the trailing UUID of
     /// the filename stem (`rollout-<timestamp>-<uuid>`); `read_session`
     /// accepts either the UUID or the full stem, so the fallback is safe.
-    fn enumerate(&self, _parent_dir: Option<&Path>) -> Vec<ArtifactRef> {
+    fn enumerate(&self, _project_under: Option<&Path>) -> Vec<ArtifactRef> {
         let mut out = Vec::new();
         let files = match self.0.io().list_rollout_files() {
             Ok(f) => f,
@@ -297,7 +297,7 @@ struct OpencodeSource<'a>(&'a toolpath_opencode::OpencodeConvo);
 impl ArtifactSource for OpencodeSource<'_> {
     /// One header-only `SELECT` — `time_updated` is the fingerprint; no
     /// message bodies are loaded.
-    fn enumerate(&self, _parent_dir: Option<&Path>) -> Vec<ArtifactRef> {
+    fn enumerate(&self, _project_under: Option<&Path>) -> Vec<ArtifactRef> {
         let mut out = Vec::new();
         let sessions = match self.0.io().list_sessions(None) {
             Ok(s) => s,
@@ -339,7 +339,7 @@ impl ArtifactSource for CursorSource<'_> {
     /// check) — `lastUpdatedAt` is the fingerprint. Bubble-less drafts
     /// are skipped; unlike `share`, composers without a workspace are
     /// included, since sync doesn't need to rank them by project.
-    fn enumerate(&self, _parent_dir: Option<&Path>) -> Vec<ArtifactRef> {
+    fn enumerate(&self, _project_under: Option<&Path>) -> Vec<ArtifactRef> {
         let mut out = Vec::new();
         let listings = match self.0.io().list_composers() {
             Ok(l) => l,
@@ -386,7 +386,7 @@ impl ArtifactSource for PiSource<'_> {
     /// Session files stat-only; the id comes from a one-line header
     /// peek, falling back to the filename stem's `<timestamp>_<id>`
     /// shape — the same resolution `read_session` accepts.
-    fn enumerate(&self, parent_dir: Option<&Path>) -> Vec<ArtifactRef> {
+    fn enumerate(&self, project_under: Option<&Path>) -> Vec<ArtifactRef> {
         let mut out = Vec::new();
         let projects = match self.0.list_projects() {
             Ok(ps) => ps,
@@ -397,8 +397,8 @@ impl ArtifactSource for PiSource<'_> {
             }
         };
         for project in projects {
-            if let Some(parent_dir) = parent_dir
-                && !pi_project_in_scope(&project, parent_dir)
+            if let Some(project_under) = project_under
+                && !pi_project_in_scope(&project, project_under)
             {
                 continue;
             }
@@ -451,8 +451,8 @@ impl ArtifactSource for PiSource<'_> {
         derive::derive_pi_session_with(self.0, require_path(artifact)?, &artifact.id)
     }
 
-    fn in_scope(&self, dir: &str, parent_dir: &Path) -> bool {
-        pi_project_in_scope(dir, parent_dir)
+    fn in_scope(&self, dir: &str, project_under: &Path) -> bool {
+        pi_project_in_scope(dir, project_under)
     }
 }
 
@@ -460,14 +460,14 @@ impl ArtifactSource for PiSource<'_> {
 /// every '-' to '/', so a decoded project string is wrong for any
 /// real path containing a hyphen. Compare in the encoded space,
 /// where '/' boundaries are '-'.
-fn pi_project_in_scope(project: &str, parent_dir: &Path) -> bool {
+fn pi_project_in_scope(project: &str, project_under: &Path) -> bool {
     fn enc(s: &str) -> String {
         s.replace('/', "-")
     }
     let p = enc(project);
     [
-        enc(&parent_dir.to_string_lossy()),
-        enc(&canonicalize_or_self(parent_dir).to_string_lossy()),
+        enc(&project_under.to_string_lossy()),
+        enc(&canonicalize_or_self(project_under).to_string_lossy()),
     ]
     .iter()
     .any(|parent| p == *parent || p.starts_with(&format!("{parent}-")))
@@ -482,7 +482,7 @@ impl ArtifactSource for CopilotSource<'_> {
     /// `<id>/events.jsonl` under `session-state/` (or its legacy
     /// sibling); the directory name is the id and the events file is
     /// the fingerprint target.
-    fn enumerate(&self, _parent_dir: Option<&Path>) -> Vec<ArtifactRef> {
+    fn enumerate(&self, _project_under: Option<&Path>) -> Vec<ArtifactRef> {
         let mut out = Vec::new();
         let mut seen = std::collections::HashSet::new();
         let dirs = [

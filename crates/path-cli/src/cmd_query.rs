@@ -42,10 +42,12 @@ pub struct QueryArgs {
     #[arg(long)]
     project: Option<PathBuf>,
 
-    /// Keep only paths whose base lives under this directory (subtree
-    /// match), and scope the implicit sync to it likewise.
-    #[arg(long, short = 'd')]
-    parent_dir: Option<PathBuf>,
+    /// Keep only sessions whose project directory (the path base)
+    /// lies under this directory (subtree match; the session's
+    /// recorded working directory, not the files it touched), and
+    /// scope the implicit sync to it likewise.
+    #[arg(long)]
+    project_under: Option<PathBuf>,
 
     /// Keep only paths whose meta.kind matches this selector
     /// (semver prefix, e.g. `agent-coding-session` or `…/v1.0`).
@@ -108,7 +110,7 @@ pub fn run(args: QueryArgs, pretty: bool) -> Result<()> {
         ids: args.ids,
         inputs: args.input,
         project: args.project,
-        parent_dir: args.parent_dir,
+        project_under: args.project_under,
         kind: args.kind,
     };
 
@@ -129,7 +131,7 @@ fn sync_query_scope(args: &QueryArgs) {
         return;
     }
     let bundle = crate::harness::HarnessBundle::from_environment();
-    match crate::sync::sync_bundle(&bundle, &types, args.parent_dir.as_deref(), &mut ()) {
+    match crate::sync::sync_bundle(&bundle, &types, args.project_under.as_deref(), &mut ()) {
         Ok(outcomes) => {
             for (t, o) in outcomes {
                 if o.new + o.updated + o.failed > 0 {

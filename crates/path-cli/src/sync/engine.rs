@@ -58,7 +58,7 @@ pub(crate) struct SyncOutcome {
     pub(crate) updated: usize,
     pub(crate) unchanged: usize,
     pub(crate) failed: usize,
-    /// Artifacts needing work that a `--parent-dir` constraint excluded.
+    /// Artifacts needing work that a `--project-under` constraint excluded.
     pub(crate) out_of_scope: usize,
 }
 
@@ -96,7 +96,7 @@ impl SyncObserver for () {}
 pub(crate) fn sync_bundle(
     bundle: &HarnessBundle,
     types: &[ArtifactType],
-    parent_dir: Option<&Path>,
+    project_under: Option<&Path>,
     observer: &mut dyn SyncObserver,
 ) -> Result<Vec<(ArtifactType, SyncOutcome)>> {
     let manifest = load_manifest()?;
@@ -109,7 +109,7 @@ pub(crate) fn sync_bundle(
             out.push((artifact_type, SyncOutcome::default()));
             continue;
         };
-        let artifacts = source.enumerate(parent_dir);
+        let artifacts = source.enumerate(project_under);
         let records = manifest
             .get(artifact_type.name())
             .cloned()
@@ -119,7 +119,7 @@ pub(crate) fn sync_bundle(
             artifact_type,
             &artifacts,
             &records,
-            parent_dir,
+            project_under,
             observer,
         )?;
         out.push((artifact_type, outcome));
@@ -179,7 +179,7 @@ fn sync_artifacts(
     artifact_type: ArtifactType,
     artifacts: &[ArtifactRef],
     records: &BTreeMap<String, SyncRecord>,
-    parent_dir: Option<&Path>,
+    project_under: Option<&Path>,
     observer: &mut dyn SyncObserver,
 ) -> Result<SyncOutcome> {
     let mut outcome = SyncOutcome::default();
@@ -212,7 +212,7 @@ fn sync_artifacts(
         // memoized in the record so it happens at most once per
         // artifact). The source compares in its own key space —
         // claude and pi keys are lossy dir encodings.
-        if let Some(parent_dir) = parent_dir {
+        if let Some(project_under) = project_under {
             let dir = artifact
                 .path
                 .clone()
@@ -220,7 +220,7 @@ fn sync_artifacts(
                 .or_else(|| source.peek_dir(&artifact.id));
             let in_scope = dir
                 .as_deref()
-                .is_some_and(|d| source.in_scope(d, parent_dir));
+                .is_some_and(|d| source.in_scope(d, project_under));
             if !in_scope {
                 outcome.out_of_scope += 1;
                 // Remember what we learned — but never touch the stamp
@@ -837,7 +837,7 @@ mod tests {
     }
 
     #[test]
-    fn parent_dir_scopes_path_keyed_enumeration() {
+    fn project_under_scopes_path_keyed_enumeration() {
         with_cfg(|home| {
             write_claude_session(home, "-scope-alpha", "aaaa1111-x", "In alpha");
             write_claude_session(home, "-scope-beta", "bbbb2222-x", "In beta");

@@ -30,9 +30,9 @@ pub struct Scope {
     pub inputs: Vec<String>,
     /// `--project`: keep only paths whose `base` resolves to this directory.
     pub project: Option<PathBuf>,
-    /// `--parent-dir`: keep only paths whose `base` lives under this
+    /// `--project-under`: keep only paths whose `base` lives under this
     /// directory (subtree match).
-    pub parent_dir: Option<PathBuf>,
+    pub project_under: Option<PathBuf>,
     /// `--kind`: keep only paths whose `meta.kind` matches this selector.
     pub kind: Option<String>,
 }
@@ -97,7 +97,7 @@ impl DocSource {
 fn stream_files(scope: &Scope, emit: &mut dyn FnMut(Val) -> Result<()>) -> Result<()> {
     let kind_sel = scope.kind.as_deref().map(kinds::parse_kind_selector);
     let project = scope.project.as_deref().map(canonicalize_or_self);
-    let parent_dir = scope.parent_dir.as_deref().map(canonicalize_or_self);
+    let project_under = scope.project_under.as_deref().map(canonicalize_or_self);
 
     for src in select_files(scope)? {
         let graph = match read_source(&src) {
@@ -119,7 +119,7 @@ fn stream_files(scope: &Scope, emit: &mut dyn FnMut(Val) -> Result<()>) -> Resul
             &graph,
             kind_sel.as_ref(),
             project.as_deref(),
-            parent_dir.as_deref(),
+            project_under.as_deref(),
             &mut steps,
         );
         drop(graph);
@@ -236,7 +236,7 @@ fn wrap_graph(
     graph: &Graph,
     kind_sel: Option<&KindSelector>,
     project: Option<&FsPath>,
-    parent_dir: Option<&FsPath>,
+    project_under: Option<&FsPath>,
     out: &mut Vec<serde_json::Value>,
 ) {
     for entry in &graph.paths {
@@ -255,8 +255,8 @@ fn wrap_graph(
         {
             continue;
         }
-        if let Some(dir) = parent_dir
-            && !path_matches_parent_dir(path, dir)
+        if let Some(dir) = project_under
+            && !path_matches_project_under(path, dir)
         {
             continue;
         }
@@ -321,8 +321,8 @@ fn path_matches_project(path: &Path, project: &FsPath) -> bool {
     base_fs_path(path).is_some_and(|p| p == project)
 }
 
-fn path_matches_parent_dir(path: &Path, parent_dir: &FsPath) -> bool {
-    base_fs_path(path).is_some_and(|p| p.starts_with(parent_dir))
+fn path_matches_project_under(path: &Path, project_under: &FsPath) -> bool {
+    base_fs_path(path).is_some_and(|p| p.starts_with(project_under))
 }
 
 fn base_fs_path(path: &Path) -> Option<PathBuf> {
@@ -462,7 +462,7 @@ mod tests {
             ids: vec![],
             inputs: vec!["/tmp/some.json".to_string(), "-".to_string()],
             project: None,
-            parent_dir: None,
+            project_under: None,
             kind: None,
         };
         let files = select_files(&scope).unwrap();
