@@ -6,6 +6,8 @@
 
 use anyhow::Result;
 use clap::Subcommand;
+#[cfg(not(target_os = "emscripten"))]
+use std::path::PathBuf;
 
 use crate::cache::{list_cached, remove_cached};
 #[cfg(not(target_os = "emscripten"))]
@@ -31,6 +33,12 @@ pub enum CacheOp {
         /// Artifact types to sync (default: every agent harness)
         #[arg(value_enum)]
         types: Vec<crate::artifact::ArtifactType>,
+
+        /// Only ingest artifacts living under this directory (subtree
+        /// match). Out-of-scope artifacts are noted in the manifest but
+        /// not derived.
+        #[arg(long, short = 'd')]
+        parent_dir: Option<PathBuf>,
     },
 }
 
@@ -39,7 +47,7 @@ pub fn run(op: CacheOp) -> Result<()> {
         CacheOp::Ls => run_ls(),
         CacheOp::Rm { id } => run_rm(&id),
         #[cfg(not(target_os = "emscripten"))]
-        CacheOp::Sync { types } => run_sync(types),
+        CacheOp::Sync { types, parent_dir } => run_sync(types, parent_dir),
     }
 }
 
@@ -68,11 +76,11 @@ fn run_rm(id: &str) -> Result<()> {
 }
 
 #[cfg(not(target_os = "emscripten"))]
-fn run_sync(types: Vec<ArtifactType>) -> Result<()> {
+fn run_sync(types: Vec<ArtifactType>, parent_dir: Option<PathBuf>) -> Result<()> {
     let explicit = !types.is_empty();
     let types = resolve_types(&types);
     let bundle = HarnessBundle::from_environment();
-    let outcomes = sync_bundle(&bundle, &types, &mut Progress::new())?;
+    let outcomes = sync_bundle(&bundle, &types, parent_dir.as_deref(), &mut Progress::new())?;
     eprint!("{}", render_summary(&outcomes, explicit));
     Ok(())
 }
@@ -190,6 +198,9 @@ fn render_summary(outcomes: &[(ArtifactType, SyncOutcome)], explicit: bool) -> S
         if o.failed > 0 {
             s.push_str(&format!(", {} failed", o.failed));
         }
+        if o.out_of_scope > 0 {
+            s.push_str(&format!(", {} out of scope", o.out_of_scope));
+        }
         s.push('\n');
     }
     if s.is_empty() {
@@ -238,6 +249,7 @@ mod tests {
                     updated: 1,
                     unchanged: 3,
                     failed: 0,
+                    out_of_scope: 0,
                 },
             ),
             (ArtifactType::Cursor, SyncOutcome::default()),
@@ -259,6 +271,7 @@ mod tests {
                 updated: 0,
                 unchanged: 1,
                 failed: 2,
+                out_of_scope: 0,
             },
         )];
         let s = render_summary(&outcomes, false);
