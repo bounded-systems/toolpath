@@ -157,6 +157,20 @@ hand.
     and `--no-sync` opts out. This is the piece that makes the cache
     an implementation detail: a new user can run `path query` with no
     setup and get their sessions.
+  - `--project-under <dir>` on `p cache sync` and `path query`
+    restricts ingestion (and the query's reads) to sessions whose
+    project directory (recorded cwd) is under a directory. Stat gate first, always: unchanged+cached artifacts skip
+    before any scope check; only artifacts that would cost a derive get
+    the constraint, with a one-line peek for codex and copilot (whose
+    cwd lives inside the session file) memoized into the manifest so it
+    happens at most once per artifact — and a derive never clobbers the
+    memoized peeked cwd. The copilot peek tolerates `session.start`
+    anywhere in the first lines and top-level cwd keys. Claude project
+    matching happens in slug space (its dir slugs are lossy), and pi
+    project scoping compares in its dir-encoded space so hyphenated
+    paths match. Out-of-scope artifacts are noted in the manifest
+    ("known, not materialized") but not derived, tallied separately
+    (`N out of scope`), and never touch a materialized record's stamp.
 - **`toolpath-codex`** (0.6.1, extends the bump below):
   `session_id_from_stem` is public — the trailing UUID of a rollout
   filename stem (or the whole stem when it has none), the same
