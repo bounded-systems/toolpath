@@ -187,6 +187,20 @@ writes to `~/.toolpath/credentials.json` (0600, parent dir 0700) and sends as
 overrides the credentials directory. Server URL comes from `--url`, then
 `$PATHBASE_URL`, then `https://pathbase.dev`.
 
+`$PATHBASE_TOKEN` supplies that bearer directly, for callers that cannot
+complete a grant-code login: CI jobs and coding-agent sessions have no browser
+and no human to paste the 8-character code, but they do have a secret store.
+When it is set and non-blank it takes precedence over `credentials.json`
+(mirroring how `$PATHBASE_URL` overrides the default server) and every
+Pathbase command works as if a login had happened. A blank value is treated as
+unset, so `PATHBASE_TOKEN="$UNSET_SECRET"` falls back to stored credentials
+rather than sending an empty bearer. Because an exported variable is ambient
+in a way a file is not, the source is stated rather than assumed: uploads print
+`note: authenticating with the $PATHBASE_TOKEN credential`, `path auth status`
+names the credential in play and flags a shadowed `credentials.json`, and
+`path auth logout` — which clears the file only, since there is no logging out
+of a variable — says when a token is still exported.
+
 The CLI redeem endpoint (`POST /api/v1/auth/cli/redeem`) is real and works
 in production but is **not listed in `schema/pathbase-openapi.json`** — the
 OpenAPI spec only covers the documented surface. Don't be surprised that

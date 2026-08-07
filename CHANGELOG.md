@@ -2,6 +2,29 @@
 
 All notable changes to the Toolpath workspace are documented here.
 
+## `$PATHBASE_TOKEN` — Pathbase auth without a browser — 2026-08-07
+
+`path auth login` is grant-code only: an 8-character one-time code copied
+from `<server>/auth/cli`. That is fine for a human at a terminal and
+impossible for everyone else — a CI job or a coding-agent session has no
+browser and nobody to paste, so `path share` could not run unattended at
+all, even though the API has accepted `pat_…` bearer tokens all along.
+
+- **`path-cli`**: `$PATHBASE_TOKEN` supplies that bearer directly. When
+  set and non-blank it takes precedence over `credentials.json` — the
+  same precedence `$PATHBASE_URL` has over the default server — and
+  `share`, `p export pathbase`, `p import pathbase`, `resume` and
+  `auth whoami` all work as if a login had happened. A blank value is
+  treated as unset, so `PATHBASE_TOKEN="$UNSET_SECRET"` falls back to
+  stored credentials instead of sending an empty bearer.
+- The credential in play is **stated, not assumed**, because an exported
+  variable is ambient in a way a file on disk is not: uploads print
+  `note: authenticating with the $PATHBASE_TOKEN credential`,
+  `path auth status` names the source and flags a `credentials.json`
+  that the variable is shadowing, and `path auth logout` — which clears
+  the file only, there being no logging out of a variable — says when a
+  token is still exported.
+
 ## Projected Claude sessions are resumable again — 2026-07-30
 
 Two fixes found by live-resuming a projected session against the real

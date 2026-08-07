@@ -1890,13 +1890,13 @@ fn run_pathbase(args: PathbaseExportArgs) -> Result<()> {
 /// `cmd_share`'s pre-flight resolution agrees with the eventual upload.
 #[cfg(not(target_os = "emscripten"))]
 pub(crate) fn resolve_upload_base_url(args: &PathbaseUploadArgs) -> String {
-    use crate::cmd_pathbase::{credentials_path, load_session, resolve_url};
+    use crate::cmd_pathbase::{credentials_path, resolve_session, resolve_url};
 
     if let Some(u) = &args.url {
         return resolve_url(Some(u.clone()));
     }
     if let Ok(path) = credentials_path()
-        && let Ok(Some(s)) = load_session(&path)
+        && let Ok(Some(s)) = resolve_session(&path)
     {
         return s.url;
     }
