@@ -912,7 +912,14 @@ fn cache_sync_project_under_limits_ingestion() {
     cmd()
         .env("HOME", home.path())
         .env("TOOLPATH_CONFIG_DIR", cfg.path())
-        .args(["p", "cache", "sync", "claude", "--project-under", "/nowhere"])
+        .args([
+            "p",
+            "cache",
+            "sync",
+            "claude",
+            "--project-under",
+            "/nowhere",
+        ])
         .assert()
         .success()
         .stderr(predicate::str::contains("0 new, 0 updated, 0 unchanged"));

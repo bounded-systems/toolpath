@@ -48,7 +48,10 @@ pub fn run(op: CacheOp) -> Result<()> {
         CacheOp::Ls => run_ls(),
         CacheOp::Rm { id } => run_rm(&id),
         #[cfg(not(target_os = "emscripten"))]
-        CacheOp::Sync { types, project_under } => run_sync(types, project_under),
+        CacheOp::Sync {
+            types,
+            project_under,
+        } => run_sync(types, project_under),
     }
 }
 
@@ -81,7 +84,12 @@ fn run_sync(types: Vec<ArtifactType>, project_under: Option<PathBuf>) -> Result<
     let explicit = !types.is_empty();
     let types = resolve_types(&types);
     let bundle = HarnessBundle::from_environment();
-    let outcomes = sync_bundle(&bundle, &types, project_under.as_deref(), &mut Progress::new())?;
+    let outcomes = sync_bundle(
+        &bundle,
+        &types,
+        project_under.as_deref(),
+        &mut Progress::new(),
+    )?;
     eprint!("{}", render_summary(&outcomes, explicit));
     Ok(())
 }
