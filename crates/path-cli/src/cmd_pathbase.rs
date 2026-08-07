@@ -18,6 +18,15 @@ use crate::config::config_dir;
 pub(crate) const CREDENTIALS_FILE: &str = "credentials.json";
 pub(crate) const DEFAULT_URL: &str = "https://pathbase.dev";
 pub(crate) const PATHBASE_URL_ENV: &str = "PATHBASE_URL";
+/// Bearer token supplied by the environment instead of `path auth login`.
+///
+/// `login` is grant-code only — an 8-character one-time code copied from
+/// `<server>/auth/cli` — which no unattended caller can complete: CI jobs and
+/// coding-agent sessions have no browser and no human to paste. They *do* have
+/// a secret store, so this reads the same `pat_…` bearer the API already
+/// accepts straight from the environment, and every Pathbase call then works
+/// exactly as if a login had written `credentials.json`.
+pub(crate) const PATHBASE_TOKEN_ENV: &str = "PATHBASE_TOKEN";
 
 /// JSON blob persisted at `credentials.json`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -265,26 +274,38 @@ pub(crate) fn preflight_auth(base_url: &str, anon: bool, needs_auth: bool) -> Re
     if anon {
         return Ok(AuthMode::Anon);
     }
-    let stored = load_session(&credentials_path()?)?;
+    let stored = resolve_session(&credentials_path()?)?;
 
     let go_anon = stored.is_none() && !needs_auth;
     if go_anon {
         eprintln!(
             "note: not logged in — uploading anonymously (not listable). \
-             Run `path auth login --url {base_url}` for a listable upload."
+             Run `path auth login --url {base_url}` for a listable upload, \
+             or set {PATHBASE_TOKEN_ENV} to upload unattended."
         );
         return Ok(AuthMode::Anon);
     }
 
     let session = match stored {
         Some(s) => s,
-        None => bail!("Not logged in. Run `path auth login` or pass `--anon`."),
+        None => bail!(
+            "Not logged in. Run `path auth login`, set {PATHBASE_TOKEN_ENV}, or pass `--anon`."
+        ),
     };
+
+    // Name the credential whenever it came from the environment. The stored
+    // file is something the user chose once and can inspect; an exported
+    // variable is ambient, and silently uploading under it is the surprise.
+    if session.source == SessionSource::Env {
+        eprintln!("note: authenticating with {}.", session.source.describe());
+    }
 
     if host_of(base_url) != host_of(&session.url) {
         eprintln!(
-            "warning: stored credentials are for {}, but you're uploading to {}.",
-            session.url, base_url
+            "warning: {} are for {}, but you're uploading to {}.",
+            session.source.describe(),
+            session.url,
+            base_url
         );
     }
 
@@ -689,6 +710,87 @@ pub(crate) fn load_session(path: &Path) -> Result<Option<StoredSession>> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(e) => Err(anyhow!("read {}: {e}", path.display())),
     }
+}
+
+/// Where the bearer token in a [`Session`] came from.
+///
+/// Kept so commands can *say* which credential they are acting with. An
+/// ambient env var is invisible in a way a file on disk is not: "why did this
+/// upload land under a different account" is the confusing case, and it is
+/// cheap to pre-empt by naming the source wherever the session is used.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SessionSource {
+    /// `PATHBASE_TOKEN` in the environment — the unattended path.
+    Env,
+    /// `credentials.json`, written by `path auth login`.
+    File,
+}
+
+impl SessionSource {
+    /// Human-facing name, for messages that tell the user which credential
+    /// is in play.
+    pub(crate) fn describe(self) -> &'static str {
+        match self {
+            SessionSource::Env => "the $PATHBASE_TOKEN credential",
+            SessionSource::File => "the stored credentials file",
+        }
+    }
+}
+
+/// A resolved Pathbase session: where to talk, and what bearer to present.
+///
+/// Unlike [`StoredSession`] this is not a serde shape — it is what commands
+/// actually need, and it can come from either credential source. `user` is
+/// `None` for an env token because the environment carries no identity; every
+/// caller that needs one resolves it with [`api_me`] against the server, which
+/// is the authoritative answer anyway.
+#[derive(Debug, Clone)]
+pub(crate) struct Session {
+    pub url: String,
+    pub token: String,
+    pub user: Option<User>,
+    pub source: SessionSource,
+}
+
+/// Read `PATHBASE_TOKEN`, treating unset and blank alike.
+///
+/// Blank must not count as a credential: `PATHBASE_TOKEN="$UNSET_SECRET"` in a
+/// CI file exports an empty string, and taking that as a session would send
+/// `Authorization: Bearer ` and fail at the server with a confusing 401
+/// instead of falling through to the stored credentials that would have worked.
+fn env_token() -> Option<String> {
+    let raw = std::env::var(PATHBASE_TOKEN_ENV).ok()?;
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+/// The session a command should act with: `PATHBASE_TOKEN` if set, otherwise
+/// the stored credentials file.
+///
+/// The env var wins deliberately, mirroring how `PATHBASE_URL` overrides the
+/// default server: the ambient environment is the more specific instruction,
+/// and the unattended caller usually cannot remove a `credentials.json` it did
+/// not write. `path auth logout` stays file-only — there is no logging out of
+/// a variable — and says so when a token is still exported.
+pub(crate) fn resolve_session(path: &Path) -> Result<Option<Session>> {
+    if let Some(token) = env_token() {
+        return Ok(Some(Session {
+            url: resolve_url(None),
+            token,
+            user: None,
+            source: SessionSource::Env,
+        }));
+    }
+    Ok(load_session(path)?.map(|s| Session {
+        url: s.url,
+        token: s.token,
+        user: Some(s.user),
+        source: SessionSource::File,
+    }))
 }
 
 pub(crate) fn clear_session(path: &Path) -> Result<()> {
@@ -1198,39 +1300,127 @@ pub(crate) mod tests {
     /// only exclude EnvGuard users from each other while still racing those
     /// modules. Drop restores the prior value.
     struct EnvGuard {
-        key: String,
-        prior: Option<std::ffi::OsString>,
+        prior: Vec<(String, Option<std::ffi::OsString>)>,
         _lock: std::sync::MutexGuard<'static, ()>,
     }
     impl EnvGuard {
         fn set(key: &str, val: &str) -> Self {
+            Self::set_all(&[(key, Some(val))])
+        }
+
+        /// Set (or, for `None`, unset) several vars under ONE guard.
+        ///
+        /// Two `EnvGuard`s in a single test would deadlock — the lock is a
+        /// plain non-reentrant `Mutex` — so a test that pins more than one
+        /// variable has to do it in one call. Pinning to `None` matters as
+        /// much as setting: a test asserting the default server must not
+        /// inherit a developer's exported `PATHBASE_URL`.
+        fn set_all(vars: &[(&str, Option<&str>)]) -> Self {
             // PoisonError on a previously-panicked test still gives us a
             // valid lock — recover the inner guard and proceed.
             let lock = crate::config::TEST_ENV_LOCK
                 .lock()
                 .unwrap_or_else(|e| e.into_inner());
-            let prior = std::env::var_os(key);
-            // SAFETY: TEST_ENV_LOCK serializes this against every other
-            // env-touching test in the crate, so no concurrent
-            // set_var/var_os on the shared environ can occur.
-            unsafe {
-                std::env::set_var(key, val);
+            let mut prior = Vec::with_capacity(vars.len());
+            for (key, val) in vars {
+                prior.push(((*key).to_string(), std::env::var_os(key)));
+                // SAFETY: TEST_ENV_LOCK serializes this against every other
+                // env-touching test in the crate, so no concurrent
+                // set_var/var_os on the shared environ can occur.
+                unsafe {
+                    match val {
+                        Some(v) => std::env::set_var(key, v),
+                        None => std::env::remove_var(key),
+                    }
+                }
             }
-            Self {
-                key: key.to_string(),
-                prior,
-                _lock: lock,
-            }
+            Self { prior, _lock: lock }
         }
     }
     impl Drop for EnvGuard {
         fn drop(&mut self) {
             unsafe {
-                match &self.prior {
-                    Some(v) => std::env::set_var(&self.key, v),
-                    None => std::env::remove_var(&self.key),
+                for (key, prior) in &self.prior {
+                    match prior {
+                        Some(v) => std::env::set_var(key, v),
+                        None => std::env::remove_var(key),
+                    }
                 }
             }
         }
+    }
+
+    // ── PATHBASE_TOKEN: the unattended credential ───────────────────────
+
+    #[test]
+    fn resolve_session_prefers_env_token_over_stored_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("credentials.json");
+        store_session(&path, &sample()).unwrap();
+
+        let _g = EnvGuard::set_all(&[
+            (PATHBASE_TOKEN_ENV, Some("pat_from_env")),
+            (PATHBASE_URL_ENV, None),
+        ]);
+
+        let s = resolve_session(&path).unwrap().unwrap();
+        assert_eq!(s.token, "pat_from_env");
+        assert_eq!(s.source, SessionSource::Env);
+        assert_eq!(s.url, DEFAULT_URL);
+        // The environment carries a bearer, not an identity — `api_me` is the
+        // only place the username can honestly come from.
+        assert!(s.user.is_none());
+    }
+
+    #[test]
+    fn resolve_session_env_token_honours_pathbase_url() {
+        let _g = EnvGuard::set_all(&[
+            (PATHBASE_TOKEN_ENV, Some("pat_from_env")),
+            (PATHBASE_URL_ENV, Some("https://pathbase.example.com/")),
+        ]);
+
+        let s = resolve_session(Path::new("/nonexistent/credentials.json"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(s.url, "https://pathbase.example.com");
+    }
+
+    #[test]
+    fn resolve_session_trims_whitespace_around_env_token() {
+        let _g = EnvGuard::set_all(&[
+            (PATHBASE_TOKEN_ENV, Some("  pat_padded\n")),
+            (PATHBASE_URL_ENV, None),
+        ]);
+
+        let s = resolve_session(Path::new("/nonexistent/credentials.json"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(s.token, "pat_padded");
+    }
+
+    /// `PATHBASE_TOKEN="$SECRET_THAT_IS_UNSET"` exports an empty string. That
+    /// must not shadow working stored credentials with a guaranteed 401.
+    #[test]
+    fn resolve_session_ignores_blank_env_token_and_falls_back_to_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("credentials.json");
+        store_session(&path, &sample()).unwrap();
+
+        let _g = EnvGuard::set_all(&[(PATHBASE_TOKEN_ENV, Some("   "))]);
+
+        let s = resolve_session(&path).unwrap().unwrap();
+        assert_eq!(s.source, SessionSource::File);
+        assert_eq!(s.token, "tok");
+        assert_eq!(s.user.unwrap().username, "alice");
+    }
+
+    #[test]
+    fn resolve_session_is_none_without_env_token_or_file() {
+        let _g = EnvGuard::set_all(&[(PATHBASE_TOKEN_ENV, None)]);
+        assert!(
+            resolve_session(Path::new("/nonexistent/credentials.json"))
+                .unwrap()
+                .is_none()
+        );
     }
 }
